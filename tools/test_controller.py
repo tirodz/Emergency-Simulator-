@@ -151,7 +151,12 @@ def test_send_gate() -> None:
 
 
 def test_adb_probe_rejects_a_non_working_executable() -> None:
-    """A file that exists but cannot run must not be reported as a usable adb."""
+    """A file that exists but cannot run must not be reported as a usable adb.
+
+    The property under test is that a present-but-unusable executable is rejected and the reason is
+    reported. The *reason* is platform-specific -- a POSIX host gets the program's own exit status,
+    Windows gets an OS-level load failure -- so the assertions here must not depend on either.
+    """
     print("adb probe")
     import os
     import tempfile
@@ -159,17 +164,28 @@ def test_adb_probe_rejects_a_non_working_executable() -> None:
     from app.runtime import probe_adb
 
     with tempfile.TemporaryDirectory() as tmp:
-        script = Path(tmp) / "fake-adb"
-        script.write_text("#!/bin/sh\necho 'error while loading shared libraries' >&2\nexit 127\n")
-        os.chmod(script, 0o755)
-        cand = probe_adb(str(script))
-        check("non-working executable is not usable", not cand.works)
+        not_a_program = Path(tmp) / "fake-adb"
+        not_a_program.write_text("this is not an executable\n")
+        cand = probe_adb(str(not_a_program))
+        check("a file that is not a program is not usable", not cand.works)
         check("the failure is reported", bool(cand.problem))
-        check("the exit status is captured",
-              bool(cand.problem and "127" in cand.problem))
+
+        # Where the host can execute a script, use one that fails on its own terms and assert the
+        # exit status is captured. Windows cannot run a shebang script, so this part is POSIX-only.
+        if os.name != "nt":
+            script = Path(tmp) / "failing-adb"
+            script.write_text("#!/bin/sh\necho 'error while loading shared libraries' >&2\nexit 127\n")
+            os.chmod(script, 0o755)
+            failing = probe_adb(str(script))
+            check("a failing executable is not usable", not failing.works)
+            check("the exit status is captured",
+                  bool(failing.problem and "127" in failing.problem))
+            check("the program's own output is captured",
+                  bool(failing.problem and "shared libraries" in failing.problem))
 
         missing = probe_adb(str(Path(tmp) / "does-not-exist"))
         check("a missing file is not usable", not missing.works)
+        check("a missing file says so", bool(missing.problem and "not found" in missing.problem))
 
 
 def test_runtime_layout_finds_the_injector() -> None:
