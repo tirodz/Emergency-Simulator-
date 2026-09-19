@@ -219,7 +219,7 @@ def main() -> int:
     ui._render_result(blocked)
     pump(root, 0.05)
     check("a blocked send is reported as a failure",
-          ui.result_pill._value.cget("text") == "DUPLICATE_SEND_BLOCKED")
+          ui.result_pill._value.cget("text") == "DUPLICATE SEND BLOCKED")
     check("a blocked send is coloured as an error",
           ui.result_pill._value.cget("fg") == ERR)
     check("a blocked send explains itself to the operator",

@@ -65,8 +65,8 @@ _FAILURE_HINTS = {
         "The message reached the receiver but was filtered. Check the device's test-mode settings."
     ),
     "DUPLICATE_SEND_BLOCKED": (
-        "An earlier alert may still be outstanding. Android queues alerts; dismiss it on the device "
-        "and acknowledge it here before sending again."
+        "An earlier alert may still be outstanding. Android queues alerts, so sending again would "
+        "stack a second dialog; dismiss the alert on the device and acknowledge it here first."
     ),
     "NO_ROOT": (
         "This controlled test path requires root/system-level authority. The framework rejects the "
