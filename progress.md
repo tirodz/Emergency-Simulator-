@@ -173,9 +173,7 @@ Do **not** start the GUI, the Wi-Fi transport, or the multi-device fan-out befor
 | `87af9da` | docs: compare Android versions and OEM divergence |
 | `0f918a9` | docs: define transport options and safety boundaries |
 | `09754a0` | docs: record feasibility findings, unknowns and experiment plan |
-| _(this commit)_ | docs: add progress and feasibility report |
-
-Not pushed: the brief says to push only if the repository is configured for it, and the next phase
-will add device results. Push explicitly in a later session if desired.
+| `0ac265b` | docs: add progress record and feasibility report |
+| `6c961f6` | docs: answer the project's 68 critical questions |
 
 **Source-analysis phase complete. Ready for the first controlled experiment.**
