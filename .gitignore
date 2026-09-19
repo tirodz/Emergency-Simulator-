@@ -1,10 +1,19 @@
 # Build outputs
-android/alertinject/out/
 build/
 dist/
+
+# Internal staging for the Windows build (Platform Tools are downloaded at build time and are not
+# committed: they are a third-party binary distribution).
+packaging/platform-tools/
 
 # Runtime
 logs/
 __pycache__/
 *.pyc
 .venv/
+
+# The Android injector is a build output of the Android SDK, but the *committed* dex jar is a build
+# input for the desktop release: packaging it is what lets a user run the tool without a JDK or the
+# Android SDK. android/alertinject/.gitignore un-ignores that one file for exactly this reason.
+!/android/alertinject/out/
+!/android/alertinject/out/alertinject.jar

@@ -12,6 +12,27 @@ permissions:
   contents: read
 
 jobs:
+  ui:
+    name: Desktop interface tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install tkinter and a virtual display
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-tk xvfb
+
+      - name: Run the interface tests
+        # The real widget tree is built and driven under Xvfb; no UI mocks.
+        run: xvfb-run -a python3 tools/test_ui.py
+
   build:
     name: Build Emergency-Simulator.exe
     runs-on: windows-latest
@@ -37,6 +58,35 @@ jobs:
         # These need no device and no display; they assert the invariants that must not regress.
         run: python tools/test_controller.py
 
+      - name: Verify the committed injector is present
+        shell: pwsh
+        run: |
+          $jar = "android/alertinject/out/alertinject.jar"
+          if (-not (Test-Path $jar)) {
+            Write-Error "The Android injector is not in the repository. Without it a build cannot drive a device."
+            exit 1
+          }
+          Write-Host ("Injector: {0:N0} bytes" -f (Get-Item $jar).Length)
+
+      - name: Stage Android Platform Tools
+        # Downloaded from Google's official repository so the artifact carries its own adb and is
+        # reproducible: the copy that is tested is the copy that ships.
+        shell: pwsh
+        run: |
+          $stage = "packaging/platform-tools"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $zip = "$env:TEMP\platform-tools.zip"
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:TEMP\pt" -Force
+          Copy-Item "$env:TEMP\pt\platform-tools\*" -Destination $stage -Recurse -Force
+          foreach ($f in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll")) {
+            if (-not (Test-Path (Join-Path $stage $f))) {
+              Write-Error "$f is missing from the staged Platform Tools"
+              exit 1
+            }
+          }
+          & "$stage\adb.exe" version
+
       - name: Build the executable
         run: pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec
 
@@ -49,6 +99,33 @@ jobs:
             exit 1
           }
           Get-Item $exe | Format-List Name, Length, LastWriteTime
+
+      - name: Verify the executable resolves its bundled resources
+        # The point of the self-test: a build can succeed and still fail to find its own injector or
+        # adb at run time. This runs the real artifact from a directory that is not the repository.
+        shell: pwsh
+        run: |
+          $report = "$env:TEMP\selftest-report.txt"
+          $exe = (Resolve-Path "dist/Emergency-Simulator.exe").Path
+          Push-Location "$env:TEMP"
+          try {
+            & $exe "--selftest=$report"
+            $code = $LASTEXITCODE
+            $text = Get-Content $report -Raw
+            Write-Host $text
+            if ($code -ne 0) { throw "The frozen build failed its self-test (exit $code)." }
+            if ($text -notmatch "injector\s*:\s*FOUND") {
+              throw "The frozen build cannot locate its bundled injector."
+            }
+            if ($text -notmatch "adb\s*:\s*BUNDLED") {
+              throw "The frozen build did not resolve the bundled adb."
+            }
+            if ($text -notmatch "RESULT: OK") {
+              throw "The frozen build reported an incomplete self-test."
+            }
+          } finally {
+            Pop-Location
+          }
 
       - name: Upload the executable
         uses: actions/upload-artifact@v4

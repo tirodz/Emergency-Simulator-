@@ -1,0 +1,6 @@
+# Everything in this directory is a build output except the finished jar, which is committed so a
+# desktop release can bundle a tested injector without requiring a JDK or the Android SDK.
+*
+!alertinject.jar
+!classes/
+!.gitignore
