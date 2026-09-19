@@ -133,10 +133,103 @@ jobs:
             Pop-Location
           }
 
+      - name: Confirm only the Platform Tools this tool uses were bundled
+        # Regression guard. The bundle previously carried fastboot, mke2fs, sqlite3 and others that
+        # this application can never invoke. Extra command-line tools inside a self-unpacking archive
+        # are attack surface with no benefit, and they were worth removing.
+        shell: pwsh
+        run: |
+          $expect = @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "libwinpthread-1.dll")
+          $found = Get-ChildItem "packaging/platform-tools" -File | Select-Object -ExpandProperty Name
+          $missing = $expect | Where-Object { $_ -notin $found }
+          if ($missing) { throw "Staged Platform Tools are incomplete: $($missing -join ', ')" }
+          Write-Host "staged: $($found -join ', ')"
+
+      - name: Report the Windows version resource
+        # Proves the identity fields actually made it into the artifact rather than being silently
+        # dropped by the build, which is the failure mode that matters here.
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "dist/Emergency-Simulator.exe").Path
+          $v = (Get-Item $exe).VersionInfo
+          "FileDescription : $($v.FileDescription)"
+          "ProductName     : $($v.ProductName)"
+          "FileVersion     : $($v.FileVersion)"
+          "CompanyName     : $($v.CompanyName)"
+          if (-not $v.FileDescription) { throw "The build carries no version resource." }
+
+      - name: Report the artifact hash
+        shell: pwsh
+        run: |
+          $exe = "dist/Emergency-Simulator.exe"
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "sha256: $h"
+          "sha256 $h  Emergency-Simulator.exe" | Out-File -Encoding ascii sha256.txt
+          Write-Host "bytes : $((Get-Item $exe).Length)"
+
       - name: Upload the executable
         uses: actions/upload-artifact@v4
         with:
           name: Emergency-Simulator-windows
-          path: dist/Emergency-Simulator.exe
+          path: |
+            dist/Emergency-Simulator.exe
+            sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  gui_only:
+    # The interface alone: no injector, no adb, no device access whatsoever. It exists so the window
+    # can be seen and reviewed without executing a binary that carries a device-console tool. Use it
+    # when the full build is not trusted yet.
+    name: Build the GUI-only build (no device access)
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PyInstaller
+        run: python -m pip install --upgrade pip pyinstaller
+
+      - name: Check the version resource matches the application version
+        run: python tools/check_version_info.py
+
+      - name: Build without the injector or adb
+        env:
+          EMERGENCY_SIMULATOR_GUI_ONLY: "1"
+        run: pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec
+
+      - name: Verify the GUI-only build carries neither component
+        shell: pwsh
+        run: |
+          $exe = "dist/Emergency-Simulator-GUI-only.exe"
+          if (-not (Test-Path $exe)) { throw "Expected build output was not produced: $exe" }
+          # The self-test reports what a frozen build can resolve. For this variant the only correct
+          # answer is that it cannot reach a device at all, and that the interface still starts.
+          $report = "$env:TEMP\gui-only-selftest.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
+          $proc = Start-Process -FilePath (Resolve-Path $exe).Path `
+                    -ArgumentList "--selftest=`"$report`"" -Wait -PassThru
+          $text = Get-Content $report -Raw
+          Write-Host $text
+          # Assert on what the bundle *contains*, not on what the machine happens to have on PATH.
+          # This build must carry neither component and must resolve neither.
+          if ($text -notmatch "injector\s*:\s*MISSING") { throw "The GUI-only build bundled an injector." }
+          if ($text -notmatch "bundled adb\s*:\s*not bundled") { throw "The GUI-only build bundled adb." }
+          if ($text -match "adb\s*:\s*BUNDLED") { throw "The GUI-only build resolved a bundled adb." }
+          if ($proc.ExitCode -eq 0) { throw "The GUI-only self-test should report INCOMPLETE, not OK." }
+          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
+          Write-Host "sha256: $h"
+
+      - name: Upload the GUI-only build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Emergency-Simulator-gui-only
+          path: dist/Emergency-Simulator-GUI-only.exe
           if-no-files-found: error
           retention-days: 30

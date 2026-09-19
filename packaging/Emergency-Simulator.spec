@@ -25,19 +25,43 @@ through one code path in both a packaged build and a checkout.
 """
 
 from pathlib import Path
+import os
 
 REPO_ROOT = Path(SPECPATH).resolve().parent
 APP_DIR = REPO_ROOT / "app"
 
+#: The subset of Platform Tools this application can actually use.
+#:
+#: Platform Tools is a distribution of several separate command-line tools. Only adb drives a device,
+#: and this application never flashes, formats or repartitions anything. Shipping the rest was pure
+#: extra attack surface in a bundle whose whole job is to be trusted: it put `fastboot`, `mke2fs` and
+#: a `sqlite3` shell inside an unsigned archive that unpacks itself at run time. Only these four
+#: files are reachable: adb, its two companion DLLs (absent either, adb fails to load) and its
+#: threaded-C runtime dependency.
+PLATFORM_TOOLS_NEEDED = (
+    "adb.exe",
+    "AdbWinApi.dll",
+    "AdbWinUsbApi.dll",
+    "libwinpthread-1.dll",
+)
+
 datas = []
 bundled_notes = []
+
+#: When set, produce a build with no device-driving components at all: no injector, no adb. The
+#: interface still runs, reports adb as MISSING, and cannot reach a device. This exists so the window
+#: can be seen and reviewed on a machine where an unsigned executable that carries a device-console
+#: binary is exactly the thing that should not be executed.
+GUI_ONLY = bool(os.environ.get("EMERGENCY_SIMULATOR_GUI_ONLY"))
 
 # -- the Android injector ---------------------------------------------------
 #
 # The remote path on the device is fixed, but the *local* path inside the bundle must match what
 # app/runtime.py looks for: <root>/android/alertinject/out/alertinject.jar
 injector_jar = REPO_ROOT / "android" / "alertinject" / "out" / "alertinject.jar"
-if injector_jar.is_file():
+if GUI_ONLY:
+    bundled_notes.append("injector: NOT BUNDLED (GUI-only build)")
+elif injector_jar.is_file():
     datas.append((str(injector_jar), "android/alertinject/out"))
     bundled_notes.append(f"injector: {injector_jar.stat().st_size} bytes")
 else:
@@ -54,10 +78,25 @@ else:
 # copied from an existing Android SDK installation. Not committed to the repository: it is a
 # third-party binary distribution, and pinning it at build time is what makes a release reproducible.
 platform_tools = REPO_ROOT / "packaging" / "platform-tools"
-if platform_tools.is_dir() and any(platform_tools.iterdir()):
-    datas.append((str(platform_tools), "platform-tools"))
-    bundled = sorted(p.name for p in platform_tools.iterdir() if p.is_file())
-    bundled_notes.append("platform-tools: " + ", ".join(bundled))
+if GUI_ONLY:
+    bundled_notes.append("platform-tools: NOT BUNDLED (GUI-only build)")
+elif platform_tools.is_dir() and any(platform_tools.iterdir()):
+    staged = sorted(p.name for p in platform_tools.iterdir() if p.is_file())
+    missing = [name for name in PLATFORM_TOOLS_NEEDED if name not in staged]
+    if missing:
+        raise SystemExit(
+            "Staged Platform Tools are incomplete, so the bundled adb would fail to start.\n"
+            f"  missing: {', '.join(missing)}\n"
+            f"  staged : {', '.join(staged) or '(nothing)'}\n"
+            "Re-stage them with packaging/build_windows.ps1."
+        )
+    # Only the needed files are bundled; the rest of the distribution is deliberately left out.
+    for name in PLATFORM_TOOLS_NEEDED:
+        datas.append((str(platform_tools / name), "platform-tools"))
+    bundled_notes.append("platform-tools: " + ", ".join(PLATFORM_TOOLS_NEEDED))
+    skipped = [n for n in staged if n not in PLATFORM_TOOLS_NEEDED]
+    if skipped:
+        bundled_notes.append("platform-tools: NOT bundled (unused by this tool): " + ", ".join(skipped))
 else:
     bundled_notes.append(
         "platform-tools: NOT bundled (an adb on the target machine will be used)"
@@ -102,7 +141,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="Emergency-Simulator",
+    name="Emergency-Simulator-GUI-only" if GUI_ONLY else "Emergency-Simulator",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -115,6 +154,11 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # A version resource and a manifest that states the requested execution level. Both are identity:
+    # they tell a scanner what this binary is and that it does not ask for elevation. Their absence is
+    # one of the things that makes an unsigned, self-unpacking executable score badly.
+    version=str(REPO_ROOT / "packaging" / "version_info.txt"),
+    uac_admin=False,
 )
 
 print("Emergency-Simulator build contents:")
