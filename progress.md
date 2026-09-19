@@ -5,6 +5,54 @@
 
 ## Current status
 
+**Mission 3 — the stock-device question — STARTED. The evidence batch is served and waiting on the
+operator.**
+
+The question this mission must answer, and which nobody has answered yet:
+
+> Is there **any legitimate, non-root** path from a Windows PC over Wi-Fi/IP that makes a
+> **completely stock Samsung Galaxy A35** process a test alert through its **genuine
+> `CellBroadcastReceiver`**?
+
+Mission 3A is the read-only inspection that decides it. Batch **A35-RO-001** — ten read-only probes —
+is served from the bridge and the operator has been given a one-paste PowerShell block that runs them
+against the A35 over adb and posts the raw output back. See
+[`docs/connect-one-paste.md`](docs/connect-one-paste.md).
+
+**No command has ever been run against the A35.** The batch is authored and served; the operator has
+not yet posted evidence. `evidence/` is empty.
+
+**This session's work before the operator runs anything:**
+
+* **A live bridge token was committed to this public repository** (`224624f` and earlier), along with
+  a session host. The host is dead and the token is worthless, but the pattern would have leaked
+  every future token identically. Fixed: the committed template holds placeholders only and
+  `tools/make-paste.py` renders the live values from the gitignored `bridge-token.txt` into a
+  gitignored file. This is a correction to the previous session's claim that the paste was ready to
+  hand over.
+* `AGENTS.md` added, recording the mode distinction, the evidence rule, the hardware constraints and
+  the credential rule.
+* The bridge's own guarantees re-verified this session: `/health` answers on the public URL confirmed
+  by an independent external fetch (`r.jina.ai`), a missing or wrong token is rejected with 401, an
+  evidence name attempting `../` traversal is refused, and a posted body round-trips byte-for-byte.
+
+### Immediate next steps
+
+1. Operator pastes the connection block and runs batch `A35-RO-001`.
+2. Read the raw evidence — the answers are in the `dumpsys package` output. Do not skim it.
+3. Answer, with evidence: which package owns alerts (AOSP, Samsung, or both); whether the emergency
+   permission is `signature|privileged` (this single fact decides whether an ordinary app can ever
+   trigger the broadcast); whether any component is exported in a way an external caller could
+   legitimately reach; whether a legitimate test component exists at all; whether the module is an
+   APEX and at what version; and the real carrier (CSC, `gsm.operator.numeric`).
+4. Write findings to `docs/stock-device/aosp-vs-samsung.md` and
+   `docs/stock-device/security-boundary.md`, with every claim labelled.
+5. If a legitimate non-privileged entry point exists, author a second batch — and get the operator's
+   explicit approval for that specific command first, because it crosses from inspection into an
+   attempt. If none exists, that is the answer: document the boundary and stop.
+
+### Carried over from the previous session
+
 **Mission 2B — release hardening — COMPLETE. CI is green and the artifact is verified on Windows.**
 
 The controller from Mission 2 now ships as a single Windows executable that carries its own Android
