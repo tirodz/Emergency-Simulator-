@@ -266,19 +266,19 @@ fn read_receiver_prefs(app:&tauri::AppHandle,serial:&str,pkg:&str)->Result<Strin
     let p=receiver_prefs_path(pkg);
     shell(app,serial,&["cat",&p]).or_else(|_|Ok(String::new()))
 }
-fn flag_enabled(xml:&str,name:&str)->bool{xml.contains(&format!(r#"name="{name}" value="true""#))}
+fn flag_enabled(xml:&str,name:&str)->bool{xml.contains(&format!("name=\"{name}\" value=\"true\""))}
 fn update_flag(xml:&str,name:&str)->String{
-    let needle=format!(r#"name="{name}""#);
+    let needle=format!("name=\"{name}\"");
     if xml.contains(&needle){
         let mut out=xml.to_string(); let mut from=0usize;
         while let Some(pos)=out[from..].find(&needle){
             let start=from+pos; let end=start+out[start..].find('>').unwrap_or(0);
             let end=if end<start{start}else{end};
             let segment=out[start..=end].to_string();
-            if let Some(v)=segment.find(r#" value=""#){
-                let absolute=start+v+r#" value=""#.len();
+            if let Some(v)=segment.find(" value=\""){
+                let absolute=start+v+" value=\"".len();
                 if let Some(q)=out[absolute..].find('"'){out.replace_range(absolute..absolute+q,"true");}
-            } else if let Some(close)=out[start..=end].rfind("/>"){out.insert_str(start+close, r#" value="true""#);}
+            } else if let Some(close)=out[start..=end].rfind("/>"){out.insert_str(start+close, " value=\"true\"");}
             from=end.saturating_add(1);
         }
         return out;
