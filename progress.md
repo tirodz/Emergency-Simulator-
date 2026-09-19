@@ -554,3 +554,47 @@ minutes without KVM), then run **`EXP-ALERT-002`** (lock-screen, vibration, DND 
 controller work is done; the remaining items are the deferred features listed in
 `# Next exact actions`.
 
+
+
+## Mission 3 - handover of the built executable
+
+The operator asked for the Windows build so they can exercise it against a real device.
+
+**The artifact.** CI run `35458378681` built `dist/Emergency-Simulator.exe` from commit `6a8d03a`,
+this branch's head at the time of writing. It was downloaded from the run's
+`Emergency-Simulator-windows` artifact and is served by the bridge at `/download/`.
+
+| Property | Value |
+| --- | --- |
+| Size | 19,636,828 bytes |
+| SHA-256 | `52c0767d66692a196d263b151b3495193ef4f3c7295cee01e2f09c2279ee5d04` |
+| Type | PE32+ x86-64, GUI subsystem, PyInstaller onefile |
+| Bundles | `platform-tools\adb.exe`, `android\alertinject\out\alertinject.jar` (3,385 bytes) |
+
+**Verified CONFIRMED:**
+
+* The binary is a genuine Windows x86-64 GUI executable; the PE header was inspected directly.
+* CI ran the artifact's own `--selftest` from a directory that is not the repository, and it
+  reported `frozen: True`, `injector: FOUND`, `adb: BUNDLED`, `RESULT: OK`. That is the closest
+  thing to a run on Windows available here, and it ran on the platform's own Windows runner.
+* The bridge serves it byte-for-byte: the downloaded copy and the served copy share a SHA-256, and
+  path-traversal attempts against `/download/` all return 404.
+
+**Not established:**
+
+* **The download has not been proved to survive the public ingress at full size.** A request to the
+  public hostname did return all 19,636,828 bytes with a matching hash, but it completed in 0.09 s,
+  which is loopback speed and consistent with the request hairpinning back inside the container
+  rather than traversing the proxy. `r.jina.ai` confirmed the public route reaches the bridge (it
+  returned the bridge's 401), but it cannot fetch a binary. So it is **UNVERIFIED** that a laptop
+  pulling the file over the internet receives it intact. The operator pulling it is the test.
+* **The executable has never been run against a real Android device.** CI has no device. The bundled
+  adb and injector resolve, but nothing has exercised the adb transport end to end.
+
+**Next exact actions:**
+
+1. Operator downloads `Emergency-Simulator.exe` and checks its SHA-256 against the value above.
+2. Operator runs it and reports what the window shows. Launching it with `--selftest <path>` and
+   sending back the report gives a real-machine confirmation of the frozen-resource paths.
+3. Only then does "Windows EXE exercised against a real device" in the release gate have any
+   evidence behind it.
