@@ -248,7 +248,25 @@ function renderDevices(){
  sel.innerHTML=state.devices.map(d=>'<option value="'+esc(d.serial)+'">'+esc(deviceLabel(d))+'</option>').join("");sel.value=state.selected;
  list.querySelectorAll(".device").forEach(b=>b.onclick=()=>{state.selected=b.dataset.serial;renderDevices();log("Selected "+deviceLabel(selected()),"info")});update(selected());renderDetail(selected());renderPreview(selected())
 }
-async function refresh(){ $("refreshBtn").disabled=true;try{const devices=await invoke("list_devices");state.devices=devices||[];renderDevices();$("mConnected").textContent=state.devices.filter(d=>d.state!=="OFFLINE").length;$("mReady").textContent=state.devices.filter(d=>d.state==="READY").length;log("Device scan completed · "+state.devices.length+" target(s)",state.devices.some(d=>d.state==="READY")?"ok":"info")}catch(e){const m=String(e?.message||e);log("ADB scan failed · "+m,"error");toast(m,"error");$("adbStatus").textContent="ERROR";$("adbDot").className="dot red")}finally{$("refreshBtn").disabled=false}}
+async function refresh(){
+  $("refreshBtn").disabled=true;
+  try{
+    const devices=await invoke("list_devices");
+    state.devices=devices||[];
+    renderDevices();
+    $("mConnected").textContent=state.devices.filter(d=>d.state!=="OFFLINE").length;
+    $("mReady").textContent=state.devices.filter(d=>d.state==="READY").length;
+    log("Device scan completed - "+state.devices.length+" target(s)",state.devices.some(d=>d.state==="READY")?"ok":"info");
+  }catch(e){
+    const m=String(e?.message||e);
+    log("ADB scan failed - "+m,"error");
+    toast(m,"error");
+    $("adbStatus").textContent="ERROR";
+    $("adbDot").className="dot red";
+  }finally{
+    $("refreshBtn").disabled=false;
+  }
+}
 function validate(){const b=$("message").value.trim().replace(/\s+/g," ");const v=$("validation");if(!b){v.textContent="Empty message will use TEST ALERT - SIMULATION.";v.className="validation";return true}if(!b.startsWith("TEST")){v.textContent="Blocked: the message must begin with TEST.";v.className="validation error";return false}if(b.length>300){v.textContent="Blocked: message is longer than 300 characters.";v.className="validation error";return false}v.textContent="Valid test message · "+b.length+"/300 characters.";v.className="validation ok";return true}
 function openConfirm(){const d=selected();if(!d||d.state!=="READY")return;$("confirmText").textContent="Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
 function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
