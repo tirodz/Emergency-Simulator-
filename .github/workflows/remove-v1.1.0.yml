@@ -13,9 +13,9 @@ jobs:
     steps:
       - name: Delete v1.1.0 release and tag
         env:
-          GH_TOKEN: \${{ github.token }}
-          REPO: \${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -e
-          gh release delete v1.1.0 --repo "$REPO" --yes --cleanup-tag || true
+          gh release delete v1.1.0 --repo "$REPO" --yes --cleanup-tag
