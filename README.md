@@ -20,7 +20,7 @@ builds, with what privileges, on which OEMs, and what would require real cellula
 
 ## Status
 
-**Phase: Mission 2 complete — the controller is built and `Emergency-Simulator.exe` is produced by CI.**
+**Phase: Mission 2B complete — the release is self-contained, self-verifying and hardened.**
 
 | | |
 | --- | --- |
@@ -30,33 +30,38 @@ builds, with what privileges, on which OEMs, and what would require real cellula
 | Requires | Root. Not an AOSP build, not a platform signature, not a system app. |
 | Transmission | None. No modem, no radio, no network, at any point. |
 | Controller | `tools/test_alert.py` (CLI) and the Tkinter GUI — one engine, two front ends |
-| Windows app | `Emergency-Simulator.exe`, built by `.github/workflows/build-windows.yml` |
+| Windows app | `Emergency-Simulator.exe` — carries its own adb and injector, and verifies itself |
+| Defects | [`docs/bugs/`](docs/bugs/) — every real defect, with the test that guards it |
 
 ## Quick start
 
-```powershell
-# 1. adb must be available
-$env:ADB_PATH = "C:\platform-tools\adb.exe"
+The released executable needs nothing installed but Windows and a rooted device:
 
-# 2. the target device must be rooted
+```powershell
+# the device must be rooted and have USB debugging enabled
 adb devices
 
-# 3. check what is attached, then dry-run, then send
-python tools\test_alert.py --list
-python tools\test_alert.py --dry-run
-python tools\test_alert.py --device emulator-5554
-```
+# optional: see what the build resolved before touching anything
+.\dist\Emergency-Simulator.exe --selftest=%TEMP%\selftest.txt
 
-Or run the desktop application:
-
-```powershell
-python app\main.py
-# or, once built:
+# then just run it
 .\dist\Emergency-Simulator.exe
 ```
 
+From a source checkout, Python 3.10+ and an adb somewhere are also needed:
+
+```powershell
+$env:ADB_PATH = "C:\platform-tools\adb.exe"
+python tools\test_alert.py --list
+python tools\test_alert.py --dry-run
+python tools\test_alert.py --device emulator-5554
+python app\main.py
+```
+
 The message must begin with `TEST`. The alert channel is fixed to the ETWS test channel `4355`
-(0x1103) and cannot be changed.
+(0x1103) and cannot be changed. Build the executable with
+`powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`, or download the CI artifact
+`Emergency-Simulator-windows`.
 
 Full instructions, including how to build the injector and the executable, are in
 [`docs/windows-controller.md`](docs/windows-controller.md).

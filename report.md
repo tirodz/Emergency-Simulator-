@@ -764,3 +764,122 @@ Not because they are hard, but because they come after the mechanism is proven:
 
 The milestone was one Windows PC reliably controlling one rooted Android test device, and that is
 delivered.
+
+---
+
+# Addendum — Mission 2B: the release is hardened and self-verifying
+
+## What changed
+
+Mission 2 produced a working controller and an executable that CI could build. Mission 2B made that
+release something that can be handed to someone else, and made a build that cannot work fail loudly
+instead of shipping.
+
+The gap that mattered was not functional. It was that **a build could succeed and still be unable to
+find its own resources** — the defect recorded as BUG-004, where the frozen executable derived its
+paths from an assumption about the packaging mode rather than from what the bundle actually
+contained. That is now impossible to ship by accident.
+
+## The release is self-contained
+
+The executable carries:
+
+* **The Android injector**, committed at `android/alertinject/out/alertinject.jar`. It was previously
+  a gitignored build output of the Android SDK, which meant a fresh clone could not produce a working
+  release without first building it with a JDK and the SDK. Committing one 3 KB artifact is a smaller
+  price than a release that cannot drive a device, and the build now **fails** if it is absent rather
+  than producing a binary that does nothing.
+* **Android Platform Tools**, staged at build time and verified to include `adb.exe` together with
+  `AdbWinApi.dll` and `AdbWinUsbApi.dll`. Those DLLs matter: without them `adb.exe` fails at load
+  time, which is indistinguishable from "no adb" to any check that only tests whether a file exists.
+  This is why discovery executes `adb version` instead.
+
+Both are located through one module, `app/runtime.py`, so the controller, the CLI and the GUI cannot
+disagree about where anything is.
+
+## A build now verifies itself
+
+`Emergency-Simulator.exe --selftest[=report.txt]` reports the search roots, the injector it resolved,
+the adb it selected and that adb's version. It touches no device.
+
+The build script and CI run it **from a directory that is not the repository**, on the real artifact,
+and fail unless the injector is `FOUND` and the adb is `BUNDLED`. This is deliberately more than an
+existence check, because the failure mode being guarded against is precisely a build that exists and
+does not work. A windowed Windows build has no console, so the report can be written to a file and
+read from there.
+
+Verified locally on a onefile build launched from an empty directory with no `ADB_PATH`:
+
+```
+  frozen      : True
+  bundle root : /tmp/_MEI00004316fqxBqu
+  injector    : FOUND  /tmp/_MEI.../android/alertinject/out/alertinject.jar  (3385 bytes)
+  bundled adb : /tmp/_MEI.../platform-tools/adb
+  adb         : BUNDLED
+  adb version : Android Debug Bridge version 1.0.41
+RESULT: OK
+```
+
+That process then discovered the live emulator and logged to the per-user path, with no Python, no
+SDK and no JDK on the machine.
+
+## The interface is an instrument
+
+The desktop window was rebuilt so it cannot be mistaken for, or overwritten by, the thing it tests.
+
+Status is carried by a word as well as a colour, and no glyph is load-bearing, so the interface is
+correct on a host without an emoji font and readable in monochrome. Devices appear as rows with a
+support verdict and the reason behind it, derived from observed capability rather than from the
+manufacturer — asserted by a test that five different brands with identical capability classify
+identically.
+
+Two safety properties are new and both are asserted by test:
+
+* **The safety statement is permanent.** It states plainly that this is a test on a controlled device
+  with no cellular transmission. Results announce themselves on a separate strip below it, so the one
+  line that must always be true can never be replaced by a transient one.
+* **SEND requires both a usable device and a clear send gate.** Either alone is not enough. A non-root
+  device disables it and shows why, rather than refusing silently.
+
+## The duplicate-send problem
+
+Android queues emergency alerts and deliberately provides no way for software to withdraw or dismiss
+a displayed one. A second send therefore does not retry anything: it stacks another full-screen
+dialog with sound, which a person then has to dismiss individually.
+
+The interface prevents this with a per-device gate — `READY`, `BUSY`, `DELIVERED`, `UNCERTAIN` — and
+only an explicit **Acknowledge**, after the operator has dismissed the alert on the device, returns it
+to `READY`. Because the alert's presence cannot be observed by a third party, it is remembered
+instead, and clearing it is a human act. Verified on the emulator: a first send reaches
+`ALERT_DISPLAYED` and sets `DELIVERED`, SEND disables itself, and a second send is refused with
+`DUPLICATE_SEND_BLOCKED` before the device is touched.
+
+The subtle part is `UNCERTAIN`. A timeout is not a failure: it means the outcome is unknown, and the
+device may be showing an alert at that moment. Treating it as "nothing happened" is exactly the
+reasoning that leads to a stacked alert, so it gates further sends just like `DELIVERED` does.
+
+## The bug journal
+
+`docs/bugs/` records every real defect with its reproduction, raw output, root cause and the test
+that guards it. Two of them were **false successes** — a truncated alert body that exited 0, and a
+secret code that silently toggled test mode off — where every signal the tool had said the operation
+had worked. They are written down for that reason: they are the argument for deciding outcomes from
+device evidence rather than from exit codes.
+
+## What is still not established
+
+Unchanged from Mission 2, and stated here so it is not mistaken for finished work:
+
+* `EXP-ALERT-002`: lock-screen presentation, vibration and DND override. Still unverified, still
+  because the device was never locked.
+* Vibration in particular may not be demonstrable on the emulator at all.
+* Android 14 and 16 remain inferred from stable APIs; 15 is verified.
+* Rooted retail devices via `su` remain untested against real hardware.
+* The revised CI workflow has not yet run: it needs a push.
+
+## Verdict
+
+The release is now something that can be handed over: one executable, no dependencies, and a build
+that proves the artifact works before it is published. What remains is not controller engineering but
+the open Android questions above, and the deferred transports — Wi-Fi and multi-device — which the
+controller is already structured to accept.

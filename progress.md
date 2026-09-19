@@ -5,109 +5,114 @@
 
 ## Current status
 
-**Mission 2 — Windows controller — COMPLETE. `Emergency-Simulator.exe` IS BUILT.**
+**Mission 2B — release hardening — COMPLETE. The Windows release is self-contained and verified.**
 
-The proof of concept is now a usable application. A PC controller discovers a rooted device, verifies
-root, establishes the test-alert prerequisites, requires explicit confirmation, injects through the
-proven path, and decides the outcome from real Cell Broadcast evidence. The GUI drives the same
-engine as the command line.
+The controller from Mission 2 now ships as a single Windows executable that carries its own Android
+Platform Tools and its own injector, and a build can no longer be produced that is unable to find
+those resources: the release verifies itself before the artifact is uploaded. The desktop interface
+has been rebuilt as an instrument with explicit visual language, a device/support verdict board, a
+live send gate and a permanent safety statement that no result can overwrite.
 
-Verified end to end against `emulator-5554` (Android 15 / API 35, userdebug), with the alert reaching
-`CellBroadcastReceiver`, `CBAlertService`, `CellBroadcastAlertAudio` and `CellBroadcastAlertDialog`
-and a row written to the genuine history database. See
-[`docs/experiments/EXP-15.md`](docs/experiments/EXP-15.md).
-
-The Windows executable is produced by CI. The workflow `build-windows.yml` ran green on
-`windows-latest` and uploaded the artifact **`Emergency-Simulator-windows`**
-(`Emergency-Simulator.exe`, 11.0 MB, DOS `MZ` header).
-
-**The Android question was answered in Mission 1 / 2A** (see the archive at the end of this file): a
-root tool can inject a constructed `SmsCbMessage` into the stock `CellBroadcastReceiver`, and
-Android's own components then produce the real alert dialog, audio, TTS and history row. No AOSP
-build, platform signature or system-app install is needed. The remaining work is controller
-engineering.
+Verified end to end against `emulator-5554` (Android 15 / API 35, userdebug): a real send through the
+interface reached `CellBroadcastReceiver`, `CellBroadcastAlertService`, `CellBroadcastAlertAudio` and
+`CellBroadcastAlertDialog`, the gate moved to `DELIVERED`, SEND disabled itself, and the permanent
+safety strip was untouched. A onefile build was then launched from an empty directory with no
+`ADB_PATH` set; it resolved its bundled injector and adb (`adb: BUNDLED`), discovered the emulator
+and logged to the per-user path.
 
 ## Current milestone
 
-Mission 2 is delivered. The open work is `EXP-ALERT-002` (lock-screen, vibration, DND override), and
-then the deferred features: Wi-Fi transport, multi-device fan-out.
+Mission 2B is delivered. The next milestones, in order:
 
-## What has been established (Mission 2)
+1. **`EXP-ALERT-002`** — lock-screen presentation, vibration and DND override. Still the oldest open
+   item, and still blocked on the same two things as before (see Blockers).
+2. **Wi-Fi transport** — the controller is transport-agnostic; add a network path alongside adb,
+   with pairing and authentication, keeping the same evidence-based result detection.
+3. **Multi-device fan-out** — iterate the existing per-device send; do not build a parallel pipeline.
 
-* **The controller works end to end** on the proven injection path, with evidence-based result
-  detection.
-* **The channel is structurally locked.** `SERVICE_CATEGORY = 4355` is a module constant with no
-  parameter, config key, API field or CLI flag that can change it. Tests assert both the value and
-  the absence of any hazard-selecting option.
-* **A clean injector exit code is not success.** `ALERT_DISPLAYED` requires
-  `CellBroadcastAlertDialog` in logcat. Everything else maps to a specific failure code.
-* **The dry run provably changes nothing**, verified by hashing the device's preference file before
-  and after (identical).
-* **CANCEL is honest.** It cancels before delivery; after delivery it reports that Android does not
-  permit remote dismissal.
-* **A packaged build works.** The frozen executable runs, resolves the injector and log paths per
-  mode, and CI produces a real Windows binary.
+## What has been established (Mission 2B)
 
-## Findings (Mission 2)
+* **The release is self-contained.** The spec bundles the injector and stages Platform Tools; a
+  missing injector fails the build rather than producing an artifact that cannot drive a device.
+* **The build verifies itself.** `app/main.py --selftest` reports the search roots, the injector, the
+  bundled adb and its version. It writes a file when there is no console, which is the case for a
+  windowed Windows build, and CI reads that file instead of trusting an exit code.
+* **The committed injector is a deliberate trade.** One 3 KB jar is committed so a fresh checkout can
+  produce a working release without a JDK or the Android SDK.
+* **The safety statement is permanent.** Outcomes announce themselves on a separate strip, asserted
+  by test, so the one line that must always be true cannot be replaced by a transient one.
+* **SEND requires both a usable device and a clear send gate.** Either alone is not enough, and a
+  non-root device disables it with the reason shown.
+* **Status is never carried by colour alone.** Every state is a word first, and no glyph is
+  load-bearing, so the interface is correct without an emoji font and readable in monochrome.
+
+## Findings (Mission 2B)
 
 ### Confirmed facts
 
-* `adb shell` flattens its arguments into a string the **device's** shell re-parses. Unquoted
-  arguments containing spaces are silently split: a body of `TEST ALERT - SIMULATION` reached the
-  injector as `TEST`, with exit code 0 and no error. Confirmed by a history row `4|4355|1|TEST`.
-  Fixed with `shlex.quote` on every remote argument. `app/adb.py:shell`.
-* The secret code `2627` is a **toggle**. Reading state before sending it is mandatory; sending it
-  blindly can disable a working configuration. `app/controller.py:prepare_test_mode`.
-* On a userdebug emulator the adb shell is already uid 0 and there is **no `su`**. Root file access
-  must try the uid-0 shell first and only fall back to `su`. `app/adb.py:read_file`.
-* A preference read failure must not be treated as "disabled". The controller refuses instead of
-  guessing. `app/controller.py:prepare_test_mode`.
-* A packaged PyInstaller build has no repository next to it, so the injector location and log
-  directory must be resolved per mode. Log goes to `%LOCALAPPDATA%\Emergency-Simulator\logs\`.
-* GitHub Actions on `windows-latest` builds the executable from `packaging/Emergency-Simulator.spec`
-  in about 50 seconds.
+* A PyInstaller **windowed** build has `sys.stdout is None` on Windows. Anything that prints during
+  startup must handle that or the output is lost. `app/main.py:_selftest`.
+* `adb.exe` fails at **load time** if `AdbWinApi.dll` / `AdbWinUsbApi.dll` are absent, which is
+  indistinguishable from "no adb" to a file check. Discovery executes `adb version`; the build script
+  asserts the DLLs are staged beside the binary.
+* The injector jar was gitignored, so a fresh clone could not build a working release. Now committed;
+  only `classes/` and `dex` remain ignored. `android/alertinject/out/.gitignore`.
+* A frozen build resolves resources through `sys._MEIPASS` and then the executable's directory.
+  Verified: `bundle root: /tmp/_MEI...`, with both the injector and adb found there.
 
 ### Hypotheses (not yet verified)
 
-* Android 14 and 16 accept the same injection path. 15 is verified; 14/16 are inferred from stable
-  APIs.
-* Rooted retail devices work via `su` (the code path exists and is exercised by a synthetic adb, but
-  has not been run against real hardware).
-* Lock-screen presentation, vibration and DND override behave as the AOSP source suggests.
+* The same self-contained build works on Windows. The spec, the PowerShell staging and the CI
+  verification are all written for Windows, but this host is Linux, so the Windows artifact has only
+  ever been produced by CI — and CI has not yet run this revised workflow.
+* Android 14 and 16 accept the same injection path. 15 is verified; 14/16 are inferred.
+* The `TERM`/font fallbacks render as intended on a real Windows desktop with Segoe UI.
 
 ## Blockers
 
 * **No KVM** on this host: the emulator uses software emulation and takes ~9 minutes to cold boot.
   Start it before doing anything else.
-* **`EXP-ALERT-002` needs a locked device.** The device was never locked during Mission 2, so
-  lock-screen full-screen presentation, vibration and DND override remain unverified.
-* **Vibration specifically** was logged as `no pulsation pattern` on the emulator in Mission 1, so
-  the emulator may not be able to demonstrate it at all.
+* **`EXP-ALERT-002` needs a locked device.** The device was never locked, so lock-screen full-screen
+  presentation, vibration and DND override remain unverified.
+* **Vibration specifically** was logged as `no pulsation pattern` on the emulator, so the emulator
+  may not be able to demonstrate it at all.
+* **The revised CI workflow has not run.** It needs a push, which has not been done.
 
 ## Next exact actions
 
-1. **`EXP-ALERT-002`** — lock the device (`adb shell input keyevent KEYCODE_SLEEP`), send an alert,
+1. **Run the revised CI workflow.** Push `main` and confirm the `ui` job (Xvfb interface tests) and
+   the `build` job (injector check, Platform Tools staging, self-test verification) both pass.
+2. **`EXP-ALERT-002`** — lock the device (`adb shell input keyevent KEYCODE_SLEEP`), send an alert,
    and capture whether the dialog appears over the lock screen. Attempt vibration and DND override.
-   Record in `docs/experiments.md`. If the emulator cannot show vibration, say so and mark it
-   UNKNOWN rather than claiming success.
-2. **Wi-Fi transport** — the controller is transport-agnostic; add a network path alongside adb.
-   Keep the same evidence-based result detection.
-3. **Multi-device fan-out** — iterate the existing per-device send; do not build a parallel pipeline.
+   Record in `docs/experiments.md`. If the emulator cannot show vibration, say so and mark it UNKNOWN
+   rather than claiming success.
+3. **Wi-Fi transport** — add a network path alongside adb, with pairing and a per-device token.
 
 ## Last known working state
 
-* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`.
+* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `11acbbd`.
 * **Target:** AVD `test35`, `emulator-5554`, Android 15 / API 35, `userdebug`, `ro.debuggable=1`.
 * **Run the CLI:** `ADB_PATH=/opt/android-sdk/platform-tools/adb python3 tools/test_alert.py --list`
 * **Run the GUI:** `DISPLAY=:99 python3 app/main.py` (headless host) or `dist\Emergency-Simulator.exe`
   on Windows.
-* **Tests:** `python3 tools/test_controller.py` (29 checks, no device needed),
-  `DISPLAY=:99 python3 tools/test_ui.py` (16 checks).
-* **Build the exe locally:** `pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec`.
+* **Self-test:** `python3 app/main.py --selftest` (or `--selftest=<path>` with no console).
+* **Tests:** `python3 tools/test_controller.py` (all pass, no device needed),
+  `DISPLAY=:99 python3 tools/test_ui.py` (all pass).
+* **Build the exe locally:** `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`
+  (stages Platform Tools, runs the tests, builds, then verifies the artifact).
 * **CI artifact:** `Emergency-Simulator-windows`.
 * Boot the emulator first: `emulator -avd test35 -no-window -no-audio -accel off` (~9 min).
 
 ## Git commits
+
+Mission 2B (most recent first):
+
+| Commit | Subject |
+| --- | --- |
+| `11acbbd` | feat: make the Windows release genuinely self-contained and verifiable |
+| `1fed923` | feat: rebuild the desktop interface as a laboratory instrument |
+| `ea7b5a4` | docs: add a bug journal and tests for the hard-won invariants |
+| `7c4e857` | feat: make the runtime self-contained and locate resources reliably |
 
 Mission 2:
 
@@ -116,8 +121,6 @@ Mission 2:
 | `ec40f49` | feat: add test alert controller core |
 | `420ef33` | feat: add Windows desktop interface |
 | `6851814` | feat: add Windows packaging and a CI build |
-
----
 
 ## Archive — Mission 1 and 2A (complete)
 

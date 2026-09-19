@@ -45,13 +45,17 @@ reached `CellBroadcastReceiver`, `CBAlertService`, `CellBroadcastAlertAudio` and
 
 ## 2. Requirements
 
+**To run the released executable:**
+
 | Requirement | Why |
 | --- | --- |
-| Windows 10/11 (or Linux/macOS) | The primary target is Windows; the core is portable Python. |
-| Python 3.10+ with tkinter | The packaged `.exe` bundles this, so end users need nothing. |
-| Android Platform Tools (`adb`) | Transport to the device. See section 3. |
-| A **rooted** Android device | The emergency broadcast is a protected broadcast; a non-root sender is rejected. |
+| Windows 10/11 | The target platform. |
+| A **rooted** Android device you own | The emergency broadcast is a protected broadcast; a non-root sender is rejected. |
 | USB debugging enabled | For adb to reach the device. |
+| *(That is all.)* | Python, the Android SDK, a JDK and Platform Tools are all inside the executable. |
+
+**To run from a source checkout** you additionally need Python 3.10+ with tkinter and an `adb`
+somewhere (see section 3). Building the executable is covered in section 7.
 
 The device must be one you own and control. Do not point this tool at a device you do not administer.
 
@@ -59,23 +63,38 @@ The device must be one you own and control. Do not point this tool at a device y
 
 ## 3. ADB setup
 
-The application never downloads binaries. Obtain Platform Tools from the official source:
+The released executable **carries its own copy of Android Platform Tools** and uses it by default, so
+there is normally nothing to configure. It also carries the Android injector, so no Android SDK or JDK
+is needed to run it.
 
-**https://developer.android.com/tools/releases/platform-tools**
+Resolution order, most specific first:
 
-Then do one of the following.
+1. `--adb <path>` on the command line.
+2. `ADB_PATH` (a file, or a directory containing `adb`).
+3. The bundled Platform Tools inside the executable.
+4. `PATH`.
+5. Conventional SDK locations (`%LOCALAPPDATA%\Android\Sdk\platform-tools`, `$ANDROID_HOME`,
+   `$ANDROID_SDK_ROOT`).
 
-1. Put `adb` on your `PATH`.
-2. Set `ADB_PATH` to the executable:
-   ```powershell
-   $env:ADB_PATH = "C:\platform-tools\adb.exe"
-   ```
-3. Pass it explicitly on the command line: `--adb C:\platform-tools\adb.exe`
+Override only if you want a newer Platform Tools than the one shipped:
 
-Resolution order: `--adb`, then `ADB_PATH` (file or directory), then `PATH`, then the conventional
-SDK locations (`%LOCALAPPDATA%\Android\Sdk\platform-tools`, `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`).
+```powershell
+$env:ADB_PATH = "C:\platform-tools\adb.exe"
+```
 
-If adb cannot be found the app says so and stops; it does not guess.
+If adb cannot be found or cannot run, the app says so and stops; it does not guess. To see exactly
+what a build resolved:
+
+```powershell
+.\dist\Emergency-Simulator.exe --selftest=%TEMP%\selftest.txt
+type %TEMP%\selftest.txt
+```
+
+That reports the search roots, the injector, the adb it chose and its version. It exists because a
+build can succeed and still be unable to find its own resources, which is a failure worth catching
+before the executable reaches anyone. It never touches a device.
+
+Platform Tools come from the official source: **https://developer.android.com/tools/releases/platform-tools**
 
 ---
 
@@ -142,25 +161,46 @@ android/alertinject/out/alertinject.jar
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
-This creates a `.venv`, installs PyInstaller, runs the safety tests, and builds
-`dist\Emergency-Simulator.exe`. Use `-SkipTests` to skip the tests, `-NoVenv` to build with the
-system interpreter.
+The script:
+
+1. checks that the committed injector is present, and fails with restore instructions if it is not;
+2. stages Android Platform Tools into `packaging\platform-tools` — copied from a local Android SDK if
+   one exists, otherwise downloaded from Google — then asserts that `adb.exe`, `AdbWinApi.dll` and
+   `AdbWinUsbApi.dll` are all present and that adb runs;
+3. creates a `.venv`, installs PyInstaller and runs the safety tests;
+4. builds `dist\Emergency-Simulator.exe`;
+5. runs the executable's `--selftest` from a directory that is not the repository, and fails the build
+   unless the artifact resolves its own injector and its own bundled adb.
+
+Options: `-SkipTests`, `-NoVenv`, `-SkipPlatformTools` (build against a system adb — not
+self-contained, useful only while iterating).
 
 **With CI:** the workflow `.github/workflows/build-windows.yml` builds the executable on
 `windows-latest` and uploads it as the artifact **`Emergency-Simulator-windows`** (file:
-`Emergency-Simulator.exe`). It runs on push to `main`, pull requests, and manual dispatch. Download
-it from the run's Artifacts section.
+`Emergency-Simulator.exe`). It runs on push to `main`, pull requests, and manual dispatch, and runs
+the same injector check, Platform Tools staging, safety tests and self-test verification. It also has
+a separate `ui` job that runs the interface tests under Xvfb on Linux. Download the artifact from the
+run's Artifacts section.
 
-Generated binaries are not committed; the CI artifact is the distribution route.
+Generated binaries are not committed; the CI artifact is the distribution route. The **injector** is
+committed (`android/alertinject/out/alertinject.jar`), because a release that cannot drive a device is
+worse than a small committed artifact. Rebuild it only if you change the injector source:
+
+```bash
+bash android/alertinject/build.sh      # needs the Android SDK and a JDK
+git add -f android/alertinject/out/alertinject.jar
+```
 
 ---
 
 ## 8. Running it
 
 ```powershell
-$env:ADB_PATH = "C:\platform-tools\adb.exe"
 .\dist\Emergency-Simulator.exe
 ```
+
+No configuration is needed: the executable carries its own adb and injector. Set `ADB_PATH` only if
+you want to use a different Platform Tools.
 
 Command line, for the same engine without a GUI:
 
@@ -173,8 +213,25 @@ python tools\test_alert.py --device emulator-5554 --message "TEST DRILL - HOUSEH
 
 Exit codes: `0` success, `1` failure, `2` usage error, `3` refused by a safety rule, `4` cancelled.
 
-The GUI starts by scanning for devices. Select one, check the status block, then use **Dry Run** or
-**SEND TEST ALERT**.
+The GUI starts by scanning for devices. Each device is shown with a support verdict and the reason
+for it. Select one, check the target panel, then use **Dry Run** or **SEND TEST ALERT**.
+
+### The send gate
+
+Android queues emergency alerts and deliberately offers no way for software to withdraw or dismiss a
+displayed one. Sending twice therefore does not retry a failure — it stacks a second full-screen
+dialog that someone has to dismiss, with sound. The interface prevents that with a per-device gate:
+
+| Gate state | A send is |
+| --- | --- |
+| `READY` | allowed |
+| `BUSY` | refused |
+| `DELIVERED` | refused until acknowledged |
+| `UNCERTAIN` | refused until acknowledged |
+
+After an alert has been displayed, dismiss it **on the device**, then press **Acknowledge**. Only that
+returns the device to `READY`. The tool will not decide on your behalf that an alert is gone, because
+it has no way to observe whether it is.
 
 ---
 
