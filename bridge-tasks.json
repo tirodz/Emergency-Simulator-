@@ -83,12 +83,12 @@
       "read_only": true,
       "reason": "The single most important question in Phase 4: what owns alerts on this phone. AOSP ships com.android.cellbroadcastreceiver; Samsung may ship its own alongside or instead. -u includes packages that are installed but disabled, which would otherwise be invisible.",
       "commands": [
-        "adb shell pm list packages | findstr /I cellbroadcast",
-        "adb shell pm list packages -u | findstr /I cellbroadcast",
-        "adb shell pm list packages | findstr /I emergency",
-        "adb shell pm list packages | findstr /I \"wsa wirelessalert\"",
-        "adb shell pm list packages | findstr /I com.samsung.android.cellbroadcast",
-        "adb shell pm list packages | findstr /I com.android.cellbroadcast",
+        "adb shell pm list packages | Select-String -Pattern cellbroadcast",
+        "adb shell pm list packages -u | Select-String -Pattern cellbroadcast",
+        "adb shell pm list packages | Select-String -Pattern emergency",
+        "adb shell pm list packages | Select-String -Pattern 'wsa|wirelessalert'",
+        "adb shell pm list packages | Select-String -Pattern com.samsung.android.cellbroadcast",
+        "adb shell pm list packages | Select-String -Pattern com.android.cellbroadcast",
         "adb shell pm path com.android.cellbroadcastreceiver",
         "adb shell pm path com.samsung.android.cellbroadcastreceiver"
       ]
@@ -112,7 +112,7 @@
       "read_only": true,
       "reason": "On recent Android the module is an updatable APEX, which changes where the code lives and which version is running. It also tells us whether Samsung has overridden the module.",
       "commands": [
-        "adb shell pm list packages | findstr /I apex",
+        "adb shell pm list packages | Select-String -Pattern apex",
         "adb shell dumpsys apex",
         "adb shell ls -l /apex 2>&1",
         "adb shell getprop ro.apex.updatable"
@@ -125,11 +125,11 @@
       "read_only": true,
       "reason": "Establishes whether the permission that guards the emergency broadcast is signature|privileged. If it is, an ordinary app can never hold it, and that is the security boundary stated with evidence instead of assumption.",
       "commands": [
-        "adb shell dumpsys package | findstr /I RECEIVE_EMERGENCY_BROADCAST",
-        "adb shell dumpsys package | findstr /I SEND_EMERGENCY_BROADCAST",
-        "adb shell dumpsys package | findstr /I READ_CELL_BROADCASTS",
-        "adb shell dumpsys package | findstr /I RECEIVE_SMS",
-        "adb shell pm list permissions -g -f | findstr /I -A3 emergency"
+        "adb shell dumpsys package | Select-String -Pattern RECEIVE_EMERGENCY_BROADCAST",
+        "adb shell dumpsys package | Select-String -Pattern SEND_EMERGENCY_BROADCAST",
+        "adb shell dumpsys package | Select-String -Pattern READ_CELL_BROADCASTS",
+        "adb shell dumpsys package | Select-String -Pattern RECEIVE_SMS",
+        "adb shell pm list permissions -g -f | Select-String -Pattern emergency -Context 3"
       ]
     },
     {
@@ -139,11 +139,11 @@
       "read_only": true,
       "reason": "Confirms the service is running and shows the channel configuration the phone is actually using. Also records the real carrier, which matters for the network-side question in Phase 5.",
       "commands": [
-        "adb shell dumpsys activity services | findstr /I -A6 cellbroadcast",
-        "adb shell dumpsys activity services | findstr /I -A6 CellBroadcastService",
-        "adb shell dumpsys carrier_config | findstr /I -A6 -B2 \"broadcast\"",
-        "adb shell dumpsys telephony.registry | findstr /I broadcast",
-        "adb shell getprop | findstr /I -E \"cb_|cellbroadcast\""
+        "adb shell dumpsys activity services | Select-String -Pattern cellbroadcast -Context 6",
+        "adb shell dumpsys activity services | Select-String -Pattern CellBroadcastService -Context 6",
+        "adb shell dumpsys carrier_config | Select-String -Pattern broadcast -Context 2,6",
+        "adb shell dumpsys telephony.registry | Select-String -Pattern broadcast",
+        "adb shell getprop | Select-String -Pattern 'cb_|cellbroadcast'"
       ],
       "note": "On Samsung, dumpsys carrier_config may require a filter; if it errors, send the error verbatim."
     },
@@ -154,9 +154,9 @@
       "read_only": true,
       "reason": "Alerts can be enabled or disabled per category by the user, and the AOSP research established that a preference gate can make a delivered message invisible. We need the phone's actual settings before drawing any conclusion from an absent alert.",
       "commands": [
-        "adb shell settings list global | findstr /I -E \"emergency|cell_broadcast|cellbroadcast\"",
-        "adb shell settings list secure | findstr /I -E \"emergency|cell_broadcast|cellbroadcast\"",
-        "adb shell settings list system | findstr /I -E \"emergency|cell_broadcast|cellbroadcast\""
+        "adb shell settings list global | Select-String -Pattern 'emergency|cell_broadcast|cellbroadcast'",
+        "adb shell settings list secure | Select-String -Pattern 'emergency|cell_broadcast|cellbroadcast'",
+        "adb shell settings list system | Select-String -Pattern 'emergency|cell_broadcast|cellbroadcast'"
       ]
     },
     {
@@ -166,9 +166,9 @@
       "read_only": true,
       "reason": "Phase 4's central hope: does Samsung ship a legitimate test-alert interface, as AOSP does? This looks for it in the package list and in the receiver package's component table. Finding nothing is a valid and useful result; we then know the phone has no built-in test entry point.",
       "commands": [
-        "adb shell pm list packages | findstr /I -E \"test|diagnostic|factory\"",
-        "adb shell dumpsys package com.android.cellbroadcastreceiver | findstr /I -A4 -E \"Activity|test\"",
-        "adb shell dumpsys package com.samsung.android.cellbroadcastreceiver | findstr /I -A4 -E \"Activity|test\""
+        "adb shell pm list packages | Select-String -Pattern 'test|diagnostic|factory'",
+        "adb shell dumpsys package com.android.cellbroadcastreceiver | Select-String -Pattern 'Activity|test' -Context 4",
+        "adb shell dumpsys package com.samsung.android.cellbroadcastreceiver | Select-String -Pattern 'Activity|test' -Context 4"
       ],
       "note": "Do not launch anything found here yet. Discovery only in this batch."
     },
