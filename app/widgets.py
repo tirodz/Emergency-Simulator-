@@ -1,13 +1,9 @@
-"""Visual primitives shared by the desktop interface.
+"""Modern visual primitives for the Emergency-Simulator desktop console.
 
-The interface is a laboratory instrument, not an emergency-alert screen, and the visual language has
-to make that unmistakable at a glance. Nothing here uses the red-and-white severity styling that real
-alerts use; the palette is restrained, the type is monospace, and status is carried by words as well
-as colour so it survives a monochrome display or a colour-blind operator.
-
-Tkinter's themed widgets cannot be styled deeply, so the components here are built from plain frames
-and canvases. That is deliberate: the buttons and cards used for the destructive-ish action need
-exact, predictable styling rather than whatever the platform theme decides.
+The visual language takes cues from the project's CMF Ringtone Tool reference: deep charcoal surfaces,
+soft borders, restrained glass-like layering, generous spacing, Segoe UI typography and one vivid orange
+accent. Tkinter cannot reproduce true compositor blur, so the implementation uses layered solid surfaces
+and subtle highlights instead. The result remains native, dependency-light and reliable on Windows.
 """
 
 from __future__ import annotations
@@ -15,35 +11,39 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Callable, Optional
 
-# -- palette ---------------------------------------------------------------
+BG = "#080a0d"
+BG_ALT = "#0d1014"
+PANEL = "#11151b"
+PANEL_ALT = "#171c23"
+PANEL_RAISED = "#1e252e"
+BORDER = "#252d37"
+BORDER_LIGHT = "#303946"
 
-BG = "#0d1015"
-PANEL = "#151a21"
-PANEL_ALT = "#1b212a"
-PANEL_RAISED = "#212832"
-BORDER = "#2a323d"
-BORDER_LIGHT = "#38424f"
+FG = "#f0f2f5"
+FG_DIM = "#a0a8b5"
+FG_FAINT = "#687281"
 
-FG = "#dde3ec"
-FG_DIM = "#8a95a5"
-FG_FAINT = "#5d6675"
+ACCENT = "#ff650f"
+ACCENT_ACTIVE = "#ff7d2c"
+ACCENT_DIM = "#6e2b0c"
 
-ACCENT = "#e0a33a"        # the test-alert action: caution, never alarm red
-ACCENT_ACTIVE = "#f0bb5e"
-ACCENT_DIM = "#6b4f1d"
+OK = "#44cf85"
+WARN = "#e0aa4b"
+ERR = "#ef6461"
+INFO = "#5ea9e6"
+NEUTRAL = "#8792a2"
 
-OK = "#4fae74"
-WARN = "#d9a441"
-ERR = "#d95f52"
-INFO = "#5c9dd6"
-NEUTRAL = "#7b8798"
+FONT = "Segoe UI Variable"
+FONT_FALLBACK = "Segoe UI"
+MONO = "Cascadia Mono"
+MONO_FALLBACK = "Consolas"
 
-MONO = "Consolas"
-MONO_FALLBACK = "Courier New"
+
+def ui_font(size: int = 9, bold: bool = False) -> tuple:
+    return (FONT, size, "bold") if bold else (FONT, size)
 
 
 def mono(size: int = 9, bold: bool = False) -> tuple:
-    """A monospace font tuple, with a fallback for platforms without Consolas."""
     return (MONO, size, "bold") if bold else (MONO, size)
 
 
@@ -51,25 +51,19 @@ def mono_fallback(size: int = 9, bold: bool = False) -> tuple:
     return (MONO_FALLBACK, size, "bold") if bold else (MONO_FALLBACK, size)
 
 
-# -- glyphs ----------------------------------------------------------------
-#
-# A release needs to look sharp on Windows, which has a colour emoji font. A development or CI host
-# may have no emoji font at all, where these characters render as empty boxes. Rather than ship
-# either a broken look or a dependency on a font, the symbols are chosen from ranges that are near
-# universal, and every glyph is paired with the word it stands for so meaning never depends on it.
-
 GLYPHS = {
-    "alert": "\u25b2",       # black up-pointing triangle
-    "cancel": "\u2715",      # multiplication x
-    "device": "\u25a0",      # black square
-    "ready": "\u25cf",       # black circle
-    "unknown": "\u25cb",     # white circle
-    "check": "\u2713",       # check mark
-    "cross": "\u2717",       # ballot x
-    "warn": "\u26a0",        # warning sign (monochrome in most UI fonts)
-    "arrow": "\u2192",       # rightwards arrow
-    "bullet": "\u00b7",      # middle dot
-    "lock": "\u25a3",        # square with left half black, used as a "locked" mark
+    "alert": "▲",
+    "cancel": "×",
+    "device": "■",
+    "ready": "●",
+    "unknown": "○",
+    "check": "✓",
+    "cross": "✕",
+    "warn": "!",
+    "arrow": "→",
+    "bullet": "·",
+    "lock": "▣",
+    "refresh": "↻",
 }
 
 
@@ -77,11 +71,7 @@ def glyph(name: str) -> str:
     return GLYPHS.get(name, GLYPHS["bullet"])
 
 
-# -- colour selection ------------------------------------------------------
-
-
 def state_colour(state: str) -> str:
-    """Colour for a device or alert state, chosen for meaning rather than decoration."""
     return {
         "READY": OK,
         "SUPPORTED": OK,
@@ -98,40 +88,43 @@ def state_colour(state: str) -> str:
         "ERROR": ERR,
         "UNKNOWN": FG_DIM,
         "UNTESTED": FG_DIM,
+        "ROOT_REQUIRED": ERR,
         "IDLE": FG_DIM,
         "CANCELLED": FG_DIM,
     }.get(state.upper(), FG)
 
 
-# -- components ------------------------------------------------------------
-
-
 class Card(tk.Frame):
-    """A bordered panel with a small caption. The unit of layout in this interface."""
+    """Layered panel with a soft border and a small caption."""
 
-    def __init__(self, parent, title: str = "", pad: int = 12, **kw):
+    def __init__(self, parent, title: str = "", pad: int = 16, **kw):
         super().__init__(
-            parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1, **kw
+            parent,
+            bg=PANEL,
+            highlightbackground=BORDER,
+            highlightcolor=BORDER_LIGHT,
+            highlightthickness=1,
+            bd=0,
+            **kw,
         )
-        self._title = title
-        self.body = tk.Frame(self, bg=PANEL)
-        self.body.pack(fill="both", expand=True, padx=pad, pady=(pad - 3, pad))
-
         if title:
             header = tk.Frame(self, bg=PANEL)
-            header.pack(fill="x", padx=pad, pady=(pad - 2, 0), before=self.body)
+            header.pack(fill="x", padx=pad, pady=(pad, 0))
             self.caption = tk.Label(
-                header, text=title.upper(), bg=PANEL, fg=FG_FAINT, font=mono(8, bold=True)
+                header,
+                text=title.upper(),
+                bg=PANEL,
+                fg=FG_FAINT,
+                font=ui_font(8, True),
             )
             self.caption.pack(side="left")
+            tk.Frame(self, bg=ACCENT, height=2, width=28).pack(side="right", pady=2)
+        self.body = tk.Frame(self, bg=PANEL)
+        self.body.pack(fill="both", expand=True, padx=pad, pady=(10 if title else pad, pad))
 
 
 class Button(tk.Frame):
-    """A flat button with explicit colours that do not follow the platform theme.
-
-    Tk's own Button cannot be made to look identical across platforms, so this is drawn from labels.
-    It keeps keyboard focus and an active state, which the previous plain Button provided for free.
-    """
+    """A consistent mouse/keyboard-friendly flat control."""
 
     def __init__(
         self,
@@ -141,32 +134,30 @@ class Button(tk.Frame):
         variant: str = "default",
         icon: str = "",
         padx: int = 14,
-        pady: int = 7,
+        pady: int = 8,
     ):
         styles = {
-            "primary": (ACCENT, "#101318", ACCENT_ACTIVE),
-            "danger": (PANEL_RAISED, ERR, "#2b333d"),
+            "primary": (ACCENT, "#ffffff", ACCENT_ACTIVE),
+            "danger": (PANEL_RAISED, ERR, "#28313b"),
             "ghost": (PANEL, FG_DIM, PANEL_ALT),
-            "default": (PANEL_RAISED, FG, "#2b333d"),
+            "default": (PANEL_RAISED, FG, "#28313b"),
         }
         bg, fg, active = styles.get(variant, styles["default"])
         self._bg, self._fg, self._active = bg, fg, active
         self._enabled = True
         self._command = command
-
-        super().__init__(parent, bg=bg, highlightthickness=0)
+        super().__init__(parent, bg=bg, bd=0, highlightthickness=0)
         self._label = tk.Label(
             self,
-            text=(f"{glyph(icon)}  {text}" if icon else text),
+            text=((glyph(icon) + "  ") if icon else "") + text,
             bg=bg,
             fg=fg,
-            font=mono(9, bold=True),
+            font=ui_font(9, True),
             padx=padx,
             pady=pady,
             cursor="hand2",
         )
-        self._label.pack()
-
+        self._label.pack(fill="both", expand=True)
         for widget in (self, self._label):
             widget.bind("<Button-1>", self._on_click)
             widget.bind("<Enter>", self._on_enter)
@@ -174,7 +165,7 @@ class Button(tk.Frame):
 
     def _paint(self, bg: str, fg: Optional[str] = None) -> None:
         self.configure(bg=bg)
-        self._label.configure(bg=bg, fg=fg if fg is not None else self._fg)
+        self._label.configure(bg=bg, fg=(fg if fg is not None else self._fg))
 
     def _on_click(self, _event) -> None:
         if self._enabled and self._command:
@@ -190,27 +181,34 @@ class Button(tk.Frame):
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
-        dim = PANEL_ALT
-        self._paint(self._bg if enabled else dim, self._fg if enabled else FG_FAINT)
+        self._paint(self._bg if enabled else BG_ALT, self._fg if enabled else FG_FAINT)
 
     def configure_text(self, text: str, icon: str = "") -> None:
-        self._label.configure(text=(f"{glyph(icon)}  {text}" if icon else text))
+        self._label.configure(text=((glyph(icon) + "  ") if icon else "") + text)
 
 
 class StatusPill(tk.Frame):
-    """A compact labelled status indicator: a coloured dot plus a word.
-
-    The word is always present, so the state is readable without relying on colour.
-    """
+    """Status word with a dot; readable without relying on colour."""
 
     def __init__(self, parent, label: str = "", value: str = "---"):
-        super().__init__(parent, bg=PANEL)
-        self._label = tk.Label(self, text=label, bg=PANEL, fg=FG_FAINT, font=mono(8, bold=True))
-        self._label.pack(side="left")
-        self._dot = tk.Label(self, text=glyph("unknown"), bg=PANEL, fg=FG_DIM, font=mono(10))
-        self._dot.pack(side="left", padx=(8, 5))
-        self._value = tk.Label(self, text=value, bg=PANEL, fg=FG, font=mono(9, bold=True))
-        self._value.pack(side="left")
+        super().__init__(parent, bg=BG_ALT)
+        if label:
+            self._label = tk.Label(
+                self,
+                text=label,
+                bg=BG_ALT,
+                fg=FG_FAINT,
+                font=ui_font(8, True),
+            )
+            self._label.pack(side="left", padx=(9, 4))
+        else:
+            self._label = tk.Label(self, text="", bg=BG_ALT)
+        self._dot = tk.Label(self, text=glyph("unknown"), bg=BG_ALT, fg=FG_DIM, font=ui_font(9))
+        self._dot.pack(side="left")
+        self._value = tk.Label(
+            self, text=value, bg=BG_ALT, fg=FG, font=ui_font(8, True)
+        )
+        self._value.pack(side="left", padx=(4, 9))
 
     def set(self, value: str, colour: Optional[str] = None, mark: str = "ready") -> None:
         self._value.configure(text=value)
@@ -220,12 +218,18 @@ class StatusPill(tk.Frame):
 
 
 class Banner(tk.Frame):
-    """A full-width strip used for the safety statement and for outcome announcements."""
+    """Full-width announcement strip."""
 
     def __init__(self, parent, text: str, fg: str = ACCENT, bg: str = PANEL_ALT):
-        super().__init__(parent, bg=bg, highlightbackground=BORDER, highlightthickness=1)
+        super().__init__(
+            parent,
+            bg=bg,
+            highlightbackground=BORDER,
+            highlightthickness=1,
+            bd=0,
+        )
         self._label = tk.Label(
-            self, text=text, bg=bg, fg=fg, font=mono(9, bold=True), pady=7, padx=12
+            self, text=text, bg=bg, fg=fg, font=ui_font(8, True), pady=9, padx=13
         )
         self._label.pack(fill="x")
 
@@ -235,32 +239,42 @@ class Banner(tk.Frame):
 
 
 class DeviceRow(tk.Frame):
-    """One selectable device, rendered as a row with its own status.
-
-    Selection is handled by the parent rather than by Tk's listbox, because the row needs to show a
-    support verdict and a note alongside the serial, which a listbox cannot express.
-    """
+    """Selectable device card row."""
 
     def __init__(self, parent, on_select: Callable[[str], None]):
-        super().__init__(parent, bg=PANEL_ALT, highlightthickness=1, highlightbackground=BORDER)
+        super().__init__(
+            parent,
+            bg=PANEL_ALT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            bd=0,
+        )
         self._serial = ""
         self._on_select = on_select
         self.selected = False
 
         inner = tk.Frame(self, bg=PANEL_ALT)
-        inner.pack(fill="x", padx=10, pady=7)
+        inner.pack(fill="x", padx=12, pady=10)
 
-        self._dot = tk.Label(inner, text=glyph("unknown"), bg=PANEL_ALT, fg=FG_DIM, font=mono(11))
-        self._dot.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 9))
+        self._dot = tk.Label(
+            inner, text=glyph("unknown"), bg=PANEL_ALT, fg=FG_DIM, font=ui_font(10, True)
+        )
+        self._dot.grid(row=0, column=0, rowspan=2, sticky="w", padx=(0, 10))
 
-        self._name = tk.Label(inner, text="", bg=PANEL_ALT, fg=FG, font=mono(9, bold=True), anchor="w")
+        self._name = tk.Label(
+            inner, text="", bg=PANEL_ALT, fg=FG, font=ui_font(9, True), anchor="w"
+        )
         self._name.grid(row=0, column=1, sticky="w")
 
-        self._meta = tk.Label(inner, text="", bg=PANEL_ALT, fg=FG_DIM, font=mono(8), anchor="w")
-        self._meta.grid(row=1, column=1, sticky="w")
+        self._meta = tk.Label(
+            inner, text="", bg=PANEL_ALT, fg=FG_DIM, font=ui_font(8), anchor="w"
+        )
+        self._meta.grid(row=1, column=1, sticky="w", pady=(2, 0))
 
-        self._verdict = tk.Label(inner, text="", bg=PANEL_ALT, fg=FG_DIM, font=mono(8, bold=True))
-        self._verdict.grid(row=0, column=2, rowspan=2, sticky="e", padx=(10, 0))
+        self._verdict = tk.Label(
+            inner, text="", bg=PANEL_ALT, fg=FG_DIM, font=ui_font(8, True)
+        )
+        self._verdict.grid(row=0, column=2, rowspan=2, sticky="e", padx=(12, 0))
         inner.columnconfigure(1, weight=1)
 
         for widget in (self, inner, self._dot, self._name, self._meta, self._verdict):
@@ -282,14 +296,15 @@ class DeviceRow(tk.Frame):
     ) -> None:
         self._serial = serial
         self._name.configure(text=name or serial)
-        self._meta.configure(text=f"{serial}   {meta}".strip())
+        self._meta.configure(text=(serial + "   " + meta).strip())
         self._verdict.configure(text=verdict, fg=colour)
         self._dot.configure(text=glyph(mark), fg=colour)
 
     def set_selected(self, selected: bool) -> None:
         self.selected = selected
         bg = PANEL_RAISED if selected else PANEL_ALT
-        self.configure(bg=bg, highlightbackground=ACCENT if selected else BORDER)
+        border = ACCENT if selected else BORDER
+        self.configure(bg=bg, highlightbackground=border)
         for widget in self.winfo_children():
             widget.configure(bg=bg)
             for sub in widget.winfo_children():
@@ -297,24 +312,25 @@ class DeviceRow(tk.Frame):
 
 
 class LogView(tk.Frame):
-    """An append-only, tagged log pane with severity colouring."""
+    """Append-only activity log."""
 
     def __init__(self, parent, height: int = 11):
-        super().__init__(parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1)
+        super().__init__(parent, bg=PANEL, highlightbackground=BORDER, highlightthickness=1, bd=0)
         self.text = tk.Text(
             self,
-            bg="#10151b",
+            bg=BG_ALT,
             fg=FG,
-            font=mono(9),
+            font=ui_font(9),
             relief="flat",
             highlightthickness=0,
             borderwidth=0,
             height=height,
             wrap="word",
             insertbackground=FG,
+            selectbackground=ACCENT_DIM,
             state="disabled",
-            padx=8,
-            pady=6,
+            padx=10,
+            pady=9,
         )
         self.text.pack(fill="both", expand=True)
         self.text.tag_configure("ok", foreground=OK)
@@ -322,12 +338,12 @@ class LogView(tk.Frame):
         self.text.tag_configure("warn", foreground=WARN)
         self.text.tag_configure("info", foreground=INFO)
         self.text.tag_configure("dim", foreground=FG_DIM)
-        self.text.tag_configure("head", foreground=FG, font=mono(9, bold=True))
+        self.text.tag_configure("head", foreground=FG, font=ui_font(9, True))
 
     def append(self, message: str, tag: str = "") -> None:
-        prefix = {"ok": "  \u2713 ", "err": "  \u2717 ", "warn": "  ! "}.get(tag, "  \u00b7 ")
+        prefix = {"ok": "  ✓ ", "err": "  × ", "warn": "  ! "}.get(tag, "  · ")
         self.text.configure(state="normal")
-        self.text.insert("end", f"{prefix}{message}\n", tag)
+        self.text.insert("end", prefix + message + "\n", tag)
         self.text.see("end")
         self.text.configure(state="disabled")
 

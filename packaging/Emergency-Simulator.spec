@@ -76,7 +76,7 @@ else:
 #
 # Staged by packaging/build_windows.ps1, either downloaded from Google's official repository or
 # copied from an existing Android SDK installation. Not committed to the repository: it is a
-# third-party binary distribution, and pinning it at build time is what makes a release reproducible.
+# third-party binary distribution. CI records the final executable hash; when a download is needed it uses Google's current archive.
 platform_tools = REPO_ROOT / "packaging" / "platform-tools"
 if GUI_ONLY:
     bundled_notes.append("platform-tools: NOT BUNDLED (GUI-only build)")

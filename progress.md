@@ -598,3 +598,14 @@ this branch's head at the time of writing. It was downloaded from the run's
    sending back the report gives a real-machine confirmation of the frozen-resource paths.
 3. Only then does "Windows EXE exercised against a real device" in the release gate have any
    evidence behind it.
+
+
+## Mission 3D — polished desktop release packaging (2026-09-19)
+
+**Status: IMPLEMENTED in the repository; release CI will provide the final Windows installer artifact.**
+
+The desktop interface has been refreshed into a dark, layered control console inspired by the CMF Ringtone Tool reference: graphite surfaces, orange accent, compact navigation, status pills, metric cards, a large test-alert composer and a dedicated activity panel. The underlying controller and its safety gates remain the only path to Android operations.
+
+The Windows workflow now validates the application/PE version match, builds the self-contained executable, builds an x64 per-user Inno Setup installer, hashes both artifacts and publishes them on version tags. The installer does not request administrator rights.
+
+Version 1.1.0 is the coordinated desktop release version. Actual alert delivery remains restricted to the proven controlled-development path; stock retail devices are not claimed supported.

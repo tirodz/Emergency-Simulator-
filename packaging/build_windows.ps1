@@ -14,8 +14,7 @@
 param(
     [switch]$SkipTests,
     [switch]$NoVenv,
-    [switch]$SkipPlatformTools,
-    [string]$PlatformToolsVersion = "36.0.0"
+    [switch]$SkipPlatformTools
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,7 +69,8 @@ if ($SkipPlatformTools) {
     if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
     New-Item -ItemType Directory -Path $Stage -Force | Out-Null
 
-    # Prefer a copy already present on this machine: it is faster and offline.
+    # Prefer a copy already present on this machine: it is faster and offline. When no local copy exists,
+    # the build consumes Google's current Platform Tools archive; the final executable hash is recorded.
     $LocalAdb = $null
     foreach ($candidate in @(
         (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe"),
@@ -89,7 +89,7 @@ if ($SkipPlatformTools) {
         Copy-Item (Join-Path (Split-Path -Parent $LocalAdb) "*") -Destination $Stage -Recurse -Force
     } else {
         $Url = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
-        $Zip = Join-Path $env:TEMP "platform-tools-$PlatformToolsVersion.zip"
+        $Zip = Join-Path $env:TEMP "platform-tools-latest-windows.zip"
         Write-Host "Platform Tools: downloading $Url"
         Invoke-WebRequest -Uri $Url -OutFile $Zip -UseBasicParsing
         Expand-Archive -Path $Zip -DestinationPath (Join-Path $env:TEMP "platform-tools-stage") -Force

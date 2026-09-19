@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   ui:
@@ -79,6 +79,9 @@ jobs:
             }
           }
           & "$stage\adb.exe" version
+
+      - name: Check the version resource matches the application version
+        run: python tools/check_version_info.py
 
       - name: Run the controller safety tests
         # These need no device. They must not require adb either: they assert invariants, and a host
@@ -233,3 +236,94 @@ jobs:
           path: dist/Emergency-Simulator-GUI-only.exe
           if-no-files-found: error
           retention-days: 30
+  installer:
+    name: Build Windows installer
+    needs: build
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Download the verified Windows executable
+        uses: actions/download-artifact@v4
+        with:
+          name: Emergency-Simulator-windows
+          path: dist
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          winget install --id JRSoftware.InnoSetup -e --scope user --accept-source-agreements --accept-package-agreements
+          $paths = @(
+            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
+            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+            "C:\Program Files\Inno Setup 6\ISCC.exe"
+          )
+          $iscc = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) {
+            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $iscc = $cmd.Source }
+          }
+          if (-not $iscc) { throw "Inno Setup compiler was not found after installation." }
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path installer-output -Force | Out-Null
+          & $env:ISCC_PATH "packaging\Emergency-Simulator.iss"
+
+      - name: Verify and hash the installer
+        shell: pwsh
+        run: |
+          $installer = "installer-output\Emergency-Simulator-Setup-1.1.0.exe"
+          if (-not (Test-Path $installer)) { throw "Installer was not produced: $installer" }
+          $v = (Get-Item $installer).VersionInfo
+          Write-Host "Installer : $installer"
+          Write-Host "Size      : $((Get-Item $installer).Length) bytes"
+          Write-Host "Product   : $($v.ProductName)"
+          Write-Host "Version   : $($v.ProductVersion)"
+          $h = (Get-FileHash $installer -Algorithm SHA256).Hash
+          Write-Host "SHA256    : $h"
+          "sha256 $h  Emergency-Simulator-Setup-1.1.0.exe" | Out-File -FilePath installer-sha256.txt -Encoding ascii
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: Emergency-Simulator-installer
+          path: |
+            installer-output/Emergency-Simulator-Setup-1.1.0.exe
+            installer-sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish tagged GitHub release
+    needs: [build, installer]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Windows executable
+        uses: actions/download-artifact@v4
+        with:
+          name: Emergency-Simulator-windows
+          path: release-assets
+
+      - name: Download Windows installer
+        uses: actions/download-artifact@v4
+        with:
+          name: Emergency-Simulator-installer
+          path: release-assets
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            release-assets/dist/Emergency-Simulator.exe
+            release-assets/dist/sha256.txt
+            release-assets/installer-output/Emergency-Simulator-Setup-1.1.0.exe
+            release-assets/installer-sha256.txt
