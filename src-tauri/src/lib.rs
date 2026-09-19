@@ -244,6 +244,10 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let root=is_root(app,&serial,&build_type);
         let cb=find_cellbroadcast(app,&serial);
         let mut notes=Vec::new();
+        let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356") || model.to_ascii_lowercase().contains("galaxy a35");
+        if samsung_a35 {
+            notes.push("Samsung Galaxy A35 detected. Read-only ADB diagnostics are supported on the stock build.".into());
+        }
         let (state,support)=if cb.is_none(){notes.push("No CellBroadcast receiver package was detected.".into());(DeviceState::Unsupported,SupportLevel::Unsupported)}
             else if !root{notes.push("Stock/non-root device. The protected CellBroadcast injection path is not demonstrated here.".into());(DeviceState::NoRoot,SupportLevel::RootRequired)}
             else{notes.push("Rooted/userdebug controlled target. Genuine Android CellBroadcast test path is available.".into());(DeviceState::Ready,SupportLevel::Supported)};
@@ -328,6 +332,12 @@ fn collect_evidence(app:&tauri::AppHandle,serial:&str,cancel:&CancelStore,send:&
 #[tauri::command]
 fn app_info(app:tauri::AppHandle)->Result<AppInfo,String>{let(_,source)=adb_path(&app);Ok(AppInfo{version:"2.0.0".into(),adb_source:source,injector:injector_path(&app).is_some()})}
 #[tauri::command] fn list_devices(app:tauri::AppHandle)->Result<Vec<Device>,String>{parse_devices(&app)}
+
+#[tauri::command]
+fn open_android_settings(app:tauri::AppHandle, serial:String)->Result<(),String>{
+    let _ = adb_call(&app, &["-s",&serial,"shell","am","start","-a","android.settings.SETTINGS"])?;
+    Ok(())
+}
 #[tauri::command] fn acknowledge(app:tauri::AppHandle,state:State<SharedTx>,serial:String)->Result<(),String>{set_tx(&app,&state,&serial,None)}
 #[tauri::command] fn request_cancel(state:State<SharedCancel>,serial:String)->Result<(),String>{set_cancel(&state,&serial);Ok(())}
 #[tauri::command]
@@ -380,6 +390,6 @@ async fn send_test_alert(app:tauri::AppHandle,tx:State<'_,SharedTx>,cancel:State
 pub fn run(){
  let tx:SharedTx=Arc::new(TxStore::default());let cancel:SharedCancel=Arc::new(CancelStore::default());
  tauri::Builder::default().manage(tx.clone()).manage(cancel).setup(move|app|{load_transactions(app.handle(),&tx);emit_log(app.handle(),"Emergency Simulator desktop runtime started","ok");Ok(())})
- .invoke_handler(tauri::generate_handler![app_info,list_devices,send_test_alert,acknowledge,request_cancel,reset_safety_state,window_minimize,window_toggle_maximize,window_close])
+ .invoke_handler(tauri::generate_handler![app_info,list_devices,send_test_alert,acknowledge,request_cancel,reset_safety_state,open_android_settings,window_minimize,window_toggle_maximize,window_close])
  .run(tauri::generate_context!()).expect("error while running Emergency Simulator");
 }
