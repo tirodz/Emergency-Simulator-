@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en" data-theme="midnight" data-accent="green">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+<title>Emergency Simulator — Android Alert Lab</title>
+<style>
+:root{
+ --bg:#050806;--bg2:#0a120e;--glass:rgba(16,26,21,.54);--glass2:rgba(12,19,16,.78);--soft:rgba(255,255,255,.035);
+ --line:rgba(255,255,255,.085);--line2:rgba(255,255,255,.17);--text:#f3f8f5;--muted:#99a69f;--muted2:#66736c;
+ --accent:#55f1a0;--accent2:#20d87f;--accentSoft:rgba(85,241,160,.12);--accentGlow:rgba(85,241,160,.30);
+ --cyan:#63dcff;--orange:#ff9b63;--warning:#ffca63;--danger:#ff6d6d;
+ --r:22px;--rs:15px;--blur:28px;--sidebar:230px;--top:58px;--ease:cubic-bezier(.16,1,.3,1);
+ --shadow:0 28px 90px rgba(0,0,0,.43),0 5px 20px rgba(0,0,0,.24);--shadowSoft:0 14px 40px rgba(0,0,0,.25);
+}
+html[data-theme="oled"]{--bg:#000;--bg2:#020402;--glass:rgba(7,12,10,.60);--glass2:rgba(5,9,7,.82)}
+html[data-theme="light"]{
+ --bg:#eef3f0;--bg2:#dbe6e0;--glass:rgba(255,255,255,.58);--glass2:rgba(255,255,255,.80);
+ --soft:rgba(0,0,0,.035);--line:rgba(10,32,22,.10);--line2:rgba(10,32,22,.18);--text:#132019;--muted:#586761;--muted2:#7c8882;
+ --accent:#139d57;--accent2:#0d7b42;--accentSoft:rgba(19,157,87,.11);--accentGlow:rgba(19,157,87,.20);
+}
+html[data-accent="cyan"]{--accent:#63dcff;--accent2:#22b8ec;--accentSoft:rgba(99,220,255,.12);--accentGlow:rgba(99,220,255,.29)}
+html[data-accent="orange"]{--accent:#ff9b63;--accent2:#ff6d22;--accentSoft:rgba(255,155,99,.12);--accentGlow:rgba(255,155,99,.29)}
+*{box-sizing:border-box}
+html,body{width:100%;height:100%;margin:0}
+body{
+ overflow:hidden;font-family:"Segoe UI Variable","Segoe UI",Inter,system-ui,-apple-system,sans-serif;color:var(--text);
+ background:
+  radial-gradient(900px 620px at 78% 2%,rgba(50,150,104,.19),transparent 65%),
+  radial-gradient(720px 560px at 5% 100%,rgba(45,106,83,.20),transparent 66%),
+  radial-gradient(540px 430px at 96% 80%,rgba(64,94,180,.08),transparent 74%),
+  linear-gradient(145deg,var(--bg),var(--bg2));
+ user-select:none;
+}
+body::before{content:"";position:fixed;inset:-10%;pointer-events:none;background:radial-gradient(360px 260px at var(--gx,50%) var(--gy,10%),rgba(255,255,255,.075),transparent 72%);filter:blur(55px);opacity:.8}
+button,input,textarea,select{font:inherit}
+button{border:0}
+.window{width:100%;height:100%;display:grid;grid-template-rows:var(--top) 1fr;position:relative}
+.topbar{
+ display:flex;align-items:center;gap:16px;padding:0 14px 0 18px;position:relative;z-index:80;border-bottom:1px solid var(--line);
+ background:rgba(5,9,7,.48);backdrop-filter:blur(30px) saturate(1.4);-webkit-backdrop-filter:blur(30px) saturate(1.4)
+}
+html[data-theme="light"] .topbar{background:rgba(244,249,246,.60)}
+.brand-mini{display:flex;align-items:center;gap:10px;min-width:225px;font-size:12px;font-weight:700;letter-spacing:.5px}
+.icon-glass{
+ width:32px;height:32px;border-radius:11px;display:grid;place-items:center;color:var(--accent);
+ background:radial-gradient(circle at 28% 18%,rgba(255,255,255,.22),transparent 42%),linear-gradient(145deg,rgba(46,100,76,.52),rgba(10,16,13,.82));
+ border:1px solid rgba(255,255,255,.17);box-shadow:inset 0 1px rgba(255,255,255,.16),0 0 22px var(--accentGlow)
+}
+.icon-glass svg{width:18px;height:18px}
+.crumb{font-size:11px;color:var(--muted);display:flex;gap:9px;align-items:center}.crumb strong{color:var(--text)}
+.spacer{flex:1}.top-pill{
+ display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:999px;border:1px solid var(--line);background:var(--soft);font-size:10px;color:var(--muted)
+}
+.top-pill strong{color:var(--text)}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--muted2)}.dot.green{background:var(--accent);box-shadow:0 0 0 4px var(--accentSoft),0 0 18px var(--accentGlow)}.dot.red{background:var(--danger);box-shadow:0 0 12px rgba(255,109,109,.28)}.dot.amber{background:var(--warning);box-shadow:0 0 12px rgba(255,202,99,.24)}
+.window-controls{display:flex;gap:2px;-webkit-app-region:no-drag}.win-btn{width:34px;height:30px;border-radius:9px;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}.win-btn:hover{background:rgba(255,255,255,.06);color:var(--text)}.win-btn.close:hover{background:#e81123;color:#fff}.win-btn svg{width:14px;height:14px;stroke:currentColor}
+.body{min-height:0;display:grid;grid-template-columns:var(--sidebar) minmax(0,1fr);position:relative;z-index:1}
+.sidebar{
+ min-height:0;padding:18px 14px 15px;display:flex;flex-direction:column;background:rgba(7,12,10,.42);
+ backdrop-filter:blur(32px) saturate(1.18);-webkit-backdrop-filter:blur(32px) saturate(1.18);border-right:1px solid var(--line);position:relative;overflow:hidden
+}
+html[data-theme="light"] .sidebar{background:rgba(248,252,249,.56)}
+.sidebar::before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--accentGlow),transparent)}
+.brand{display:flex;align-items:center;gap:10px;padding:5px 8px 23px}.brand .icon-glass{width:42px;height:42px;border-radius:14px}.brand-copy{display:flex;flex-direction:column;gap:2px}.brand-copy strong{font-size:13px;letter-spacing:1px}.brand-copy span{font-size:9px;letter-spacing:1.8px;text-transform:uppercase;color:var(--muted)}
+.nav-label{padding:0 10px 9px;font-size:9px;letter-spacing:1.7px;text-transform:uppercase;color:var(--muted2);font-weight:700}
+.nav{display:flex;flex-direction:column;gap:4px}.nav button{
+ display:flex;align-items:center;gap:11px;width:100%;padding:11px 12px;border-radius:13px;background:transparent;border:1px solid transparent;color:var(--muted);cursor:pointer;text-align:left;transition:.2s var(--ease)
+}
+.nav button svg{width:18px;height:18px;opacity:.75}.nav button span{font-size:12px;font-weight:600}.nav button:hover{background:rgba(255,255,255,.045);color:var(--text);transform:translateX(1px)}
+.nav button.active{color:var(--text);background:linear-gradient(135deg,var(--accentSoft),rgba(255,255,255,.026));border-color:rgba(255,255,255,.08);box-shadow:inset 0 1px rgba(255,255,255,.05),0 8px 20px rgba(0,0,0,.13)}
+.nav button.active svg{color:var(--accent);opacity:1}.nav button.active::after{content:"";margin-left:auto;width:5px;height:5px;border-radius:50%;background:var(--accent);box-shadow:0 0 13px var(--accentGlow)}
+.side-spacer{flex:1}.profile{padding:13px;border-radius:18px;background:rgba(255,255,255,.035);border:1px solid var(--line);box-shadow:inset 0 1px rgba(255,255,255,.04)}
+.profile-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.profile-head strong{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted)}.chip{padding:4px 7px;border-radius:999px;border:1px solid rgba(255,255,255,.05);background:var(--accentSoft);color:var(--accent);font-size:8px}
+.profile-row{display:flex;gap:8px;align-items:center;font-size:10px}.profile-row svg{width:15px;height:15px;color:var(--accent)}.profile-note{margin-top:6px;font-size:9px;line-height:1.45;color:var(--muted)}
+.side-foot{text-align:center;color:var(--muted2);font-size:9px;padding-top:10px;line-height:1.5}
+.main{min-width:0;min-height:0;overflow:auto;padding:26px 30px 24px}.main::-webkit-scrollbar{width:8px}.main::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
+.shell{max-width:1460px;margin:0 auto}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:17px}
+.eyebrow{font-size:10px;letter-spacing:1.9px;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}h1{margin:0;font-size:35px;line-height:1.05;letter-spacing:-1.5px} .hero-sub{margin-top:8px;font-size:12px;color:var(--muted)}.hero-sub b{color:var(--text)}
+.hero-actions{display:flex;gap:8px}.icon-btn{width:40px;height:40px;border-radius:13px;border:1px solid var(--line);background:rgba(255,255,255,.035);color:var(--muted);display:grid;place-items:center;cursor:pointer;backdrop-filter:blur(18px);transition:.2s var(--ease)}.icon-btn:hover{background:rgba(255,255,255,.06);color:var(--text);border-color:var(--line2);transform:translateY(-1px)}.icon-btn svg{width:18px;height:18px;stroke:currentColor}
+.glass{
+ position:relative;overflow:hidden;background:var(--glass);border:1px solid var(--line);border-radius:var(--r);backdrop-filter:blur(var(--blur)) saturate(1.24);-webkit-backdrop-filter:blur(var(--blur)) saturate(1.24);box-shadow:var(--shadowSoft),inset 0 1px rgba(255,255,255,.055)
+}
+.glass::before{content:"";position:absolute;inset:0;pointer-events:none;background:radial-gradient(400px 180px at var(--mx,25%) var(--my,0),rgba(255,255,255,.11),transparent 64%),linear-gradient(180deg,rgba(255,255,255,.035),transparent 28%);opacity:.8}.glass::after{content:"";position:absolute;left:14px;right:14px;top:0;height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent);pointer-events:none}.glass>*{position:relative;z-index:1}
+.strip{display:flex;align-items:center;gap:10px;padding:12px 15px;margin-bottom:15px}.strip-main{font-size:11px;color:var(--muted)}.strip-main strong{color:var(--text)}.strip-note{margin-left:auto;font-size:9px;letter-spacing:.7px;color:var(--muted2)}
+.dashboard{display:grid;grid-template-columns:minmax(460px,1.2fr) minmax(310px,.75fr);gap:15px}.stack{display:flex;flex-direction:column;gap:15px}.card{padding:20px}
+.title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:17px}.title{font-size:13px;font-weight:700}.kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.35px;color:var(--muted2);margin-top:4px}
+.badge{display:inline-flex;align-items:center;gap:7px;padding:7px 9px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.035);font-size:9px;color:var(--muted)}.badge.ok strong{color:var(--accent)}.badge.bad strong{color:var(--danger)}.badge.warn strong{color:var(--warning)}
+.device-list{display:flex;flex-direction:column;gap:8px}
+.device-preview{display:none;margin-top:12px;grid-template-columns:150px minmax(0,1fr);gap:16px;align-items:center;padding:14px;border-radius:18px;border:1px solid var(--line);background:linear-gradient(135deg,rgba(255,255,255,.045),rgba(255,255,255,.018));overflow:hidden}
+.device-preview.show{display:grid;animation:rise .45s var(--ease) both}
+.device-preview-art{height:150px;border-radius:16px;display:grid;place-items:center;background:radial-gradient(circle at 50% 35%,var(--accentSoft),transparent 58%),rgba(0,0,0,.16);border:1px solid var(--line);overflow:hidden}
+.device-preview-art img{width:128px;height:128px;object-fit:contain;filter:drop-shadow(0 16px 22px rgba(0,0,0,.30));transition:transform .35s var(--ease)}
+.device-preview:hover .device-preview-art img{transform:translateY(-2px) scale(1.025)}
+.preview-kicker{font-size:8px;letter-spacing:1.45px;text-transform:uppercase;color:var(--muted2);margin-bottom:5px}
+.preview-title{font-size:14px;font-weight:750;letter-spacing:-.3px}
+.preview-copy{font-size:9px;line-height:1.5;color:var(--muted);margin-top:5px}
+.preview-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.empty{padding:30px 14px;text-align:center;border:1px dashed var(--line);border-radius:18px;color:var(--muted)}.empty svg{width:25px;height:25px;margin:0 auto 9px;color:var(--muted2)}.empty strong{display:block;font-size:12px;color:var(--text);margin-bottom:4px}.empty span{font-size:10px;line-height:1.55}
+.device{width:100%;display:flex;align-items:center;gap:12px;padding:13px;border-radius:17px;border:1px solid var(--line);background:rgba(255,255,255,.028);color:var(--text);cursor:pointer;text-align:left;transition:.2s var(--ease)}.device:hover{background:rgba(255,255,255,.05);border-color:var(--line2);transform:translateY(-1px)}.device.selected{background:linear-gradient(135deg,var(--accentSoft),rgba(255,255,255,.025));border-color:rgba(255,255,255,.13);box-shadow:inset 0 1px rgba(255,255,255,.06),0 10px 22px rgba(0,0,0,.14)}
+.device-icon{width:40px;height:40px;border-radius:13px;display:grid;place-items:center;background:rgba(255,255,255,.045);border:1px solid var(--line);flex:none}.device-icon svg{width:19px;height:19px;stroke:currentColor;color:var(--muted)}.device.selected .device-icon{background:var(--accentSoft)}.device.selected .device-icon svg{color:var(--accent)}
+.device-mid{min-width:0;flex:1}.device-name{font-size:12px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.device-meta{font-size:9.5px;color:var(--muted);margin-top:3px}.device-state{display:flex;align-items:center;gap:7px;font-size:8.5px;flex:none;color:var(--muted)}.device-state.ready{color:var(--accent)}.device-state.bad{color:var(--danger)}.device-state.warn{color:var(--warning)}
+.detail{margin-top:12px;padding:13px 14px;border:1px solid var(--line);border-radius:16px;background:rgba(0,0,0,.10)}.detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 13px}.kv label{display:block;font-size:8px;letter-spacing:1.15px;text-transform:uppercase;color:var(--muted2);margin-bottom:4px}.kv span{display:block;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.detail-note{margin-top:9px;font-size:9px;line-height:1.5;color:var(--muted)}
+.help{display:none;margin-top:11px;padding:12px 13px;border-radius:15px;background:rgba(255,202,99,.07);border:1px solid rgba(255,202,99,.15)}.help.show{display:block}.help strong{display:block;font-size:10px;color:var(--warning);margin-bottom:4px}.help span{font-size:9px;line-height:1.5;color:var(--muted)}
+.divider{height:1px;background:var(--line);margin:18px 0}.label{display:flex;justify-content:space-between;align-items:center;font-size:9px;letter-spacing:1.25px;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}.label small{font-size:8.5px;text-transform:none;letter-spacing:0}
+.select,.textarea{width:100%;border:1px solid var(--line);border-radius:15px;background:rgba(255,255,255,.035);color:var(--text);outline:0;box-shadow:inset 0 1px rgba(255,255,255,.035);transition:.2s var(--ease)}.select{height:45px;padding:0 13px;appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 17px) 18px,calc(100% - 12px) 18px;background-size:5px 5px;background-repeat:no-repeat}.textarea{min-height:110px;resize:none;padding:13px 14px;font-size:12px;line-height:1.55}.select:focus,.textarea:focus{border-color:rgba(255,255,255,.22);box-shadow:0 0 0 3px var(--accentSoft),inset 0 1px rgba(255,255,255,.05)}.select option{background:#0d1511;color:#fff}
+.metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.metric{padding:13px;border-radius:16px;border:1px solid var(--line);background:rgba(255,255,255,.025)}.metric-label{font-size:8px;letter-spacing:1.15px;text-transform:uppercase;color:var(--muted2)}.metric-value{font-size:20px;font-weight:750;letter-spacing:-.4px;margin-top:6px}.metric-sub{font-size:8.5px;color:var(--muted);margin-top:2px}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}.tiny{padding:6px 8px;border-radius:999px;border:1px solid var(--line);background:rgba(255,255,255,.025);font-size:8.5px;color:var(--muted)}.tiny strong{color:var(--text)}.tiny.green strong{color:var(--accent)}
+.actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:12px}
+.action-main{grid-template-columns:auto minmax(0,1fr) auto}
+.action-main .quiet{min-width:132px}.btn{
+ min-height:46px;padding:0 15px;border-radius:15px;display:inline-flex;align-items:center;justify-content:center;gap:9px;cursor:pointer;color:var(--text);background:rgba(255,255,255,.035);border:1px solid var(--line);font-size:10.5px;font-weight:700;box-shadow:inset 0 1px rgba(255,255,255,.06);transition:.2s var(--ease);position:relative;overflow:hidden
+}.btn::before{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.07),transparent 44%);pointer-events:none}.btn:hover:not(:disabled){transform:translateY(-1px);background:rgba(255,255,255,.06);border-color:var(--line2)}.btn:active:not(:disabled){transform:translateY(0) scale(.985)}.btn:disabled{opacity:.38;cursor:not-allowed}.btn svg{width:16px;height:16px;stroke:currentColor;position:relative}.primary{color:#031008;background:linear-gradient(135deg,#7cffb8,var(--accent2));border-color:rgba(170,255,215,.50);box-shadow:0 0 0 1px rgba(92,255,168,.07),0 14px 32px rgba(35,207,120,.22),0 0 36px rgba(68,236,150,.10)}.primary:hover:not(:disabled){background:linear-gradient(135deg,#9affca,#35e58a);box-shadow:0 17px 38px rgba(35,207,120,.25),0 0 42px var(--accentGlow)}.quiet{min-width:95px}
+.validation{min-height:15px;margin-top:7px;color:var(--muted);font-size:9px}.validation.ok{color:var(--accent)}.validation.error{color:var(--danger)}.note{font-size:8.7px;line-height:1.5;color:var(--muted2);margin-top:8px}.note b{color:var(--muted)}
+.connection{display:flex;align-items:center;gap:11px}.orb{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;background:var(--accentSoft);color:var(--accent);border:1px solid rgba(255,255,255,.08);box-shadow:0 0 0 6px rgba(85,241,160,.03),0 0 26px rgba(85,241,160,.12);flex:none}.orb svg{width:16px;height:16px}.copy{min-width:0}.copy strong{display:block;font-size:10.5px}.copy span{display:block;font-size:9px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pipeline{display:flex;flex-direction:column;gap:10px}.pipe{display:grid;grid-template-columns:30px 1fr auto;gap:10px;align-items:center}.mark{width:30px;height:30px;border-radius:10px;display:grid;place-items:center;background:rgba(255,255,255,.035);border:1px solid var(--line)}.mark svg{width:14px;height:14px;stroke:var(--muted)}.pipe-copy strong{display:block;font-size:10px}.pipe-copy span{display:block;font-size:8.5px;color:var(--muted);margin-top:2px}.pipe-state{font-size:8px;color:var(--muted2)}.pipe-state.ok{color:var(--accent)}.pipe-state.warn{color:var(--warning)}
+.activity{min-height:245px;display:flex;flex-direction:column}.activity-log{min-height:180px;max-height:290px;overflow:auto}.activity-log::-webkit-scrollbar{width:6px}.activity-log::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}.logline{display:grid;grid-template-columns:50px 7px 1fr;gap:8px;padding:7px 6px;border-bottom:1px solid rgba(255,255,255,.035)}.logtime{font-size:8px;color:var(--muted2);font-variant-numeric:tabular-nums}.logdot{width:5px;height:5px;border-radius:50%;background:var(--muted2);margin-top:4px}.logdot.ok{background:var(--accent);box-shadow:0 0 9px var(--accentGlow)}.logdot.warn{background:var(--warning)}.logdot.error{background:var(--danger)}.logmsg{font-size:9px;color:var(--muted);line-height:1.4}
+.result{display:none;align-items:center;gap:10px;padding:13px 14px}.result-copy{min-width:0}.result-copy strong{display:block;font-size:10.5px}.result-copy span{display:block;font-size:8.7px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.result-action{margin-left:auto}
+.small{min-height:35px;padding:0 11px;border-radius:12px;font-size:9px}
+.settings{position:fixed;top:68px;right:20px;width:318px;padding:16px;display:none;z-index:150;background:var(--glass2);box-shadow:var(--shadow)}.settings.show{display:block;animation:pop .26s var(--ease)}.settings-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px}.settings-head strong{font-size:12px}.settings-grid{display:flex;flex-direction:column;gap:13px}.theme-row{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.theme-btn{height:33px;border-radius:11px;border:1px solid var(--line);background:rgba(255,255,255,.03);color:var(--muted);font-size:9px;cursor:pointer}.theme-btn.active{color:var(--text);background:var(--accentSoft);border-color:rgba(255,255,255,.13)}.accent-row{display:flex;gap:8px}.accent-btn{width:28px;height:28px;border-radius:50%;border:1px solid rgba(255,255,255,.18);cursor:pointer;box-shadow:inset 0 1px rgba(255,255,255,.48)}.accent-btn.green{background:#55f1a0}.accent-btn.cyan{background:#63dcff}.accent-btn.orange{background:#ff9b63}.toggle{width:42px;height:24px;border-radius:99px;padding:2px;background:rgba(255,255,255,.045);border:1px solid var(--line);cursor:pointer}.toggle::after{content:"";display:block;width:18px;height:18px;border-radius:50%;background:var(--muted2);transition:.2s var(--ease)}.toggle.on{background:var(--accentSoft)}.toggle.on::after{transform:translateX(18px);background:var(--accent);box-shadow:0 0 14px var(--accentGlow)}.setting-row{display:flex;justify-content:space-between;gap:12px;align-items:center}.setting-copy strong{display:block;font-size:10px}.setting-copy span{display:block;font-size:8.5px;color:var(--muted);margin-top:3px}
+.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.40);backdrop-filter:blur(10px);display:none;z-index:140}.backdrop.show{display:block}
+.modal{position:fixed;left:50%;top:50%;transform:translate(-50%,-48%) scale(.98);width:min(560px,calc(100vw - 40px));padding:20px;z-index:170;display:none;background:var(--glass2);box-shadow:var(--shadow)}.modal.show{display:block;animation:pop .25s var(--ease)}.modal h2{margin:0 0 6px;font-size:15px}.modal p{margin:0;color:var(--muted);font-size:10px;line-height:1.55}.modal-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:15px}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(14px);opacity:0;pointer-events:none;z-index:220;padding:12px 15px;border-radius:14px;border:1px solid var(--line2);background:rgba(10,16,13,.91);backdrop-filter:blur(26px);box-shadow:var(--shadowSoft);font-size:9.5px;transition:.28s var(--ease);max-width:calc(100vw - 40px)}.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}.toast.ok{border-color:rgba(85,241,160,.25)}.toast.error{border-color:rgba(255,109,109,.28)}
+.fatal{display:none;position:fixed;inset:auto 24px 24px 24px;padding:16px;border-radius:15px;background:rgba(31,10,12,.94);border:1px solid rgba(255,109,109,.28);z-index:300}.fatal.show{display:block}.fatal strong{display:block;color:var(--danger);font-size:11px;margin-bottom:5px}.fatal span{font-size:9px;color:#d2bfc1;line-height:1.5}
+@keyframes pop{from{opacity:0;transform:translateY(-8px) scale(.98)}to{opacity:1;transform:none}}@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}.rise{animation:rise .55s var(--ease) both}.r1{animation-delay:.05s}.r2{animation-delay:.10s}.r3{animation-delay:.15s}.r4{animation-delay:.20s}.r5{animation-delay:.25s}
+@media(max-width:1080px){:root{--sidebar:205px}.main{padding:20px}.dashboard{grid-template-columns:1fr}.right-stack{display:grid;grid-template-columns:1fr 1fr}}
+@media(max-width:760px){:root{--sidebar:0px}.sidebar{display:none}.main{padding:18px}.brand-mini,.crumb{display:none}h1{font-size:28px}.right-stack{display:flex}}
+html.reduced-motion *,html.reduced-motion *::before,html.reduced-motion *::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}
+</style>
+</head>
+<body>
+<div class="window">
+<header class="topbar" data-tauri-drag-region>
+  <div class="brand-mini"><div class="icon-glass"><svg viewBox="0 0 24 24" fill="none"><path d="M7 5v14M7 5h8.5a3.5 3.5 0 1 1 0 7H7m0 0h8a3.5 3.5 0 1 1 0 7H7" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg></div><span>EMERGENCY SIMULATOR</span></div>
+  <div class="crumb"><strong>Android Alert Lab</strong><span>•</span><span>Controlled test console</span></div><div class="spacer"></div>
+  <div class="top-pill"><span id="adbDot" class="dot green"></span><span>ADB</span><strong id="adbStatus">BUNDLED</strong></div>
+  <div class="top-pill"><span id="modeDot" class="dot green"></span><span>MODE</span><strong>TEST ONLY</strong></div>
+  <div class="window-controls"><button class="win-btn" id="minBtn"><svg viewBox="0 0 24 24" fill="none"><path d="M5 12h14" stroke-width="1.6"/></svg></button><button class="win-btn" id="maxBtn"><svg viewBox="0 0 24 24" fill="none"><rect x="6" y="6" width="12" height="12" rx="1.5" stroke-width="1.6"/></svg></button><button class="win-btn close" id="closeBtn"><svg viewBox="0 0 24 24" fill="none"><path d="m7 7 10 10M17 7 7 17" stroke-width="1.7"/></svg></button></div>
+</header>
+<div class="body">
+<aside class="sidebar">
+  <div class="brand rise"><div class="icon-glass"><svg viewBox="0 0 24 24" fill="none"><path d="M7 5v14M7 5h8.5a3.5 3.5 0 1 1 0 7H7m0 0h8a3.5 3.5 0 1 1 0 7H7" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></svg></div><div class="brand-copy"><strong>EMERGENCY</strong><span>Alert Lab</span></div></div>
+  <div class="nav-label">Control center</div><nav class="nav">
+   <button class="active" data-nav="overview"><svg viewBox="0 0 24 24" fill="none"><rect x="4" y="4" width="7" height="7" rx="1.8" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="4" width="7" height="7" rx="1.8" stroke="currentColor" stroke-width="1.7"/><rect x="4" y="13" width="7" height="7" rx="1.8" stroke="currentColor" stroke-width="1.7"/><rect x="13" y="13" width="7" height="7" rx="1.8" stroke="currentColor" stroke-width="1.7"/></svg><span>Overview</span></button>
+   <button data-nav="devices"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="3" width="10" height="18" rx="2.5" stroke="currentColor" stroke-width="1.7"/><path d="M10 6h4M11 18h2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Devices</span></button>
+   <button data-nav="activity"><svg viewBox="0 0 24 24" fill="none"><path d="M5 7h14M5 12h14M5 17h9" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>Activity</span></button>
+   <button id="settingsNav"><svg viewBox="0 0 24 24" fill="none"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" stroke="currentColor" stroke-width="1.7"/><path d="m4.8 13.1-.9 1.6 1.7 2.9 1.9-.2 1.5.9.7 1.8h3.4l.7-1.8 1.5-.9 1.9.2 1.7-2.9-.9-1.6v-1.8Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></svg><span>Settings</span></button>
+  </nav>
+  <div class="side-spacer"></div>
+  <div class="profile"><div class="profile-head"><strong>Safe test profile</strong><span class="chip">LOCKED</span></div><div class="profile-row"><svg viewBox="0 0 24 24" fill="none"><path d="M6 7.2A2.2 2.2 0 0 1 8.2 5h7.6A2.2 2.2 0 0 1 18 7.2v9.6a2.2 2.2 0 0 1-2.2 2.2H8.2A2.2 2.2 0 0 1 6 16.8V7.2Z" stroke="currentColor" stroke-width="1.7"/><path d="M8.7 11.9h6.6M8.7 15h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg><span>ETWS TEST · 4355</span></div><div class="profile-note">Local Android test pipeline. No RF or cellular transmission.</div></div>
+  <div class="side-foot">v2.0.0 · Tauri + Rust · Windows</div>
+</aside>
+<main class="main"><div class="shell">
+  <div class="hero rise r1"><div><div class="eyebrow">Command center</div><h1>Emergency Alert Lab</h1><div class="hero-sub"><b id="heroState">Waiting for a device</b><span> · </span><span>Real Android CellBroadcast test path</span></div></div><div class="hero-actions"><button class="icon-btn" id="refreshBtn" title="Refresh devices"><svg viewBox="0 0 24 24" fill="none"><path d="M19 8a7 7 0 0 0-12.4-2.3L5 7.5M5 7.5V4.2M5 7.5h3.3M5 16a7 7 0 0 0 12.4 2.3L19 16.5m0 0v3.3m0-3.3h-3.3" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button class="icon-btn" id="settingsBtn" title="Appearance"><svg viewBox="0 0 24 24" fill="none"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z" stroke="currentColor" stroke-width="1.7"/><path d="m4.8 13.1-.9 1.6 1.7 2.9 1.9.2 1.5.9.7 1.8h3.4l.7-1.8 1.9-.2 1.7 2.9-.9 1.6v-1.8l.9-1.6-1.7-2.9-1.9.2-1.5.9-.7 1.8h-3.4l-.7-1.8-1.5-.9-1.9.2-1.7-2.9.9-1.6Z" stroke="currentColor" stroke-width="1.3"/></svg></button></div></div>
+  <div class="glass strip rise r2"><span id="statusDot" class="dot green"></span><div class="strip-main"><strong id="statusTitle">Ready to inspect devices.</strong><span id="statusText"> Unlock the phone and accept the USB debugging prompt when it appears.</span></div><div class="strip-note">TEST ONLY · CONTROLLED DEVICE · NO CELLULAR TRANSMISSION</div></div>
+  <div class="dashboard">
+   <div class="stack">
+    <section class="glass card rise r3" id="devicesCard"><div class="title-row"><div><div class="title">Devices</div><div class="kicker">ADB targets · capability-aware</div></div><div id="deviceBadge" class="badge"><span class="dot"></span><strong>NO TARGET</strong></div></div><div id="deviceList" class="device-list"></div><div id="deviceDetail" class="detail" style="display:none"></div>
+<div id="devicePreview" class="device-preview">
+  <div class="device-preview-art"><img src="assets/samsung-device.png" alt="Samsung device reference render"></div>
+  <div><div class="preview-kicker">Hardware preview</div><div id="previewTitle" class="preview-title">Samsung Galaxy</div><div id="previewCopy" class="preview-copy">A local PNG reference render is used so the interface stays fast and available offline.</div><div class="preview-chips"><span class="tiny green">PNG · local</span><span class="tiny">Visual reference</span><span class="tiny">No network dependency</span></div></div>
+</div>
+<div id="connectHelp" class="help"><strong>USB debugging authorization required</strong><span>Unlock the Android phone and accept the “Allow USB debugging?” prompt. Then press Refresh. A listed device is not considered ready until its capabilities are inspected. On a Galaxy A35, the phone will appear here by model after authorization.</span></div></section>
+    <section class="glass card rise r4"><div class="title-row"><div><div class="title">Test alert</div><div class="kicker">Android protected test pipeline</div></div><div class="badge warn"><span class="dot amber"></span><strong>ETWS TEST</strong></div></div>
+      <div class="label"><span>Target device</span><small id="targetHint">Select a device</small></div><select id="targetSelect" class="select"></select>
+      <div class="divider"></div>
+      <div class="metrics"><div class="metric"><div class="metric-label">Type</div><div class="metric-value" style="font-size:14px;letter-spacing:0">ETWS TEST</div><div class="metric-sub">Fixed safe class</div></div><div class="metric"><div class="metric-label">Channel</div><div class="metric-value">4355</div><div class="metric-sub">0x1103 · locked</div></div><div class="metric"><div class="metric-label">Transport</div><div class="metric-value" style="font-size:14px;letter-spacing:0">LOCAL</div><div class="metric-sub">ADB → Android</div></div></div>
+      <div style="height:14px"></div><div class="label"><span>Message</span><small>Must begin with TEST</small></div><textarea id="message" class="textarea" maxlength="300">TEST ALERT - SIMULATION</textarea><div id="validation" class="validation">Use a visible TEST prefix so the alert is always identifiable as a simulation.</div>
+      <div class="chips"><div class="tiny green"><strong>Protected</strong> broadcast path</div><div class="tiny"><strong>System UI</strong> handles display</div><div class="tiny"><strong>No RF</strong> involved</div></div>
+      <div class="actions action-main"><button id="settingsDeviceBtn" class="btn quiet" disabled>DEVELOPER OPTIONS</button><button id="sendBtn" class="btn primary" disabled><svg viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6.5 11.5 12 6l5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>SEND TEST ALERT</span></button><button id="dryBtn" class="btn quiet" disabled>DRY RUN</button></div>
+      <div class="actions" style="grid-template-columns:auto 1fr"><button id="cancelBtn" class="btn quiet" disabled>STOP / CANCEL</button><div class="note"><b>A35 / STOCK MODE</b> is diagnostic-only. The controller will never pretend a retail phone is a working CellBroadcast injector. <b>CANCEL</b> stops a pending computer-side operation. An alert already displayed by Android cannot be dismissed remotely.</div></div>
+    </section>
+   </div>
+   <div class="stack right-stack">
+    <section class="glass card rise r3"><div class="title-row"><div><div class="title">Connection</div><div class="kicker">Current target health</div></div><div id="connBadge" class="badge warn"><span class="dot amber"></span><strong>WAITING</strong></div></div><div class="connection"><div id="connOrb" class="orb"><svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="1.1"/><path d="M12 7v10M7 12h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div><div class="copy"><strong id="connTitle">No selected device</strong><span id="connText">Connect an Android target over ADB.</span></div></div><div style="height:14px"></div><div class="metrics"><div class="metric"><div class="metric-label">Connected</div><div id="mConnected" class="metric-value">0</div><div class="metric-sub">ADB transports</div></div><div class="metric"><div class="metric-label">Ready</div><div id="mReady" class="metric-value">0</div><div class="metric-sub">Root + CB</div></div><div class="metric"><div class="metric-label">App mode</div><div class="metric-value" style="font-size:13px;letter-spacing:0">LAB</div><div class="metric-sub">No RF</div></div></div></section>
+    <section class="glass card rise r4"><div class="title-row"><div><div class="title">Pipeline</div><div class="kicker">What the controller actually does</div></div></div><div class="pipeline">
+      <div class="pipe"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="3" width="10" height="18" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 6h4M11 18h2" stroke-linecap="round" stroke-width="1.5"/></svg></div><div class="pipe-copy"><strong>ADB transport</strong><span>Find and inspect the selected device</span></div><div id="pipeAdb" class="pipe-state ok">READY</div></div>
+      <div class="pipe"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M12 4v16M5 11h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="12" r="7" stroke="currentColor" stroke-width="1"/></svg></div><div class="pipe-copy"><strong>Controlled privilege</strong><span>Root/userdebug is required for the protected path</span></div><div id="pipeRoot" class="pipe-state">WAIT</div></div>
+      <div class="pipe"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><path d="M6 8.5A6 6 0 0 1 18 8.5v4a6 6 0 0 1-12 0v-4Z" stroke="currentColor" stroke-width="1.6"/><path d="M9 12.5h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><div class="pipe-copy"><strong>CellBroadcast receiver</strong><span>Android's own receiver/service handles the message</span></div><div id="pipeCb" class="pipe-state">WAIT</div></div>
+      <div class="pipe"><div class="mark"><svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="12" height="16" rx="2.3" stroke="currentColor" stroke-width="1.6"/><path d="M9 7h6M9 10h6M9 13h4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><div class="pipe-copy"><strong>System alert UI</strong><span>Success is claimed only after downstream evidence</span></div><div id="pipeUi" class="pipe-state">WAIT</div></div>
+    </div></section>
+    <section class="glass card activity rise r5"><div class="title-row" style="margin-bottom:9px"><div><div class="title">Activity</div><div class="kicker">Live controller events</div></div><button id="clearBtn" class="btn small">Clear</button></div><div id="activityLog" class="activity-log"></div></section>
+    <section id="resultCard" class="glass result"><div id="resultOrb" class="orb"><svg viewBox="0 0 24 24" fill="none"><path d="m7 12 3.2 3.2L17 8.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="result-copy"><strong id="resultTitle">Result</strong><span id="resultText">—</span></div><div class="result-action"><button id="ackBtn" class="btn small">Acknowledge</button></div></section>
+   </div>
+  </div>
+</div></main></div></div>
+
+<div id="backdrop" class="backdrop"></div>
+<div id="settingsPanel" class="glass settings"><div class="settings-head"><strong>Appearance</strong><button id="closeSettings" class="icon-btn" style="width:32px;height:32px"><svg viewBox="0 0 24 24" fill="none"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button></div>
+<div class="settings-grid"><div><div class="label"><span>Theme</span></div><div class="theme-row"><button class="theme-btn" data-theme="midnight">Midnight</button><button class="theme-btn" data-theme="oled">OLED</button><button class="theme-btn" data-theme="light">Light</button></div></div>
+<div><div class="label"><span>Accent</span></div><div class="accent-row"><button class="accent-btn green" data-accent="green" title="Emerald"></button><button class="accent-btn cyan" data-accent="cyan" title="Cyan"></button><button class="accent-btn orange" data-accent="orange" title="Orange"></button></div></div>
+<div class="setting-row"><div class="setting-copy"><strong>Ambient cursor glow</strong><span>Move the light across glass surfaces.</span></div><button id="glowToggle" class="toggle on"></button></div>
+<div class="setting-row"><div class="setting-copy"><strong>Reduced motion</strong><span>Disable launch and hover motion.</span></div><button id="motionToggle" class="toggle"></button></div>
+<div><div class="label"><span>Safety state</span></div><button id="resetStateBtn" class="btn" style="width:100%">Reset local safety gate</button><div class="note">Only use after manually checking any device that may still show an alert.</div></div>
+</div></div>
+<div id="confirmModal" class="glass modal"><h2>Send a controlled test alert?</h2><p id="confirmText">Android will receive one ETWS TEST message through the protected CellBroadcast receiver path. No cellular transmission or RF operation is performed.</p><div class="modal-actions"><button id="modalNo" class="btn">Cancel</button><button id="modalYes" class="btn primary">Send TEST alert</button></div></div>
+<div id="toast" class="toast"></div><div id="fatal" class="fatal"><strong>Emergency Simulator could not start</strong><span id="fatalText"></span></div>
+
+<script>
+(function(){
+"use strict";
+const unavailable=()=>Promise.reject(new Error("Tauri runtime is not available. Launch the packaged desktop application."));
+const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)?window.__TAURI__.core.invoke:unavailable;
+const state={devices:[],selected:null,sending:false,theme:localStorage.getItem("es-theme")||"midnight",accent:localStorage.getItem("es-accent")||"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
+const $=id=>document.getElementById(id);
+function now(){return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
+function esc(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
+function toast(message,kind=""){const e=$("toast");e.textContent=message;e.className="toast show "+kind;clearTimeout(toast.t);toast.t=setTimeout(()=>e.className="toast",4300)}
+function log(message,kind="info"){state.log.unshift({time:now(),message,kind});state.log=state.log.slice(0,80);renderLog()}
+function renderLog(){const e=$("activityLog");if(!state.log.length){e.innerHTML='<div class="empty" style="border:0;padding:30px 8px"><strong>No activity yet</strong><span>Device discovery and controller events will appear here.</span></div>';return}e.innerHTML=state.log.map(x=>'<div class="logline"><div class="logtime">'+x.time+'</div><div class="logdot '+(x.kind==="ok"?"ok":x.kind==="warn"?"warn":x.kind==="error"?"error":"")+'"></div><div class="logmsg">'+esc(x.message)+'</div></div>').join("")}
+function setTheme(v){state.theme=v;document.documentElement.dataset.theme=v;localStorage.setItem("es-theme",v);document.querySelectorAll(".theme-btn").forEach(b=>b.classList.toggle("active",b.dataset.theme===v))}
+function setAccent(v){state.accent=v;document.documentElement.dataset.accent=v;localStorage.setItem("es-accent",v);document.querySelectorAll(".accent-btn").forEach(b=>b.style.outline=b.dataset.accent===v?"2px solid rgba(255,255,255,.78)":"")}
+function syncSettings(){$("glowToggle").classList.toggle("on",state.glow);$("motionToggle").classList.toggle("on",state.reduced);document.documentElement.classList.toggle("reduced-motion",state.reduced)}
+function settings(open){$("settingsPanel").classList.toggle("show",open);$("backdrop").classList.toggle("show",open)}
+function selected(){return state.devices.find(d=>d.serial===state.selected)||null}
+function visual(d){if(!d)return{label:"WAITING",kind:"warn",dot:"amber"};if(d.state==="READY")return{label:"READY",kind:"ok",dot:"green"};if(d.state==="UNAUTHORIZED")return{label:"UNAUTHORIZED",kind:"bad",dot:"red"};if(d.state==="NO_ROOT"||d.state==="UNSUPPORTED")return{label:"STOCK / UNPROVEN",kind:"warn",dot:"amber"};if(d.state==="OFFLINE")return{label:"OFFLINE",kind:"bad",dot:"red"};return{label:d.state||"UNKNOWN",kind:"warn",dot:"amber"}}
+function deviceLabel(d){return (d?.model||d?.product||"Android device")+" · "+d.serial}
+function renderPreview(d){
+ const e=$("devicePreview"); if(!e) return;
+ if(!d){e.classList.remove("show");return}
+ const samsung=(d.manufacturer||"").toLowerCase().includes("samsung") || (d.model||"").toLowerCase().includes("galaxy");
+ if(!samsung){e.classList.remove("show");return}
+ e.classList.add("show");
+ $("previewTitle").textContent=d.model||"Samsung Galaxy";
+ $("previewCopy").textContent=d.state==="NO_ROOT"
+   ?"Samsung device detected. The stock retail build is available for read-only diagnostics; the controlled protected alert injector requires a development target."
+   :"Samsung hardware reference render. Device identity comes from ADB inspection.";
+}
+function renderDetail(d){
+ const e=$("deviceDetail");
+ if(!d){e.style.display="none";return}
+ e.style.display="block";
+ e.innerHTML='<div class="detail-grid"><div class="kv"><label>Serial</label><span>'+esc(d.serial)+'</span></div><div class="kv"><label>Manufacturer</label><span>'+esc(d.manufacturer||"unknown")+'</span></div><div class="kv"><label>Build</label><span>'+esc((d.build_type||"?")+" · debug="+(d.debuggable||"?"))+'</span></div><div class="kv"><label>Root</label><span>'+esc(d.root?"YES":"NO")+'</span></div><div class="kv"><label>CellBroadcast</label><span>'+esc(d.cellbroadcast_package||"NOT FOUND")+'</span></div><div class="kv"><label>Support</label><span>'+esc((d.support_level||"UNTESTED").replace(/_/g," "))+'</span></div></div><div class="detail-note">'+esc((d.notes||[]).join(" "))+'</div>';
+}
+function update(d){
+ const v=visual(d);$("connBadge").className="badge "+v.kind;$("connBadge").innerHTML='<span class="dot '+v.dot+'"></span><strong>'+v.label+'</strong>';$("deviceBadge").className="badge "+v.kind;$("deviceBadge").innerHTML='<span class="dot '+v.dot+'"></span><strong>'+v.label+'</strong>';
+ if(!d){renderPreview(null);$("heroState").textContent="Waiting for a device";$("statusDot").className="dot green";$("statusTitle").textContent="Ready to inspect devices.";$("statusText").textContent=" Unlock the phone and accept the USB debugging prompt when it appears.";$("connTitle").textContent="No selected device";$("connText").textContent="Connect an Android target over ADB.";$("connectHelp").classList.remove("show");$("pipeRoot").textContent="WAIT";$("pipeRoot").className="pipe-state";$("pipeCb").textContent="WAIT";$("pipeCb").className="pipe-state";$("pipeUi").textContent="WAIT";$("pipeUi").className="pipe-state";$("sendBtn").disabled=true;$("dryBtn").disabled=true;return}
+ $("heroState").textContent=deviceLabel(d);$("connTitle").textContent=d.model||d.serial;$("connText").textContent=d.release?"Android "+d.release+" · API "+(d.sdk||"?"):"Waiting for device details.";
+ if(d.state==="UNAUTHORIZED"){$("statusDot").className="dot red";$("statusTitle").textContent="USB debugging authorization required.";$("statusText").textContent=" Accept the RSA prompt on the phone, then press Refresh.";$("connectHelp").classList.add("show")}else{$("connectHelp").classList.remove("show");if(d.state==="READY"){$("statusDot").className="dot green";$("statusTitle").textContent="Controlled device is ready.";$("statusText").textContent=" Test-alert prerequisites can be inspected by the controller."}else if(d.state==="NO_ROOT"||d.state==="UNSUPPORTED"){$("statusDot").className="dot amber";$("statusTitle").textContent="Retail device connected; controlled path not proven.";$("statusText").textContent=" This Galaxy A35 / stock Android path is diagnostic-only; the protected system-alert injection route is not available without the controlled development environment."}else{$("statusDot").className="dot red";$("statusTitle").textContent="Device is not ready.";$("statusText").textContent=" "+((d.notes||[])[0]||"Check the connection and refresh.")}}
+ $("pipeRoot").textContent=d.root?"READY":"REQUIRED";$("pipeRoot").className="pipe-state "+(d.root?"ok":"warn");$("pipeCb").textContent=d.cellbroadcast_package?"FOUND":"MISSING";$("pipeCb").className="pipe-state "+(d.cellbroadcast_package?"ok":"warn");$("pipeUi").textContent=d.state==="READY"?"READY":"WAIT";$("pipeUi").className="pipe-state "+(d.state==="READY"?"ok":"");const usable=d.state==="READY"&&!state.sending;
+ $("sendBtn").disabled=!usable;
+ $("dryBtn").disabled=state.sending;
+ $("settingsDeviceBtn").disabled=state.sending;
+ $("targetHint").textContent=d.state==="READY"?"Controlled target":(d.state==="UNAUTHORIZED"?"Authorize USB debugging first":"Inspection mode");
+ $("settingsDeviceBtn").style.display=d.state==="NO_ROOT"?"inline-flex":"none";}
+function renderDevices(){
+ const list=$("deviceList"),sel=$("targetSelect");if(!state.devices.length){list.innerHTML='<div class="empty"><strong>No Android devices found</strong><span>Connect a phone with USB debugging enabled, then press Refresh.</span></div>';sel.innerHTML='<option value="">No devices detected</option>';state.selected=null;renderDetail(null);update(null);return}
+ if(!state.selected||!state.devices.some(d=>d.serial===state.selected))state.selected=state.devices[0].serial;
+ list.innerHTML=state.devices.map(d=>{const v=visual(d);const meta=(d.model||"Android")+" · Android "+(d.release||"?")+" · API "+(d.sdk||"?");return '<button class="device '+(d.serial===state.selected?"selected":"")+'" data-serial="'+esc(d.serial)+'"><div class="device-icon"><svg viewBox="0 0 24 24" fill="none"><rect x="7" y="3" width="10" height="18" rx="2.5" stroke="currentColor" stroke-width="1.6"/><path d="M10 6h4M11 18h2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg></div><div class="device-mid"><div class="device-name">'+esc(d.model||d.serial)+'</div><div class="device-meta">'+esc(meta)+'</div></div><div class="device-state '+v.kind+'"><span class="dot '+v.dot+'"></span>'+v.label+'</div></button>'}).join("");
+ sel.innerHTML=state.devices.map(d=>'<option value="'+esc(d.serial)+'">'+esc(deviceLabel(d))+'</option>').join("");sel.value=state.selected;
+ list.querySelectorAll(".device").forEach(b=>b.onclick=()=>{state.selected=b.dataset.serial;renderDevices();log("Selected "+deviceLabel(selected()),"info")});update(selected());renderDetail(selected());renderPreview(selected())
+}
+async function refresh(){
+  $("refreshBtn").disabled=true;
+  try{
+    const devices=await invoke("list_devices");
+    state.devices=devices||[];
+    renderDevices();
+    $("mConnected").textContent=state.devices.filter(d=>d.state!=="OFFLINE").length;
+    $("mReady").textContent=state.devices.filter(d=>d.state==="READY").length;
+    log("Device scan completed - "+state.devices.length+" target(s)",state.devices.some(d=>d.state==="READY")?"ok":"info");
+  }catch(e){
+    const m=String(e?.message||e);
+    log("ADB scan failed - "+m,"error");
+    toast(m,"error");
+    $("adbStatus").textContent="ERROR";
+    $("adbDot").className="dot red";
+  }finally{
+    $("refreshBtn").disabled=false;
+  }
+}
+function validate(){const b=$("message").value.trim().replace(/\s+/g," ");const v=$("validation");if(!b){v.textContent="Empty message will use TEST ALERT - SIMULATION.";v.className="validation";return true}if(!b.startsWith("TEST")){v.textContent="Blocked: the message must begin with TEST.";v.className="validation error";return false}if(b.length>300){v.textContent="Blocked: message is longer than 300 characters.";v.className="validation error";return false}v.textContent="Valid test message · "+b.length+"/300 characters.";v.className="validation ok";return true}
+function openConfirm(){const d=selected();if(!d||d.state!=="READY")return;$("confirmText").textContent="Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
+function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
+async function runSend(dry){if(!validate())return;const d=selected();if(!d)return;if(!dry&&d.state!=="READY"){toast("This target is not ready for the controlled test path.","error");return}
+ state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing controlled test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dry_run:dry});showResult(r)}catch(e){const m=String(e?.message||e);toast(m,"error");log("Controller error · "+m,"error")}finally{state.sending=false;$("cancelBtn").disabled=true;renderDevices();update(selected())}}
+function showResult(r){const c=$("resultCard");c.style.display="flex";const ok=r&&r.state==="ALERT_DISPLAYED";$("resultOrb").style.color=ok?"var(--accent)":"var(--danger)";$("resultOrb").style.background=ok?"var(--accentSoft)":"rgba(255,109,109,.10)";$("resultTitle").textContent=ok?"Alert displayed":"Test blocked / uncertain";$("resultText").textContent=(r&&r.message)||r?.failure||"No result returned.";$("ackBtn").disabled=!state.selected;if(ok){toast("Genuine Android alert UI confirmed.","ok");log("Android system alert UI displayed · downstream evidence confirmed","ok");$("statusDot").className="dot green";$("statusTitle").textContent="Alert displayed by Android.";$("statusText").textContent=" Dismiss it on the phone, then acknowledge it here."}else toast((r&&r.message)||"The operation did not complete.","error")}
+async function cancel(){const d=selected();if(!d||!state.sending)return;try{await invoke("request_cancel",{serial:d.serial});log("Stop requested · waiting for a safe checkpoint","warn");toast("Stop requested.")}catch(e){toast(String(e?.message||e),"error")}}
+async function ack(){if(!state.selected)return;try{await invoke("acknowledge",{serial:state.selected});$("resultCard").style.display="none";log("Acknowledged target safety state · "+state.selected,"ok");toast("Device transaction gate cleared.","ok");await refresh()}catch(e){toast(String(e?.message||e),"error")}}
+async function resetState(){try{await invoke("reset_safety_state");$("resultCard").style.display="none";log("Local safety gate reset after operator confirmation","warn");toast("Local safety gate reset.","ok");await refresh()}catch(e){toast(String(e?.message||e),"error")}}
+async function init(){
+ setTheme(state.theme);setAccent(state.accent);syncSettings();renderLog();
+ document.querySelectorAll(".glass").forEach(el=>el.addEventListener("pointermove",e=>{const r=el.getBoundingClientRect();el.style.setProperty("--mx",((e.clientX-r.left)/r.width*100)+"%");el.style.setProperty("--my",((e.clientY-r.top)/r.height*100)+"%")}));
+ document.addEventListener("pointermove",e=>{if(state.glow){document.documentElement.style.setProperty("--gx",e.clientX+"px");document.documentElement.style.setProperty("--gy",e.clientY+"px")}});
+ document.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{document.querySelectorAll("[data-nav]").forEach(x=>x.classList.remove("active"));b.classList.add("active");const n=b.dataset.nav;if(n==="devices")$("devicesCard").scrollIntoView({behavior:"smooth",block:"start"});if(n==="activity")$("activityLog").scrollIntoView({behavior:"smooth",block:"end"});if(n==="overview")document.querySelector(".main")?.scrollTo?.({top:0,behavior:"smooth"})});
+ $("settingsBtn").onclick=()=>settings(!$("settingsPanel").classList.contains("show"));$("settingsNav").onclick=()=>settings(true);$("closeSettings").onclick=()=>settings(false);$("backdrop").onclick=()=>{settings(false);closeConfirm()};
+ document.querySelectorAll(".theme-btn").forEach(b=>b.onclick=()=>setTheme(b.dataset.theme));document.querySelectorAll(".accent-btn").forEach(b=>b.onclick=()=>setAccent(b.dataset.accent));
+ $("glowToggle").onclick=()=>{state.glow=!state.glow;localStorage.setItem("es-glow",state.glow?"on":"off");syncSettings()};$("motionToggle").onclick=()=>{state.reduced=!state.reduced;localStorage.setItem("es-motion",state.reduced?"reduced":"normal");syncSettings()};
+ $("refreshBtn").onclick=refresh;
+ $("settingsDeviceBtn").onclick=async()=>{const d=selected();if(!d)return;try{await invoke("open_android_settings",{serial:d.serial});log("Opened Android Settings on "+deviceLabel(d));toast("Android Settings opened on the phone.","ok")}catch(e){toast(String(e?.message||e),"error")}};
+ $("targetSelect").onchange=e=>{state.selected=e.target.value;renderDevices()};$("message").oninput=validate;$("sendBtn").onclick=openConfirm;$("dryBtn").onclick=()=>runSend(true);$("cancelBtn").onclick=cancel;$("ackBtn").onclick=ack;$("clearBtn").onclick=()=>{state.log=[];renderLog()};$("resetStateBtn").onclick=resetState;
+ $("minBtn").onclick=()=>invoke("window_minimize");$("maxBtn").onclick=()=>invoke("window_toggle_maximize");$("closeBtn").onclick=()=>invoke("window_close");
+ if(window.__TAURI__&&window.__TAURI__.event&&window.__TAURI__.event.listen){await window.__TAURI__.event.listen("activity",e=>{const p=e?.payload;if(p?.message)log(p.message,p.kind||"info")})}
+ try{const info=await invoke("app_info");$("adbStatus").textContent=info?.adb_source||"BUNDLED";log("Tauri desktop runtime ready · Rust controller online","ok")}catch(e){$("fatalText").textContent=String(e?.message||e);$("fatal").classList.add("show");return}
+ await refresh();setInterval(refresh,5000)
+}
+init();
+})();
+</script>
+</body></html>

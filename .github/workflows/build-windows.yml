@@ -1,8 +1,8 @@
-name: Build Windows executable
+name: Build Tauri Windows desktop
 
 on:
   push:
-    branches: [main]
+    branches: [main, rebuild/tauri-liquid-glass]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,58 +11,58 @@ permissions:
   contents: write
 
 jobs:
-  ui:
-    name: Desktop interface tests
+  frontend:
+    name: Frontend contract checks
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Install tkinter and a virtual display
+      - uses: actions/checkout@v7
+      - name: Verify glass frontend contract
+        shell: bash
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq python3-tk xvfb
-
-      - name: Run the interface tests
-        # The real widget tree is built and driven under Xvfb; no UI mocks. This deliberately uses
-        # the distribution's python3: python3-tk installs against that interpreter, and a
-        # setup-python build may not have tkinter at all.
-        run: xvfb-run -a /usr/bin/python3 tools/test_ui.py
+          set -e
+          test -f src/index.html
+          test -f src-tauri/Cargo.toml
+          test -f src-tauri/src/lib.rs
+          test -f src-tauri/tauri.conf.json
+          test -f tools/make_icon.py
+          grep -q "Tauri + Rust" src/index.html
+          grep -q "SEND TEST ALERT" src/index.html
+          grep -q "backdrop-filter" src/index.html
+          grep -q 'data-theme="midnight"' src/index.html
+          grep -q 'data-accent="green"' src/index.html
+          grep -q "UNAUTHORIZED" src/index.html
+          grep -q "STOCK / UNPROVEN" src/index.html
+          grep -q "NO CELLULAR TRANSMISSION" src/index.html
+          grep -q "window_toggle_maximize" src/index.html
+          grep -q "send_test_alert" src/index.html
 
   build:
-    name: Build Emergency-Simulator.exe
+    name: Build Windows app + installer
     runs-on: windows-latest
-
+    needs: frontend
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
+      - uses: actions/checkout@v7
+      - name: Install Node.js
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.12"
-
-      - name: Show the build environment
-        run: |
-          python --version
-          python -c "import tkinter, sys; print('tkinter', tkinter.TkVersion, 'on', sys.platform)"
-
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
-
-      - name: Verify the committed injector is present
+          node-version: "22"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+      - name: Install icon build dependency
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Generate crisp application icons
+        shell: pwsh
+        run: python tools/make_icon.py
+      - name: Validate generated icons
         shell: pwsh
         run: |
-          $jar = "android/alertinject/out/alertinject.jar"
-          if (-not (Test-Path $jar)) {
-            Write-Error "The Android injector is not in the repository. Without it a build cannot drive a device."
-            exit 1
-          }
-          Write-Host ("Injector: {0:N0} bytes" -f (Get-Item $jar).Length)
-
+          if (-not (Test-Path "src-tauri/icons/icon.ico")) { throw "icon.ico was not generated." }
+          if (-not (Test-Path "src-tauri/icons/icon.png")) { throw "icon.png was not generated." }
       - name: Stage Android Platform Tools
-        # Downloaded from Google's official repository so the artifact carries its own adb and is
-        # reproducible: the copy that is tested is the copy that ships.
         shell: pwsh
         run: |
           $stage = "packaging/platform-tools"
@@ -70,271 +70,63 @@ jobs:
           $zip = "$env:TEMP\platform-tools.zip"
           Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath "$env:TEMP\pt" -Force
-          Copy-Item "$env:TEMP\pt\platform-tools\*" -Destination $stage -Recurse -Force
-          foreach ($f in @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll")) {
-            if (-not (Test-Path (Join-Path $stage $f))) {
-              Write-Error "$f is missing from the staged Platform Tools"
-              exit 1
-            }
-          }
+          Copy-Item "$env:TEMP\pt\platform-tools\adb.exe" -Destination "$stage\adb.exe" -Force
+          Copy-Item "$env:TEMP\pt\platform-tools\AdbWinApi.dll" -Destination "$stage\AdbWinApi.dll" -Force
+          Copy-Item "$env:TEMP\pt\platform-tools\AdbWinUsbApi.dll" -Destination "$stage\AdbWinUsbApi.dll" -Force
           & "$stage\adb.exe" version
-
-      - name: Check the version resource matches the application version
-        run: python tools/check_version_info.py
-
-      - name: Run the controller safety tests
-        # These need no device. They must not require adb either: they assert invariants, and a host
-        # without Platform Tools is a legitimate place to run them.
-        run: python tools/test_controller.py
-
-      - name: Build the executable
-        run: pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec
-
-      - name: Verify the executable exists
+      - name: Verify Android injector
         shell: pwsh
         run: |
-          $exe = "dist/Emergency-Simulator.exe"
-          if (-not (Test-Path $exe)) {
-            Write-Error "Expected build output was not produced: $exe"
-            exit 1
-          }
-          Get-Item $exe | Format-List Name, Length, LastWriteTime
-
-      - name: Verify the executable resolves its bundled resources
-        # The point of the self-test: a build can succeed and still fail to find its own injector or
-        # adb at run time. This runs the real artifact from a directory that is not the repository.
+          if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing android injector JAR." }
+      - name: Install frontend
+        shell: pwsh
+        run: npm install
+      - name: Build Tauri bundle
+        shell: pwsh
+        run: npx tauri build --ci
+      - name: Validate and normalize outputs
         shell: pwsh
         run: |
-          $report = "$env:TEMP\selftest-report.txt"
-          Remove-Item $report -ErrorAction SilentlyContinue
-          $exe = (Resolve-Path "dist/Emergency-Simulator.exe").Path
-          Push-Location "$env:TEMP"
-          try {
-            # A windowed executable is a GUI-subsystem binary: invoking it directly returns
-            # immediately without waiting, so the report would be read before it is written.
-            # Start-Process -Wait is the way to wait for it.
-            # The argument is quoted because a temp path can contain spaces.
-            $proc = Start-Process -FilePath $exe -ArgumentList "--selftest=`"$report`"" -Wait -PassThru
-            $code = $proc.ExitCode
-            if (-not (Test-Path $report)) {
-              throw "The self-test wrote no report to $report (exit $code)."
-            }
-            $text = Get-Content $report -Raw
-            Write-Host $text
-            if ($code -ne 0) { throw "The frozen build failed its self-test (exit $code)." }
-            if ($text -notmatch "injector\s*:\s*FOUND") {
-              throw "The frozen build cannot locate its bundled injector."
-            }
-            if ($text -notmatch "adb\s*:\s*BUNDLED") {
-              throw "The frozen build did not resolve the bundled adb."
-            }
-            if ($text -notmatch "RESULT: OK") {
-              throw "The frozen build reported an incomplete self-test."
-            }
-          } finally {
-            Pop-Location
-          }
-
-      - name: Confirm only the Platform Tools this tool uses were bundled
-        # Regression guard. The bundle previously carried fastboot, mke2fs, sqlite3 and others that
-        # this application can never invoke. Extra command-line tools inside a self-unpacking archive
-        # are attack surface with no benefit, and they were worth removing.
+          $app = Get-ChildItem "src-tauri\target\release" -Filter "*.exe" -Recurse |
+            Where-Object { $_.FullName -notmatch "\\bundle\\nsis\\" } |
+            Select-Object -First 1
+          $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*.exe" |
+            Select-Object -First 1
+          if (-not $app) { throw "Tauri application EXE was not produced." }
+          if (-not $setup) { throw "Tauri NSIS installer was not produced." }
+          New-Item -ItemType Directory -Path release-output -Force | Out-Null
+          Copy-Item $app.FullName "release-output\Emergency-Simulator-v2.0.0.exe" -Force
+          Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Force
+          Get-Item "release-output\*.exe" | Format-Table Name,Length
+      - name: Report hashes
         shell: pwsh
         run: |
-          $expect = @("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll", "libwinpthread-1.dll")
-          $found = Get-ChildItem "packaging/platform-tools" -File | Select-Object -ExpandProperty Name
-          $missing = $expect | Where-Object { $_ -notin $found }
-          if ($missing) { throw "Staged Platform Tools are incomplete: $($missing -join ', ')" }
-          Write-Host "staged: $($found -join ', ')"
-
-      - name: Report the Windows version resource
-        # Proves the identity fields actually made it into the artifact rather than being silently
-        # dropped by the build, which is the failure mode that matters here.
-        shell: pwsh
-        run: |
-          $exe = (Resolve-Path "dist/Emergency-Simulator.exe").Path
-          $v = (Get-Item $exe).VersionInfo
-          "FileDescription : $($v.FileDescription)"
-          "ProductName     : $($v.ProductName)"
-          "FileVersion     : $($v.FileVersion)"
-          "CompanyName     : $($v.CompanyName)"
-          if (-not $v.FileDescription) { throw "The build carries no version resource." }
-
-      - name: Report the artifact hash
-        shell: pwsh
-        run: |
-          $exe = "dist/Emergency-Simulator.exe"
-          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
-          Write-Host "sha256: $h"
-          "sha256 $h  Emergency-Simulator.exe" | Out-File -Encoding ascii sha256.txt
-          Write-Host "bytes : $((Get-Item $exe).Length)"
-
-      - name: Upload the executable
+          Get-FileHash "release-output\Emergency-Simulator-v2.0.0.exe" -Algorithm SHA256 | Format-List
+          Get-FileHash "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Algorithm SHA256 | Format-List
+      - name: Upload release outputs
         uses: actions/upload-artifact@v7
         with:
-          name: Emergency-Simulator-windows
-          path: |
-            dist/Emergency-Simulator.exe
-            sha256.txt
-          if-no-files-found: error
-          retention-days: 30
-
-  gui_only:
-    # The interface alone: no injector, no adb, no device access whatsoever. It exists so the window
-    # can be seen and reviewed without executing a binary that carries a device-console tool. Use it
-    # when the full build is not trusted yet.
-    name: Build the GUI-only build (no device access)
-    runs-on: windows-latest
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-
-      - name: Install PyInstaller
-        run: python -m pip install --upgrade pip pyinstaller
-
-      - name: Check the version resource matches the application version
-        run: python tools/check_version_info.py
-
-      - name: Build without the injector or adb
-        env:
-          EMERGENCY_SIMULATOR_GUI_ONLY: "1"
-        run: pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec
-
-      - name: Verify the GUI-only build carries neither component
-        shell: pwsh
-        run: |
-          $exe = "dist/Emergency-Simulator-GUI-only.exe"
-          if (-not (Test-Path $exe)) { throw "Expected build output was not produced: $exe" }
-          # The self-test reports what a frozen build can resolve. For this variant the only correct
-          # answer is that it cannot reach a device at all, and that the interface still starts.
-          $report = "$env:TEMP\gui-only-selftest.txt"
-          Remove-Item $report -ErrorAction SilentlyContinue
-          $proc = Start-Process -FilePath (Resolve-Path $exe).Path `
-                    -ArgumentList "--selftest=`"$report`"" -Wait -PassThru
-          $text = Get-Content $report -Raw
-          Write-Host $text
-          # Assert on what the bundle *contains*, not on what the machine happens to have on PATH.
-          # This build must carry neither component and must resolve neither.
-          if ($text -notmatch "injector\s*:\s*MISSING") { throw "The GUI-only build bundled an injector." }
-          if ($text -notmatch "bundled adb\s*:\s*not bundled") { throw "The GUI-only build bundled adb." }
-          if ($text -match "adb\s*:\s*BUNDLED") { throw "The GUI-only build resolved a bundled adb." }
-          if ($proc.ExitCode -eq 0) { throw "The GUI-only self-test should report INCOMPLETE, not OK." }
-          $h = (Get-FileHash $exe -Algorithm SHA256).Hash
-          Write-Host "sha256: $h"
-
-      - name: Upload the GUI-only build
-        uses: actions/upload-artifact@v7
-        with:
-          name: Emergency-Simulator-gui-only
-          path: dist/Emergency-Simulator-GUI-only.exe
-          if-no-files-found: error
-          retention-days: 30
-  installer:
-    name: Build Windows installer
-    needs: build
-    runs-on: windows-latest
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v7
-
-      - name: Download the verified Windows executable
-        uses: actions/download-artifact@v8
-        with:
-          name: Emergency-Simulator-windows
-          path: installer-artifacts
-
-      - name: Prepare installer input
-        shell: pwsh
-        run: |
-          $source = "installer-artifacts\dist\Emergency-Simulator.exe"
-          if (-not (Test-Path $source)) {
-            throw "Downloaded Windows artifact did not contain $source"
-          }
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item $source "dist\Emergency-Simulator.exe" -Force
-
-      - name: Install Inno Setup
-        shell: pwsh
-        run: |
-          winget install --id JRSoftware.InnoSetup -e --scope user --accept-source-agreements --accept-package-agreements
-          $paths = @(
-            (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe"),
-            "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-            "C:\Program Files\Inno Setup 6\ISCC.exe"
-          )
-          $iscc = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $iscc) {
-            $cmd = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-            if ($cmd) { $iscc = $cmd.Source }
-          }
-          if (-not $iscc) { throw "Inno Setup compiler was not found after installation." }
-          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-      - name: Build the installer
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path installer-output -Force | Out-Null
-          if (-not (Test-Path "dist\Emergency-Simulator.exe")) { throw "Installer input EXE is missing." }
-          & $env:ISCC_PATH "packaging\Emergency-Simulator.iss"
-
-      - name: Verify and hash the installer
-        shell: pwsh
-        run: |
-          $installer = "installer-output\Emergency-Simulator-Setup-1.1.0.exe"
-          if (-not (Test-Path $installer)) { throw "Installer was not produced: $installer" }
-          $v = (Get-Item $installer).VersionInfo
-          Write-Host "Installer : $installer"
-          Write-Host "Size      : $((Get-Item $installer).Length) bytes"
-          Write-Host "Product   : $($v.ProductName)"
-          Write-Host "Version   : $($v.ProductVersion)"
-          $h = (Get-FileHash $installer -Algorithm SHA256).Hash
-          Write-Host "SHA256    : $h"
-          "sha256 $h  Emergency-Simulator-Setup-1.1.0.exe" | Out-File -FilePath installer-sha256.txt -Encoding ascii
-
-      - name: Upload installer
-        uses: actions/upload-artifact@v7
-        with:
-          name: Emergency-Simulator-installer
-          path: |
-            installer-output/Emergency-Simulator-Setup-1.1.0.exe
-            installer-sha256.txt
+          name: Emergency-Simulator-v2-windows
+          path: release-output
           if-no-files-found: error
           retention-days: 30
 
   release:
-    name: Publish tagged GitHub release
-    needs: [build, installer]
+    name: Publish v2.0.0 GitHub release
+    needs: build
     if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
-
     steps:
-      - name: Download Windows executable
-        uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@v8
         with:
-          name: Emergency-Simulator-windows
+          name: Emergency-Simulator-v2-windows
           path: release-assets
-
-      - name: Download Windows installer
-        uses: actions/download-artifact@v8
-        with:
-          name: Emergency-Simulator-installer
-          path: release-assets
-
-      - name: Publish GitHub release
+      - name: Publish v2.0.0
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v1.1.0
+          tag_name: v2.0.0
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
-            release-assets/dist/Emergency-Simulator.exe
-            release-assets/dist/sha256.txt
-            release-assets/installer-output/Emergency-Simulator-Setup-1.1.0.exe
-            release-assets/installer-sha256.txt
+            release-assets/Emergency-Simulator-v2.0.0.exe
+            release-assets/Emergency-Simulator-Setup-2.0.0.exe
