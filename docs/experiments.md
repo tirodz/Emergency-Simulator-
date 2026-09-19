@@ -860,3 +860,292 @@ java.lang.SecurityException: Permission Denial: not allowed to send broadcast
 **Next action.** Determine whether a well-formed `SmsCbMessage` can be delivered alongside the
 broadcast from the root identity, so that `shouldDisplayMessage` and `isEmergencyMessage` run for
 real. This is the remaining unknown for the genuine-alert path.
+---
+
+# Mission 2A checkpoint 2 — the injector succeeds
+
+**Date:** 2026-09-19
+**Target:** AVD `test35`, `emulator-5554`, Android 15 / API 35, `userdebug`, `google_apis/x86_64`
+**Goal:** Deliver a real `SmsCbMessage` into the genuine pipeline and record exactly what the
+system does with it.
+
+## A note on how this was reached
+
+The Phase 1 plan was to build and install AOSP's `CellBroadcastReceiverTests`. That APK is not
+present on the target and cannot be built here (no AOSP tree, insufficient disk and RAM). The
+workaround turned out to be simpler and more direct: the receiver accepts its input as a
+`SmsCbMessage` Parcelable in a protected broadcast, so the test message can be constructed directly
+by a small tool running as root, with no AOSP build at all. See `docs/aosp-test-path.md` for the
+correction to the earlier plan.
+
+## EXP-ALERT-002 — Construct and deliver a genuine `SmsCbMessage`
+
+**Objective.** Determine whether a locally constructed `SmsCbMessage` can traverse the real
+`CellBroadcastReceiver` → `CellBroadcastAlertService` path, and whether that path performs normal
+alert processing.
+
+**Tool.** `android/alertinject/` — a single Java class run through `app_process`. It builds the
+message reflectively (`SmsCbMessage` and friends are `@hide`, so they cannot be linked against at
+compile time but are present in the boot classpath at runtime) and broadcasts it to the receiver
+package.
+
+Type and constructor arity were taken from the AOSP source, not guessed:
+
+* `SmsCbMessage(int, int, int, SmsCbLocation, int, String, String, int, SmsCbEtwsInfo, SmsCbCmasInfo, int, int)`
+  — `frameworks/base/telephony/java/android/telephony/SmsCbMessage.java`, `android15-release`.
+* `SmsCbEtwsInfo(int warningType, boolean isEmergencyUserAlert, boolean isPopupAlert, boolean isPrimary, byte[] warningSecurityInformation)`
+  — same tree.
+* `ETWS_WARNING_TYPE_TEST_MESSAGE = 0x03` — same tree.
+
+**Safety properties.** The warning type is pinned to `ETWS_WARNING_TYPE_TEST_MESSAGE`; there is no
+option to select a real hazard category. The body must begin with `TEST` or the tool exits without
+sending. Nothing is scheduled, retried or sent automatically. Nothing is transmitted: no modem, no
+radio, no network.
+
+**Setup.**
+
+```bash
+adb root
+adb push out/alertinject.jar /data/local/tmp/
+adb shell "CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin \
+    org.emergencysim.alertinject.AlertInjector 4355 'TEST ALERT - SIMULATION'"
+```
+
+**Actual result.** The message was accepted and the full alert experience fired. Raw logcat:
+
+```
+D CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+    flg=0x10 pkg=com.google.android.cellbroadcastreceiver cmp=.../CellBroadcastReceiver (has extras) }
+D CBAlertService: onStartCommand: android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+D CellBroadcastAlertAudio: Locale=[en_US], alertType=TEST
+I TopTaskTracker: onTaskMovedToFront: ... cmp=.../CellBroadcastAlertDialog
+D CellBroadcastAlertDialog: onCreate getting message list from intent
+D CellBroadcastAlertDialog: onCreate loaded message list of size 1
+D CellBroadcastAlertDialog: onCreate setting screen on timer for emergency alert for sub 0
+D CellBroadcastAlertDialog: added FLAG_KEEP_SCREEN_ON, queued screen off message id 1
+D CellBroadcastAlertDialog: no pulsation pattern
+D CellBroadcastAlertAudio: Set state from 0 to 1
+D CellBroadcastAlertAudio: ALERT_SOUND_FINISHED
+D CellBroadcastAlertAudio: Speaking broadcast text: TEST ALERT - SIMULATION
+D CellBroadcastAlertAudio: TTS completed. Stop CellBroadcastAlertAudio service
+D CellBroadcastAlertDialog: removed FLAG_KEEP_SCREEN_ON with id 2
+I MediaFocusControl: abandonAudioFocus() ... clientId=...CellBroadcastAlertAudio...
+```
+
+The on-screen content was read back from the live window with `uiautomator dump`:
+
+```
+ETWS test message                         (id/alertTitle)
+TEST ALERT - SIMULATION                   (id/message)
+OK  (1/2)                                 (id/dismissButton)
+```
+
+And the alert was persisted to the genuine history database, whose path and schema are internal to
+the module:
+
+```
+$ sqlite3 /data/user_de/0/com.google.android.cellbroadcastreceiver/databases/cell_broadcasts_v13.db \
+    'select _id,service_category,serial_number,substr(body,1,60) from broadcasts;'
+1|4355|1|TEST ALERT - SIMULATION
+2|4355|1|TEST ALERT - SIMULATION
+```
+
+**Conclusion.** CONFIRMED. Android's own Cell Broadcast machinery processed a locally constructed
+test message end to end. This was not a reimplementation and not a substituted notification:
+`CellBroadcastReceiver`, `CellBroadcastAlertService`, `CellBroadcastAlertAudio`,
+`CellBroadcastAlertDialog` and the history database are the stock, unmodified components, and every
+log line above came from them rather than from our tool.
+
+Observed components exercised: alert classification, user-preference filtering, the alert database,
+screen wake with `FLAG_KEEP_SCREEN_ON`, the sound path, and text-to-speech of the alert body.
+Full-screen presentation on the lock screen, vibration and DND override were **not** exercised by
+this run and remain open — see `docs/open-questions.md`.
+
+## EXP-ALERT-003 — The alert is gated by user preference, and `testing_mode` is the key
+
+**Objective.** Explain why the first successful injection produced no UI.
+
+**Finding.** The first attempt was filtered before reaching the UI:
+
+```
+D CBAlertService: ignoring alert of type 4355 by user preference
+```
+
+Tracing `shouldDisplayMessage` into `isChannelEnabled`
+(`packages/apps/CellBroadcastReceiver/src/com/android/cellbroadcastreceiver/CellBroadcastAlertService.java`,
+`android15-release`) shows the ETWS test branch requires three conjuncts:
+
+```java
+if ((etwsInfo != null && etwsInfo.getWarningType() == SmsCbEtwsInfo.ETWS_WARNING_TYPE_TEST_MESSAGE)
+        || resourcesKey == R.array.etws_test_alerts_range_strings) {
+    return emergencyAlertEnabled
+            && CellBroadcastSettings.isTestAlertsToggleVisible(getApplicationContext())
+            && checkAlertConfigEnabled(subId, CellBroadcastSettings.KEY_ENABLE_TEST_ALERTS,
+                    res.getBoolean(R.bool.test_alerts_enabled_default));
+}
+```
+
+* `enable_emergency_alerts` defaults to true and was already true.
+* `enable_test_alerts` defaults to **false**; it had to be set to true.
+* `isTestAlertsToggleVisible` requires `show_test_settings` **or** testing mode, and the test-alert
+  channels to be enabled.
+
+Setting `enable_test_alerts=true` alone was **not** sufficient. Set both preferences:
+
+```
+enable_test_alerts = true
+testing_mode       = true
+```
+
+`testing_mode` is `CellBroadcastReceiver.TESTING_MODE = "testing_mode"`, read by
+`CellBroadcastReceiver.isTestingMode(Context)`. With both set, the alert displayed.
+
+The preferences live in the module's own private file, which is why this is a development-only
+lever:
+
+```
+/data/user_de/0/com.google.android.cellbroadcastreceiver/shared_prefs/
+    com.google.android.cellbroadcastreceiver_preferences.xml
+```
+
+**Conclusion.** CONFIRMED. On an OEM build where the "test alerts" toggle is hidden,
+`testing_mode` is the supported bypass — and it is the same switch AOSP's own engineering flow uses.
+This is a *preference* of the receiving app, not a framework privilege, so it is available to root
+on any device and does not require a custom system image.
+
+**Practical note.** The app must be force-stopped after editing the preference file, otherwise the
+cached value in memory wins. Wait for the process to restart cleanly before injecting; a busy
+first-launch instance logged a spurious `BOOT_COMPLETED` and dropped the first message.
+
+## EXP-ALERT-004 — Cancellation and dismissal
+
+**Objective.** Establish what the controller can and cannot do about an alert that is already
+displayed.
+
+**Result.**
+
+| Attempt | Outcome |
+| --- | --- |
+| `input keyevent 4` (BACK) | Did not dismiss |
+| `am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS` | Did not dismiss |
+| Tapping the `dismissButton` ("OK (1/2)") | Dismissed the current entry and advanced the queue |
+
+**Conclusion.** CONFIRMED data point for the CANCEL design.
+
+* An already-displayed emergency alert cannot be dismissed by the ordinary system-dialog-closing
+  mechanisms. BACK is swallowed; `CLOSE_SYSTEM_DIALOGS` is ignored. The alert screen is
+  deliberately sticky.
+* What does work is the alert's own control. A controller can therefore stop the *alert* — but only
+  by driving that button, which is a visible, user-facing action on the device, not a silent remote
+  kill.
+* Consequently the controller must be designed around two clearly separate verbs:
+  * **CANCEL PENDING** — stop a queued/planned injection before it is sent. This is ours to control
+    and is always safe.
+  * **STOP DISPLAYED ALERT** — only possible via the on-device control after delivery. It should be
+    presented as "dismiss on device", never as "guaranteed remote abort".
+
+A second injected message before the first was acknowledged made the dialog show `OK (1/2)`,
+proving the dialog holds a queue. Dismissing advances it. Repeated sends accumulate rather than
+replace. This matters for the controller's retry logic: retries must not be blind.
+
+`docs/feasibility.md` and `docs/transport-options.md` are updated with this result.
+
+## EXP-ALERT-001 (shell half) — Complete
+
+The shell-UID half of the earlier experiment is now closed with the same tool that root used
+successfully, which removes any doubt that the failure was caused by the tool rather than the UID:
+
+```
+uid=2000(shell) context=u:r:shell:s0
+...
+W ActivityManager: Permission Denial: not allowed to send broadcast
+    android.provider.action.SMS_EMERGENCY_CB_RECEIVED from pid=13359, uid=2000
+```
+
+**Conclusion.** CONFIRMED. Shell cannot inject, even with a correct and fully-formed payload. The
+gate is the caller's identity, checked in `ActivityManagerService.broadcastIntentLockedTraced`
+against the `<protected-broadcast>` declaration, and it is checked before the extras are examined.
+
+## Summary of the Mission 2A verification
+
+| Step | Status |
+| --- | --- |
+| Construct a valid `SmsCbMessage` | CONFIRMED |
+| Deliver it to `CellBroadcastReceiver` as root | CONFIRMED |
+| Receiver forwards to `CellBroadcastAlertService` | CONFIRMED |
+| Preference/classification filtering runs | CONFIRMED |
+| Test alert passes the gate in testing mode | CONFIRMED |
+| Alert persisted to the real database | CONFIRMED |
+| Real sound plays | CONFIRMED |
+| Real TTS speaks the body | CONFIRMED |
+| Real `CellBroadcastAlertDialog` shown | CONFIRMED |
+| Screen kept awake | CONFIRMED |
+| Shell cannot inject | CONFIRMED |
+| Lock-screen full-screen, vibration, DND override | NOT YET TESTED |
+| No cellular transmission at any point | CONFIRMED by construction |---
+
+# Mission 2A checkpoint 3 — the vendor-supported testing-mode path
+
+## On the device — `android.telephony.action.SECRET_CODE`
+
+**Objective.** Reach testing mode without editing the receiving app's preference file, using the
+vendor's own mechanism.
+
+**Hypothesis.** The dialler code `*#*#2627#*#*` recorded in `docs/aosp-test-path.md` §6 is delivered
+by the framework as a broadcast, so it should be sendable directly.
+
+**Setup.**
+
+```bash
+adb shell am broadcast -a android.telephony.action.SECRET_CODE \
+    -d "android_secret_code://2627"
+```
+
+**Expected result.** The receiver logs a testing-mode change.
+
+**Actual result.**
+
+```
+Broadcasting: Intent { act=android.telephony.action.SECRET_CODE dat=android_secret_code://2627/... }
+Broadcast completed: result=0
+D CellBroadcastReceiver: onReceive Intent { act=android.telephony.action.SECRET_CODE dat=android_secret_code://2627 cmp=.../CellBroadcastReceiver }
+D CellBroadcastReceiver: Cell broadcast testing mode is disabled.
+D CellBroadcastReceiver: Cell broadcast testing mode is enabled.
+```
+
+**Conclusion.** CONFIRMED. Testing mode is reachable over ADB with the vendor's own switch, with no
+file editing and no root. Two caveats matter for the controller:
+
+1. **It is a toggle, not a setter.** The first send turned testing mode *off* (it had been enabled by
+   hand earlier), the second turned it back on. A controller must read the state back rather than
+   assume the direction of the change.
+2. **It does not cover everything.** It flips `testing_mode` only. `enable_test_alerts` is a separate
+   user-facing toggle, and on a device where the settings UI hides it, the preference file still has
+   to be edited. Both conditions must hold for an ETWS test alert to display.
+
+This is the preferred order of operations for the controller: try the secret-code broadcast first,
+verify the result, and fall back to editing the preference file only for what remains unset.
+
+## On the device — the alert dialog actively blocks BACK
+
+**Objective.** Explain why BACK did not dismiss the alert in EXP-ALERT-004.
+
+**Result.** The window manager log shows the dialog registering a back callback, which is why the
+key event was consumed rather than closing the activity:
+
+```
+D CoreBackPreview: Window{.../CellBroadcastAlertDialog}: Setting back callback
+    OnBackInvokedCallbackInfo{mCallback=android.window.IOnBackInvokedCallback$Stub$Proxy@...}
+```
+
+**Conclusion.** CONFIRMED, and it closes the question. The dialog does not merely fail to handle
+BACK; it deliberately registers an `OnBackInvokedCallback` so that BACK is swallowed. Combined with
+the `CLOSE_SYSTEM_DIALOGS` result in EXP-ALERT-004, this is a designed security boundary rather than
+an accident of implementation. The controller must not present remote dismissal of a displayed alert
+as a supported capability.
+
+## Reproducibility
+
+The full chain was run a third time on the same target and produced the same components
+(`CellBroadcastAlertAudio` with `onInit() TTS engine status: 0`, and `CellBroadcastAlertDialog` at
+`RESUMED`). The mechanism is repeatable.

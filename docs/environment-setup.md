@@ -135,7 +135,43 @@ available on a `user` build.
 * `adb emu kill` shuts the emulator down cleanly.
 * If the host gains KVM, drop `-accel off` and boot time drops to well under a minute.
 
-## 8. What was deliberately NOT done
+## 8. Injecting a test alert — proven recipe
+
+This is the sequence that produced the genuine Android emergency alert. Full evidence in
+[`experiments.md`](experiments.md).
+
+```bash
+# 0. build the injector (once)
+cd android/alertinject && ./build.sh
+
+# 1. root and deploy
+adb root && adb wait-for-device
+adb push android/alertinject/out/alertinject.jar /data/local/tmp/
+
+# 2. enable testing mode (the vendor's own switch; it is a TOGGLE)
+adb shell am broadcast -a android.telephony.action.SECRET_CODE -d "android_secret_code://2627"
+
+# 3. ensure enable_test_alerts=true in the receiver's private prefs, then restart it
+#    (only needed where the settings UI hides the test-alerts toggle)
+adb shell am force-stop com.google.android.cellbroadcastreceiver
+
+# 4. inject the ETWS test alert
+adb shell "CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin \
+    org.emergencysim.alertinject.AlertInjector 4355 'TEST ALERT - SIMULATION'"
+
+# 5. observe
+adb logcat | grep -E 'CellBroadcastReceiver:|CBAlertService|CellBroadcastAlertAudio|CellBroadcastAlertDialog'
+```
+
+Step 2 must be verified, not assumed: sending it twice returns testing mode to its previous state.
+Step 3 exists because `enable_test_alerts` defaults to false and is a separate toggle from
+`testing_mode`; without it the message is dropped with `ignoring alert of type 4355 by user
+preference` *after* passing every permission check.
+
+Per-target package names differ; on the Google module the receiver package is
+`com.google.android.cellbroadcastreceiver`.
+
+## 9. What was deliberately NOT done
 
 * No AOSP `repo init`/`repo sync`: `repo` is not installed, and the disk/RAM budget makes a build
   infeasible (see `environment.md` §5). Documented as BLOCKED rather than attempted.
@@ -143,3 +179,5 @@ available on a `user` build.
   allowlist even as root, so further attempts are pointless.
 * No SELinux mode changes.
 * No changes to the host kernel or container runtime.
+* No cellular transmission and no modem configuration. The injector never touches `CbConfig` or the
+  radio; this was the point of the whole exercise.

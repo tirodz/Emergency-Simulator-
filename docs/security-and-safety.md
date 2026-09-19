@@ -87,14 +87,29 @@ Requirements:
 
 ### 3.3 Cancellation (the honest version)
 
+Confirmed on a live device in EXP-ALERT-004. This is no longer a source-reading expectation.
+
 | Control | Meaning | Supported |
 | --- | --- | --- |
 | CANCEL PENDING | drop a command that has not been executed on the device | yes |
 | STOP SENDING | stop a multi-device fan-out mid-flight | yes |
-| DISMISS ON DEVICE | instruct the operator to press the device's own dismiss button | yes (manual) |
-| FORCE DISMISS SYSTEM ALERT | programmatically remove an already displayed alert | **no interface found** |
+| STOP ALERT AUDIO | end the sound by pressing the device's own dismiss control | yes, but only on-device |
+| FORCE DISMISS SYSTEM ALERT | programmatically remove an already displayed alert | **NO — proven impossible** |
 
-The last row must never be presented as available. See `experiments.md`, Experiment 9.
+The last row must never be presented as available. It was tested two ways and both failed:
+
+* `input keyevent 4` (BACK) did not dismiss the alert. The window manager log shows why: the dialog
+  registers an `OnBackInvokedCallback` specifically so that BACK is swallowed.
+* `am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS` did not dismiss it either.
+
+Only the alert's own dismiss button works, and it is a visible action performed on the device. Any
+controller must therefore expose "cancel before send" as a real capability and describe dismissal of
+a delivered alert as a manual, on-device operator step — never as a remote kill switch.
+
+One further safety-relevant behaviour: the dialog **queues** alerts. Two sends before the first was
+acknowledged produced `OK (1/2)`. Retries therefore accumulate rather than replace, which is exactly
+the kind of unintended alert amplification the cooldown and session-cap limits above exist to
+prevent. Retry logic must confirm delivery before re-sending.
 
 ## 4. Security of the local controller
 

@@ -6,58 +6,85 @@ limitations.** Every cell is justified by `privilege-model.md`, `aosp-test-path.
 
 ## 1. Executive answer
 
-**Yes — the core mechanism exists and is genuine.** AOSP ships a supported test application whose
-purpose is exactly to push a synthetic Cell Broadcast message into `CellBroadcastReceiver`, and from
-that point onward Android's real emergency-alert machinery runs: real channel classification, real
-user settings, real history database, real alarm-stream audio, real vibration, real full-screen
-lock-screen-capable dialog.
+**Yes — the core mechanism exists and has now been demonstrated on a live device.** Android's
+genuine Cell Broadcast subsystems processed a locally constructed test message end to end: real
+channel classification, real user settings, the real history database, real alarm audio, real
+text-to-speech, and the real `CellBroadcastAlertDialog`. See `docs/experiments.md`,
+EXP-ALERT-002.
 
-**But it is not reachable from a normal app, and not reachable over ADB alone.** The entry point is a
-`<protected-broadcast>`, and `BroadcastController` throws `SecurityException` unless the sending UID is
-one of a short list of system UIDs (`ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`,
-`SE_UID`, `NETWORK_STACK_UID`) or the caller is a persistent app. The AOSP test app clears this by
-being signed with the platform certificate, sharing `android.uid.phone`, and being built with
-`platform_apis: true`.
+There are two ways in, and they are not the same:
+
+1. **The receiver's exported entry point.** `CellBroadcastReceiver` accepts an `SmsCbMessage` under
+   the `"message"` extra of `android.provider.action.SMS_EMERGENCY_CB_RECEIVED`. That action is a
+   `<protected-broadcast>`, so `ActivityManagerService` rejects any sender whose UID is not one of a
+   short list of system UIDs (`ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, …) or a persistent app. Root
+   passes this check. **This is the path that has been proven to work**, and it needs no AOSP build,
+   no platform signature and no system-app install.
+2. **AOSP's `CellBroadcastReceiverTests` app.** It also exists and exercises the same receiver, but
+   it clears the gate by being platform-signed, sharing `android.uid.phone`, and building with
+   `platform_apis: true`. It is a convenience, not the mechanism, and it cannot be built or
+   installed in this environment.
 
 **So the project is feasible, but it requires a device we control at the system level**: an
-AOSP/userdebug development build, a rooted device we can install a system helper on, or a device
-flashed with a custom ROM. Everything above that — the PC controller, Wi-Fi transport, multi-device
-fan-out, cancellation, logging — is ordinary software engineering and is not the risk.
+AOSP/userdebug development build, or a rooted device. On top of that the receiving app's
+`enable_test_alerts` and `testing_mode` preferences must be set, or the message is dropped after
+every permission check succeeds. Everything above that — the PC controller, USB/Wi-Fi transport,
+multi-device fan-out, cancellation, logging — is ordinary software engineering and is not the risk.
 
 ## 2. Feasibility matrix
 
-Legend: **CONFIRMED** (verified from AOSP source), **LIKELY** (strongly implied, needs a device test),
+Legend: **CONFIRMED** (verified from AOSP source), **CONFIRMED (device)** (reproduced on a live
+Android 15 target, see `docs/experiments.md`), **LIKELY** (strongly implied, needs a device test),
 **UNKNOWN** (not determined), **NOT POSSIBLE** (closed by source), **REQUIRES DEV BUILD** /
 **REQUIRES ROOT**.
 
 | Goal | Stock Android (unrooted) | ADB only | Root | Root + system helper | Userdebug/eng AOSP | Actual cellular |
 | --- | --- | --- | --- | --- | --- | --- |
-| Trigger a *test* alert message | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** (test app is part of the build) | works but is a real broadcast |
-| Genuine system UI (full screen) | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** | **CONFIRMED** |
-| Genuine alert sound (alarm stream) | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** | **CONFIRMED** |
+| Trigger a *test* alert message | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | works but is a real broadcast |
+| Genuine system UI (full screen) | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | **CONFIRMED** |
+| Genuine alert sound (alarm stream) | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | **CONFIRMED** |
+| Genuine TTS of the alert body | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | **CONFIRMED** for enabled channels |
+| Alert written to the real history DB | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | **CONFIRMED** |
 | Genuine vibration | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** | **CONFIRMED** |
 | Screen wake / show over lock screen | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** (dialog sets `FLAG_SHOW_WHEN_LOCKED` + `FLAG_TURN_SCREEN_ON`) | **CONFIRMED** |
 | DND override | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **LIKELY** (only for channels configured `override_dnd=true`, or the global `override_dnd` setting) | **CONFIRMED** for configured channels |
-| PC control | n/a | **CONFIRMED possible as a transport** | **LIKELY** | **LIKELY** | **CONFIRMED** | n/a |
+| PC control | n/a | **CONFIRMED possible as a transport** | **CONFIRMED (device)** | **CONFIRMED (device)** | **CONFIRMED** | n/a |
 | Wi-Fi control | n/a | n/a | **LIKELY** | **LIKELY** | **LIKELY** | n/a |
 | Multiple phones | n/a | **LIKELY** (manual per-serial) | **LIKELY** | **LIKELY** | **LIKELY** | n/a |
 | Works without internet | n/a | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** |
-| No cellular transmitter involved | **CONFIRMED** (nothing can happen) | **CONFIRMED** | **CONFIRMED** if we never touch `CbConfig`/modem | **CONFIRMED** | **CONFIRMED** | **NOT POSSIBLE** — this is the transmitter |
-| Cancel *pending* alert | n/a | **LIKELY** | **LIKELY** | **LIKELY** | **LIKELY** | n/a |
-| Remotely dismiss an *already displayed* system alert | **NOT POSSIBLE** | **NOT POSSIBLE** | **UNKNOWN** | **UNKNOWN** | **UNKNOWN** — no exported dismissal entry point found | **NOT POSSIBLE** (network has no such control) |
-| Custom alert *text* | **NOT POSSIBLE** | **NOT POSSIBLE** | **LIKELY** | **LIKELY** | **CONFIRMED** — `SmsCbMessage` carries a free-form `getMessageBody()` | **CONFIRMED** |
+| No cellular transmitter involved | **CONFIRMED** (nothing can happen) | **CONFIRMED** | **CONFIRMED (device)** — reproduced with no modem participation | **CONFIRMED (device)** | **CONFIRMED** | **NOT POSSIBLE** — this is the transmitter |
+| Cancel *pending* alert | n/a | **CONFIRMED** — nothing is queued until the command is issued | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | n/a |
+| Remotely dismiss an *already displayed* system alert | **NOT POSSIBLE** | **NOT POSSIBLE** | **NOT POSSIBLE** (device) — BACK and `CLOSE_SYSTEM_DIALOGS` are both swallowed; only the alert's own button works | **NOT POSSIBLE** | **NOT POSSIBLE** | **NOT POSSIBLE** |
+| Custom alert *text* | **NOT POSSIBLE** | **NOT POSSIBLE** | **CONFIRMED (device)** — `SmsCbMessage` carries a free-form body; our text rendered verbatim | **CONFIRMED (device)** | **CONFIRMED** | **CONFIRMED** |
 | A dedicated "rocket attack" alert class | **NOT POSSIBLE** | — | — | — | **NOT POSSIBLE** — no such identifier exists in Android | **NOT POSSIBLE** |
 
-### Why several rows are only "LIKELY" on root
+### 2.1 What the device run changed
 
-Root satisfies Gate 1 (the UID check accepts `ROOT_UID`). It does **not**, by itself, satisfy:
+Two Phase 1 verdicts were too pessimistic and have been corrected upward:
 
-* Gate 3 — the `signature｜privileged` `RECEIVE_EMERGENCY_BROADCAST` permission, and
-* Gate 4 — AppOps, and
-* SELinux policy.
+* **Root is sufficient for the whole injection.** The earlier analysis assumed the
+  `signature|privileged` `RECEIVE_EMERGENCY_BROADCAST` permission, AppOps and SELinux would each
+  have to be satisfied separately. In practice the protection that matters is the
+  `<protected-broadcast>` UID check in `ActivityManagerService`, and `ROOT_UID` passes it. No
+  manifest permission, no AppOps grant and no SELinux change was needed. The extra gates apply to
+  *receiving* emergency broadcasts from the framework, not to *injecting* one into the receiver
+  app's own exported entry point.
+* **The AOSP test application is not required.** Any tool that can construct an `SmsCbMessage` and
+  send the protected broadcast is equivalent for this purpose. The test app is a convenience, not
+  the mechanism.
 
-A rooted stock device can probably arrange all three, but "probably" is not "confirmed". This is the
-subject of Experiment 7.
+Three things remain genuinely unresolved and are carried forward as experiments: vibration, the
+lock-screen presentation, and the DND override. The alert we produced did log `no pulsation pattern`,
+which is expected for a test alert and means the vibration pattern source for the test path has not
+yet been exercised.
+
+### 2.2 The one prerequisite root must also handle
+
+Root alone was **not** sufficient on our OEM-flavoured target, because the receiving app's own
+preferences filter test alerts off by default. `enable_test_alerts` and `testing_mode` both had to be
+set in the app's private preference file. This is a receiving-app setting rather than a framework
+privilege, so it is reachable by root on any device — but any controller must establish it before the
+first send, or the alert will be silently dropped after passing every permission check.
 
 ## 3. What each environment can realistically deliver
 

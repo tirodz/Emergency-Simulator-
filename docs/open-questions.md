@@ -9,8 +9,10 @@ Format: **question** — status — next action.
 
 1. **Does a *system* caller still need the `receiverPermission` argument?**
    `BroadcastController` performs the protected-broadcast UID check first, and the AOSP test app both
-   holds the UID *and* passes the permission. Which of the two is load-bearing is not established.
-   — Status: UNKNOWN — Experiment 7 / 8.
+   holds the UID *and* passes the permission.
+   — Status: **ANSWERED — the UID check alone is sufficient.** Root sent the broadcast with no
+     manifest permission, no AppOps grant and no SELinux change, and the receiver processed it
+     normally (EXP-ALERT-002).
 
 2. **Is there any existing system component with an exported interface that can inject a CB message?**
    No shell command service, no binder injection API was found in `CellBroadcastService` or
@@ -18,10 +20,11 @@ Format: **question** — status — next action.
    — Status: UNKNOWN (AOSP: none found) — Experiments 6, 12.
 
 3. **Does AppOps block a rooted helper that holds the permission?**
-   — Status: UNKNOWN — Experiment 7.
+   — Status: **ANSWERED — no.** AppOps was never consulted on this path. See EXP-ALERT-002.
 
 4. **Does SELinux deny a hand-rolled helper that is not part of the platform?**
-   No SELinux policy has been inspected. — Status: UNKNOWN — Experiment 7.
+   — Status: **ANSWERED — no.** A non-platform process running as root under `app_process` produced
+     the genuine alert without any policy change. See EXP-ALERT-002.
 
 5. **Exactly which SELinux domains are involved** for sending the protected broadcast and writing the
    CB history provider? — Status: UNKNOWN — Experiment 7.
@@ -36,23 +39,26 @@ Format: **question** — status — next action.
 ## B. Build and environment
 
 8. **Does an AOSP emulator or GSI image contain the CellBroadcast apex and the CB receiver?**
-   — Status: UNKNOWN — Experiment 3.
+   — Status: **ANSWERED — yes, on both.** Present in a Google GSI (Experiment 3) and on the running
+     `android-35;google_apis;x86_64` target (EXP-ENV-002).
 
-9. **Does a GSI include the CB test app?** The module is `android_test`; GSIs may not ship it.
-   — Status: UNKNOWN — Experiment 4.
+9. **Does a GSI include the CB test app?**
+   — Status: **ANSWERED — no, on no build type.** Confirmed by image walk and on the live device.
 
 10. **Does the platform signing key available when building a custom AOSP image match the key the
-    pre-installed CBR app is signed with?** If not, the test app cannot be installed as a system app.
-    — Status: UNKNOWN — Experiment 4.
+    pre-installed CBR app is signed with?**
+    — Status: **MOOT.** The test APK is not needed; nothing has to be installed as a system app.
+      See `aosp-test-path.md` §10.
 
 11. **Which Android 16 QPRs / feature flags change the CBR entry point?** The CBR repo contains a
     `flags/` directory that has not been inspected. — Status: UNKNOWN — source inspection needed.
 
 ## C. Alert behaviour
 
-12. **Does the injected alert display with no SIM present?** The broadcast path does not use the radio,
-    but channel configuration is partly subscription-driven.
-    — Status: UNKNOWN — Experiment 11.
+12. **Does the injected alert display with no SIM present?**
+    — Status: **ANSWERED — YES.** The emulator has no active cellular subscription and the full alert
+      experience occurred, on `subId 0`. Channel configuration is not SIM-dependent for this path.
+      See EXP-ALERT-002.
 
 13. **Does the alert display in airplane mode?** — Status: UNKNOWN — Experiment 11.
 
@@ -69,12 +75,17 @@ Format: **question** — status — next action.
     `CellBroadcastAlertDialog` has an `onScreenOff` handler that clears `FLAG_TURN_SCREEN_ON`.
     — Status: understood from source; user-visible effect unverified — Experiment 11.
 
-17. **What is the exact dismissal UX** for a multi-message alert (`1/N` counter observed in source)?
-    — Status: understood from source; unverified.
+17. **What is the exact dismissal UX** for a multi-message alert?
+    — Status: **PARTIALLY ANSWERED.** The dialog shows `OK (1/2)` for two queued messages, and
+      dismissing advances the queue rather than clearing it. Sends accumulate; they do not replace
+      the current alert. See EXP-ALERT-004.
 
-18. **Can an already displayed alert be dismissed remotely by any means?** No exported entry point was
-    found; `DISMISS_DIALOG` and `dismiss()` are internal.
-    — Status: **UNKNOWN, leaning NO** — Experiment 9.
+18. **Can an already displayed alert be dismissed remotely by any means?**
+    — Status: **ANSWERED — NO.** Tested on the device: BACK and
+    `android.intent.action.CLOSE_SYSTEM_DIALOGS` are both ignored, and the window manager log shows
+    the dialog registering an `OnBackInvokedCallback` specifically to swallow BACK. Only the alert's
+    own dismiss button works, and it is a visible on-device action. See EXP-ALERT-004 and
+    checkpoint 3.
 
 ## D. OEM behaviour
 

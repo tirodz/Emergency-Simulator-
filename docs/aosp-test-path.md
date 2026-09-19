@@ -463,3 +463,58 @@ device        : userdebug/eng AOSP build or a rooted device
 Note the build target is the Soong module name `CellBroadcastReceiverTests`, not the Java package
 name. Its `instrumentation_for` is `CellBroadcastApp`.
 
+## 10. Correction — the test app is not required, and it is not the only trigger
+
+This section supersedes the earlier conclusion that the AOSP test application is the necessary
+gateway. Two things are now known from the device work in
+[`experiments.md`](experiments.md).
+
+### 10.1 The receiver's own entry point is the mechanism
+
+`CellBroadcastReceiver` accepts its input as a `SmsCbMessage` Parcelable under the `"message"` extra
+of the protected broadcast `android.provider.action.SMS_EMERGENCY_CB_RECEIVED`. Any caller that can
+construct that object and pass the `<protected-broadcast>` UID check reaches the identical pipeline
+that the test app reaches. The test app is a convenience built on top of this; it is not a
+prerequisite.
+
+Confirmed by execution: a locally built tool running as root produced the real alert dialog, real
+audio, real TTS and a real history-database row. See EXP-ALERT-002.
+
+The practical consequence is that **building `CellBroadcastReceiverTests` is off the critical path**
+and should not be attempted. It remains useful only as documentation of the officially supported
+channel choices.
+
+### 10.2 Testing mode has a vendor-supported trigger, and it is not dialler-only
+
+§6 above records testing mode being toggled by the dialler secret code `*#*#2627#*#*`. That code
+resolves to a broadcast, and the broadcast can be sent directly — which is what a controller would
+do, since it cannot type into the dialler reliably:
+
+```
+adb shell am broadcast -a android.telephony.action.SECRET_CODE \
+    -d "android_secret_code://2627"
+```
+
+Verified on the device:
+
+```
+D CellBroadcastReceiver: onReceive Intent { act=android.telephony.action.SECRET_CODE
+    dat=android_secret_code://2627 cmp=.../CellBroadcastReceiver }
+D CellBroadcastReceiver: Cell broadcast testing mode is disabled.
+D CellBroadcastReceiver: Cell broadcast testing mode is enabled.
+```
+
+It is a **toggle**, not a setter — sending it twice returns to the original state. A controller must
+therefore read the resulting state rather than assume the send turned testing mode on.
+
+This is the cleaner way to reach testing mode than editing the shared-prefs file, and it is the
+vendor's own mechanism rather than a workaround. Note, however, that it only flips `testing_mode`;
+`enable_test_alerts` is a separate user toggle and still has to be set. On a device whose settings UI
+does not expose that toggle, editing the preference file remains the fallback.
+
+### 10.3 What the test app would still tell us
+
+One thing our injector does not do is choose the *production* channel and warning-type combinations
+that AOSP's test app offers as buttons. Those combinations are documented in §1 and are worth
+reusing as our controller's alert-type menu, so that every preset we offer is one AOSP itself
+identified as safe to send in a test.
