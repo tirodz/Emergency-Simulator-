@@ -274,6 +274,7 @@ Do **not** start the GUI, the Wi-Fi transport, or the multi-device fan-out befor
 | Commit | Subject |
 | --- | --- |
 | `11050a6` | research: execute Experiment 3 against a real AOSP system image |
+| `27cbeaa` | docs: record milestone outcome and correct the feasibility matrix |
 
 **Source-analysis phase and the offline portion of the milestone are complete. The next session must
 be a hardware run: build and install `CellBroadcastReceiverTests` on a userdebug/eng or rooted device,
