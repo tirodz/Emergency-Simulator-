@@ -319,8 +319,11 @@ controller must not present it as a capability.
 * Environment: `/usr/local/bin/python` 3.13.15, git 2.47.3.
 * Git identity: `TIRO <68867160+tirodz@users.noreply.github.com>` (the repository's existing identity).
 * Repo tools available: `tools/ext4ls.py`, `tools/findapks.py`, `tools/axml.py`.
+* **Working injector**: `android/alertinject/` — build with `./build.sh`, run with `./run.sh`.
+  Verified buildable from a clean tree. Output jar is gitignored; rebuild takes seconds.
 * Remote: `origin` = `tirodz/Emergency-Simulator-.git`.
-* AppOps and SELinux have **not** been exercised yet.
+* AppOps and SELinux were **not needed** on the proven path — neither was consulted.
+* Proven end-to-end recipe: [`docs/environment-setup.md`](docs/environment-setup.md) §8.
 
 ## Git commit
 
@@ -348,10 +351,11 @@ controller must not present it as a capability.
 | `11050a6` | research: execute Experiment 3 against a real AOSP system image |
 | `27cbeaa` | docs: record milestone outcome and correct the feasibility matrix |
 | `1b08597` | docs: record final commit list in progress.md |
-| _(this commit)_ | chore: establish Android test environment and record the injection boundary |
+| `7ad0e71` | chore: establish Android test environment and record the injection boundary |
+| `740156a` | feat: prove the genuine Cell Broadcast alert chain on a live device |
 
-**Mission 2A Checkpoint 1 is complete.** The next session should start the emulator immediately (nine
-minute boot without KVM), then tackle **EXP-ALERT-002** — delivering a real `SmsCbMessage` payload
-into the genuine pipeline. Building the AOSP test app is not possible in this environment and is no
-longer on the critical path.
+**Mission 2A is complete and pushed.** `origin/main` is at `740156a`. The next session should start
+by booting the emulator (nine minutes without KVM), then implement **Experiment 15** —
+`tools/test_alert.py`, the smallest local controller. There is no remaining Android research task on
+the critical path.
 

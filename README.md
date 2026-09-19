@@ -10,15 +10,29 @@ question with evidence:
 > real alert classification, real sound, real vibration, real full-screen system UI — instead of a
 > fake notification or a UI we reimplement ourselves?
 
-The answer is **not yet committed to**. This repository is the permanent technical record of the
-investigation: what is possible, on what builds, with what privileges, on which OEMs, and what would
-require real cellular infrastructure.
+The answer is **yes**, and it has been demonstrated. Android's own Cell Broadcast subsystem has
+processed a controlled test message on a live Android 15 device and produced the real alert dialog,
+real alert audio and real text-to-speech. See [`report.md`](report.md) and
+[`docs/experiments.md`](docs/experiments.md).
+
+This repository is the permanent technical record of the investigation: what is possible, on what
+builds, with what privileges, on which OEMs, and what would require real cellular infrastructure.
 
 ## Status
 
-**Phase: research / feasibility.** No application code is being written yet. See
-[`progress.md`](progress.md) for the live state and [`report.md`](report.md) for the consolidated
-findings.
+**Phase: Mission 2A complete — the alert chain is proven. Implementation begins next.**
+
+| | |
+| --- | --- |
+| Proven on | Android 15 / API 35, `userdebug`, AVD `test35` |
+| Injection | `android/alertinject/` — a reflective `SmsCbMessage` builder run as root under `app_process` |
+| Result | Real `CellBroadcastReceiver` → real `CellBroadcastAlertService` → real alert UI + sound + TTS |
+| Requires | Root. Not an AOSP build, not a platform signature, not a system app. |
+| Transmission | None. No modem, no radio, no network, at any point. |
+
+See [`progress.md`](progress.md) for the live state, [`report.md`](report.md) for the consolidated
+findings and the exact next task, and [`docs/environment-setup.md`](docs/environment-setup.md) §8 for
+the proven end-to-end recipe.
 
 ## What this project is NOT
 
