@@ -16,6 +16,7 @@ Safety properties enforced here, not merely documented:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .adb import Adb, AdbError, platform_setup_hint
-from .runtime import INJECTOR_JAR_NAME, runtime_layout
+from .runtime import INJECTOR_JAR_NAME, persistent_dir, runtime_layout
 from .models import (
     AlertState,
     Device,
@@ -94,6 +95,7 @@ FILTER_MARKERS = (
 
 #: How long to wait for the alert to appear after the injector exits.
 EVIDENCE_TIMEOUT = 45.0
+TRANSACTION_STATE_FILENAME = "transactions.json"
 
 
 class Cancelled(RuntimeError):
@@ -138,14 +140,91 @@ class EmergencySimulatorController:
         self._adb: Optional[Adb] = None
         self._adb_path = adb_path
         self.adb_error: Optional[str] = None
-        # Per-device send gate, keyed by serial. See :class:`~app.models.TransactionState`.
-        self._transactions: dict = {}
+        # Per-device send gate, keyed by serial. The state is persisted so an application restart
+        # cannot accidentally forget an outstanding or uncertain alert.
+        self._transaction_store_error: Optional[str] = None
+        self._transactions: dict = self._load_transactions()
         try:
             self._adb = Adb(adb_path, cancel_check=cancel_check)
         except AdbError as exc:
             self.adb_error = str(exc)
 
     # -- transaction gate --------------------------------------------------
+
+    @staticmethod
+    def _transaction_path() -> Path:
+        return persistent_dir() / TRANSACTION_STATE_FILENAME
+
+    def _load_transactions(self) -> dict:
+        """Load the safety gate from disk, failing closed on malformed state."""
+        path = self._transaction_path()
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw = data.get("transactions", {})
+            if not isinstance(raw, dict):
+                raise ValueError("transactions must be an object")
+            loaded = {}
+            for serial, value in raw.items():
+                state = TransactionState(str(value))
+                if state is TransactionState.READY:
+                    continue
+                if state is TransactionState.BUSY:
+                    state = TransactionState.UNCERTAIN
+                loaded[str(serial)] = state
+            return loaded
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self._transaction_store_error = (
+                f"could not read local send-state {path}: {exc}. "
+                "Sending is disabled until the state file is repaired or removed after checking "
+                "the device manually."
+            )
+            log.error(self._transaction_store_error)
+            return {}
+
+    def _persist_transactions(self) -> bool:
+        """Atomically persist non-ready transaction states."""
+        path = self._transaction_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = {
+                "schema": 1,
+                "transactions": {
+                    serial: state.value
+                    for serial, state in self._transactions.items()
+                    if state is not TransactionState.READY
+                },
+            }
+            temporary = path.with_suffix(path.suffix + ".tmp")
+            encoded = json.dumps(data, indent=2, sort_keys=True) + "\n"
+            with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            self._transaction_store_error = None
+            return True
+        except OSError as exc:
+            self._transaction_store_error = (
+                f"could not persist local send-state {path}: {exc}. "
+                "Sending is disabled to avoid losing the duplicate-alert safety gate."
+            )
+            log.error(self._transaction_store_error)
+            try:
+                temporary = path.with_suffix(path.suffix + ".tmp")
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+            return False
+
+    def _set_transaction(self, serial: str, state: TransactionState) -> None:
+        if state is TransactionState.READY:
+            self._transactions.pop(serial, None)
+        else:
+            self._transactions[serial] = state
+        self._persist_transactions()
 
     def transaction_state(self, serial: str) -> TransactionState:
         return self._transactions.get(serial, TransactionState.READY)
@@ -156,10 +235,13 @@ class EmergencySimulatorController:
         Deliberately explicit. The controller will not decide on the operator's behalf that a
         displayed alert has been dismissed, because it has no way to know.
         """
-        self._transactions[serial] = TransactionState.READY
+        self._set_transaction(serial, TransactionState.READY)
 
     def _gate(self, serial: str) -> Optional[str]:
         """Return a refusal reason if this device may not be sent to yet."""
+        store_error = getattr(self, "_transaction_store_error", None)
+        if store_error:
+            return store_error
         state = self.transaction_state(serial)
         if state is TransactionState.READY:
             return None
@@ -605,7 +687,7 @@ class EmergencySimulatorController:
             # From here on an alert may reach the device, so the gate closes. If anything goes
             # wrong after this point the outcome is uncertain rather than known-failed, and the
             # gate stays closed until the operator acknowledges.
-            self._transactions[dev.serial] = TransactionState.BUSY
+            self._set_transaction(dev.serial, TransactionState.BUSY)
 
             # Baseline logcat so evidence cannot come from a previous run.
             self.adb.logcat_clear(dev.serial)
@@ -615,7 +697,7 @@ class EmergencySimulatorController:
                 result.failure = FailureCode.INJECTOR_FAILURE
                 result.message = "failed to push the injector to the device"
                 # Nothing was injected, so the device is not left in an unknown state.
-                self._transactions[dev.serial] = TransactionState.READY
+                self._set_transaction(dev.serial, TransactionState.READY)
                 return result
             self._say(f"Pushed injector to {INJECTOR_REMOTE}")
 
@@ -650,13 +732,20 @@ class EmergencySimulatorController:
             result.failure = FailureCode.USER_CANCELLED
             result.message = str(exc)
             # Cancellation is only reachable before injection begins, so nothing was delivered.
-            self._transactions[dev.serial] = TransactionState.READY
+            self._set_transaction(dev.serial, TransactionState.READY)
             self._say("Operation cancelled before delivery", logging.WARNING)
             return result
         except SafetyError as exc:
             result.state = AlertState.FAILED
-            result.failure = FailureCode.INJECTOR_BUILD_FAILED
-            result.message = str(exc)
+            message = str(exc)
+            lowered = message.lower()
+            if "injector" in lowered and ("missing" in lowered or "build" in lowered):
+                result.failure = FailureCode.INJECTOR_BUILD_FAILED
+            elif "test configuration" in lowered or "test mode" in lowered:
+                result.failure = FailureCode.TEST_MODE_DISABLED
+            else:
+                result.failure = FailureCode.UNKNOWN
+            result.message = message
             self._say(str(exc), logging.ERROR)
             return result
         except AdbError as exc:
@@ -664,7 +753,7 @@ class EmergencySimulatorController:
             result.failure = FailureCode.UNKNOWN
             result.message = str(exc)
             # The injector may already have run; we genuinely do not know.
-            self._transactions[dev.serial] = TransactionState.UNCERTAIN
+            self._set_transaction(dev.serial, TransactionState.UNCERTAIN)
             self._say(str(exc), logging.ERROR)
             return result
 
@@ -737,19 +826,19 @@ class EmergencySimulatorController:
             else:
                 result.failure = FailureCode.CELLBROADCAST_FILTERED
             # The pipeline explicitly rejected it, so nothing is outstanding on the device.
-            self._transactions[dev.serial] = TransactionState.READY
+            self._set_transaction(dev.serial, TransactionState.READY)
         elif seen_receiver and not seen_service:
             result.state = AlertState.FAILED
             result.failure = FailureCode.ALERT_PROCESSING_FAILED
             result.message = "the receiver saw the message but the alert service did not run"
-            self._transactions[dev.serial] = TransactionState.UNCERTAIN
+            self._set_transaction(dev.serial, TransactionState.UNCERTAIN)
         elif seen_service:
             result.state = AlertState.RECEIVED_BY_CELLBROADCAST
             result.failure = FailureCode.TIMEOUT
             result.message = (
                 "the alert service started but no alert UI was observed within the timeout"
             )
-            self._transactions[dev.serial] = TransactionState.UNCERTAIN
+            self._set_transaction(dev.serial, TransactionState.UNCERTAIN)
         else:
             result.state = AlertState.FAILED
             result.failure = FailureCode.TIMEOUT
@@ -757,7 +846,7 @@ class EmergencySimulatorController:
                 "no evidence of the message in the Cell Broadcast pipeline. The injector exited "
                 f"with code {result.injector_exit_code}, but that alone proves nothing."
             )
-            self._transactions[dev.serial] = TransactionState.UNCERTAIN
+            self._set_transaction(dev.serial, TransactionState.UNCERTAIN)
         for line in result.evidence:
             self._say(f"  evidence: {line}")
         self._say(f"Result: {result.state.value}" + (f" / {result.failure.value}" if result.failure else ""))

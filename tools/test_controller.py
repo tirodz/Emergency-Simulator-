@@ -153,6 +153,41 @@ def test_send_gate() -> None:
           result.failure is not None and result.failure.value == "DUPLICATE_SEND_BLOCKED")
 
 
+def test_persistent_send_gate() -> None:
+    """An application restart must not forget an outstanding alert."""
+    print("persistent send gate")
+    import app.controller as controller_module
+    from app.controller import EmergencySimulatorController
+    from app.models import TransactionState
+
+    with tempfile.TemporaryDirectory() as tmp:
+        original = controller_module.persistent_dir
+        controller_module.persistent_dir = lambda: Path(tmp)
+        try:
+            c1 = EmergencySimulatorController.__new__(EmergencySimulatorController)
+            c1._transaction_store_error = None
+            c1._transactions = {}
+            c1._set_transaction("PERSISTED-SERIAL", TransactionState.DELIVERED)
+            check("delivered state is persisted", (Path(tmp) / "transactions.json").is_file())
+
+            c2 = EmergencySimulatorController.__new__(EmergencySimulatorController)
+            c2._transaction_store_error = None
+            c2._transactions = c2._load_transactions()
+            check("delivered state survives a new controller",
+                  c2.transaction_state("PERSISTED-SERIAL") is TransactionState.DELIVERED)
+            check("persisted delivered state remains gated",
+                  c2._gate("PERSISTED-SERIAL") is not None)
+
+            c2.acknowledge("PERSISTED-SERIAL")
+            c3 = EmergencySimulatorController.__new__(EmergencySimulatorController)
+            c3._transaction_store_error = None
+            c3._transactions = c3._load_transactions()
+            check("acknowledge persists clearing the gate",
+                  c3.transaction_state("PERSISTED-SERIAL") is TransactionState.READY)
+        finally:
+            controller_module.persistent_dir = original
+
+
 def test_adb_probe_rejects_a_non_working_executable() -> None:
     """A file that exists but cannot run must not be reported as a usable adb.
 
@@ -286,6 +321,7 @@ def main() -> int:
     test_evidence_patterns()
     test_no_hazard_vocabulary_in_exposed_cli()
     test_send_gate()
+    test_persistent_send_gate()
     test_adb_probe_rejects_a_non_working_executable()
     test_runtime_layout_finds_the_injector()
     test_selftest_argument_parsing()
