@@ -61,18 +61,24 @@ $token = "<TOKEN>"
       $c = Get-Command adb -ErrorAction SilentlyContinue
       if ($c) { $candidates += $c.Source }
 
+      # $PSScriptRoot is empty when a block is pasted into the console instead of run from a .ps1
+      # file, and Join-Path rejects an empty base. Every Join-Path below is also guarded so one bad
+      # candidate cannot abort the search.
+      $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
       # Beside the built executable, wherever it happens to be.
-      $candidates += (Join-Path $PWD "platform-tools\adb.exe")
-      $candidates += (Join-Path $PWD "dist\platform-tools\adb.exe")
-      $candidates += (Join-Path $PSScriptRoot "..\packaging\platform-tools\adb.exe")
-      $candidates += (Join-Path $PSScriptRoot "..\dist\platform-tools\adb.exe")
+      $candidates += (Join-Path $here "platform-tools\adb.exe")
+      $candidates += (Join-Path $here "dist\platform-tools\adb.exe")
+      $candidates += (Join-Path (Join-Path $here "..") "packaging\platform-tools\adb.exe")
+      $candidates += (Join-Path (Join-Path $here "..") "dist\platform-tools\adb.exe")
 
       # An SDK install, if there is one.
-      if ($env:LOCALAPPDATA) {
-          $candidates += (Join-Path $env:LOCALAPPDATA "Android\Sdk\platform-tools\adb.exe")
+      foreach ($root in @($env:LOCALAPPDATA, $env:ANDROID_HOME, $env:ANDROID_SDK_ROOT)) {
+          if ($root) {
+              try { $candidates += (Join-Path $root "Android\Sdk\platform-tools\adb.exe") } catch { }
+              try { $candidates += (Join-Path $root "platform-tools\adb.exe") } catch { }
+          }
       }
-      if ($env:ANDROID_HOME)    { $candidates += (Join-Path $env:ANDROID_HOME    "platform-tools\adb.exe") }
-      if ($env:ANDROID_SDK_ROOT) { $candidates += (Join-Path $env:ANDROID_SDK_ROOT "platform-tools\adb.exe") }
 
       foreach ($p in $candidates) {
           if ($p -and (Test-Path $p)) {
@@ -88,14 +94,16 @@ $token = "<TOKEN>"
 
   $script:AdbPath = Find-Adb
   if (-not $script:AdbPath) {
-      Warn "  adb was not found."
-      Warn "  Options:"
-      Warn "    - Use the built Emergency-Simulator.exe, which bundles it, and run this from its folder."
-      Warn "    - Or install Platform Tools: https://developer.android.com/tools/releases/platform-tools"
-      return
+      # Do not abort. Some batches are not about adb at all (the Bluetooth one is not), and the
+      # adb-using tasks report their own failures. Aborting here would silently skip them.
+      Warn "  adb was not found on PATH."
+      Warn "    - If this batch needs adb, point ADB at it below, or install Platform Tools:"
+      Warn "      https://developer.android.com/tools/releases/platform-tools"
+      Warn "    - Batches that do not use adb are unaffected and will still run."
+  } else {
+      Good "  adb: $script:AdbPath"
+      & $script:AdbPath version | Select-Object -First 1
   }
-  Good "  adb: $script:AdbPath"
-  & $script:AdbPath version | Select-Object -First 1
 
   # So the task commands can call `adb` unchanged.
   function adb { & $script:AdbPath @args }
@@ -106,20 +114,20 @@ $token = "<TOKEN>"
 
   Say ""
   Say "== 3. Device =="
-  $devices = (& $script:AdbPath devices) -split "`n" | Where-Object { $_ -match "\tdevice$" }
+  $devices = @((& $script:AdbPath devices) -split "`n" | Where-Object { $_ -match "\tdevice$" })
   if (-not $devices) {
       Warn "  No authorized device."
       & $script:AdbPath devices -l
       Warn "  If it says 'unauthorized': unlock the phone and accept the USB debugging prompt."
       Warn "  If nothing is listed: check the cable and that USB debugging is on."
-      return
-  }
-  if ($devices.Count -gt 1) {
+      Warn "  Continuing anyway - tasks that do not use adb still run."
+  } elseif ($devices.Count -gt 1) {
       Warn "  More than one device attached. Disconnect the others so results are unambiguous."
       $devices | ForEach-Object { Warn "    $_" }
-      return
+      Warn "  Continuing anyway - tasks that do not use adb still run."
+  } else {
+      Good "  device: $($devices[0].Split("`t")[0])"
   }
-  Good "  device: $($devices[0].Split("`t")[0])"
 
   # ---------------------------------------------------------------------------
   # 4. Pull the batch and run it
