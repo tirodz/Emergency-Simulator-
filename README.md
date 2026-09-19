@@ -46,6 +46,7 @@ findings.
 | [`docs/experiments.md`](docs/experiments.md) | Controlled experiment plan with objectives and expected results |
 | [`docs/security-and-safety.md`](docs/security-and-safety.md) | Safety boundaries for the tool and for the controller |
 | [`docs/open-questions.md`](docs/open-questions.md) | Explicit unknowns, no guesses |
+| [`docs/critical-questions.md`](docs/critical-questions.md) | Direct answers to the project's 68 critical questions |
 | [`docs/sources.md`](docs/sources.md) | Every AOSP repository, branch and commit inspected |
 
 ## Ground rules used while writing these documents

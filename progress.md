@@ -72,6 +72,7 @@ Deliverables produced:
 | `docs/experiments.md` | done |
 | `docs/security-and-safety.md` | done |
 | `docs/open-questions.md` | done |
+| `docs/critical-questions.md` | done (added; direct answers to all 68 questions from the brief) |
 
 ## Findings
 
