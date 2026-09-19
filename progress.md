@@ -353,8 +353,9 @@ controller must not present it as a capability.
 | `1b08597` | docs: record final commit list in progress.md |
 | `7ad0e71` | chore: establish Android test environment and record the injection boundary |
 | `740156a` | feat: prove the genuine Cell Broadcast alert chain on a live device |
+| `4bb720e` | docs: record the proven state in the README and progress logs |
 
-**Mission 2A is complete and pushed.** `origin/main` is at `740156a`. The next session should start
+**Mission 2A is complete and pushed.** `origin/main` is at `4bb720e`. The next session should start
 by booting the emulator (nine minutes without KVM), then implement **Experiment 15** —
 `tools/test_alert.py`, the smallest local controller. There is no remaining Android research task on
 the critical path.
