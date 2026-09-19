@@ -53,7 +53,7 @@ def load_token() -> str:
     return token
 
 
-def render(host: str, token: str) -> str:
+def render(host: str, token: str, task_file: str | None = None) -> str:
     text = TEMPLATE.read_text(encoding="utf-8")
 
     start = text.find(BEGIN_MARK)
@@ -71,8 +71,20 @@ def render(host: str, token: str) -> str:
         f'$token = "{token}"\n'
         f"{END_MARK}"
     )
-    # ``end`` is the start of END_MARK; replace through the end of that line.
-    return text[:start] + block + text[end + len(END_MARK):]
+    # Substitute the config block first. Any later insertion changes the offsets, so slicing with
+    # positions computed before it would corrupt the document.
+    rendered = text[:start] + block + text[end + len(END_MARK):]
+
+    if task_file:
+        # Record which batch the bridge is serving, so the paste cannot be trusted to match a
+        # stale server. The URL itself is unchanged; the server decides which batch /task returns.
+        rendered = rendered.replace(
+            "# --- Emergency-Simulator: connect this laptop to the analysis environment ---",
+            "# --- Emergency-Simulator: connect this laptop to the analysis environment ---\n"
+            f"# Batch currently served by the bridge: {Path(task_file).name}",
+            1,
+        )
+    return rendered
 
 
 def main() -> int:
@@ -81,10 +93,12 @@ def main() -> int:
                         help="the analysis host for THIS session, e.g. https://work-1-....all-hands.dev")
     parser.add_argument("--stdout", action="store_true",
                         help="print the rendered paste instead of writing the local file")
+    parser.add_argument("--task-file", default=None,
+                        help="batch the bridge is serving, recorded in the rendered paste")
     args = parser.parse_args()
 
     token = load_token()
-    rendered = render(args.host, token)
+    rendered = render(args.host, token, args.task_file)
 
     if args.stdout:
         print(rendered)
