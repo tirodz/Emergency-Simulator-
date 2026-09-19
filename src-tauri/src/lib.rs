@@ -204,6 +204,11 @@ fn find_cellbroadcast(app: &tauri::AppHandle, serial: &str) -> Option<String> {
 }
 
 fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
+    // Production/user builds (including stock Galaxy A35 firmware) cannot run adbd as root.
+    // Do not request a root-daemon restart on those devices; keep the ADB session stable.
+    if build_type.eq_ignore_ascii_case("user") {
+        return false;
+    }
     let _ = adb_call(app, &["-s", serial, "root"]);
     thread::sleep(Duration::from_millis(700));
     if shell(app, serial, &["id", "-u"]).map(|s| s.trim()=="0").unwrap_or(false) { return true; }
