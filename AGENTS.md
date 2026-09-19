@@ -65,6 +65,35 @@ Start the bridge with `python3 tools/bridge.py --port 12000` and confirm reachab
 **external** fetcher (`https://r.jina.ai/<HOST>/health`), not a self-check that can hairpin back to
 itself. Do not tell the operator the connection works until that passes.
 
+Serve a batch other than the default with `--tasks <file>`.
+
+**There is no radio here.** This is worth stating plainly because it decides what is testable:
+
+* a phone over adb — possible, but only via the operator running the paste
+* a Bluetooth device — **not** possible from here at all. No adapter, no `bleak`, no BlueZ. A BLE
+  scan must run on the operator's machine, where the hardware is.
+
+A different project (the CMF Watch Pro 2, in a separate repository) once had a session that reached
+the operator's Windows machine and its Bluetooth adapter. That capability belonged to that session.
+Do not assume a host bridge exists — check, and say so if it does not.
+
+## The paste is the fragile part
+
+It has never been executed here, because there is no PowerShell in this container. It has already
+broken in a way that reading the diff did not catch: `Join-Path $PSScriptRoot` throws, because
+`$PSScriptRoot` is empty when a block is pasted into the console rather than run from a `.ps1` file.
+
+* Run `python3 tools/check_paste_ps1.py` before handing a paste over. It catches stray backtick
+  escapes, a top-level `return`, an unguarded `Join-Path`, and a pipeline result indexed without
+  `@()`. It cannot prove the script runs.
+* Never abort the paste on a failed precondition. An early `return` on "adb not found" silently skips
+  every task in a batch that does not use adb. Warn and continue; let each task report for itself.
+* Keep the pasted block ASCII.
+* **Check that posted evidence actually contains output.** A file whose byte count equals the size of
+  its own `### command` header lines means the commands produced nothing. Ten such files were once
+  accepted because the script printed "posted" for each — the same false-success pattern as
+  `docs/bugs/`, committed by the tooling that exists to prevent it.
+
 ## House style
 
 * Small coherent commits with human-readable messages (`docs:`, `research:`, `fix:`). No AI or bot
