@@ -33,7 +33,8 @@ And the real interface, driven against `emulator-5554`, produced a genuine alert
 moved the gate to `DELIVERED`, disabled SEND and left the safety strip untouched.
 
 Everything is pushed on the branch `release/self-contained-windows-build`, in PR
-[#1](https://github.com/tirodz/Emergency-Simulator-/pull/1) (draft, awaiting review).
+[#1](https://github.com/tirodz/Emergency-Simulator-/pull/1) (draft, awaiting review). Both CI jobs —
+the Windows build and the Xvfb interface tests — are green on the head commit (`35450205427`).
 
 ## Current milestone
 
