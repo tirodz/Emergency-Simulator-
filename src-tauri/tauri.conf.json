@@ -30,6 +30,6 @@
       "../packaging/platform-tools/AdbWinApi.dll",
       "../packaging/platform-tools/AdbWinUsbApi.dll"
     ],
-    "windows":{"nsis":{"installMode":"perUser","displayLanguageSelector":false}}
+    "windows":{"nsis":{"installMode":"currentUser","displayLanguageSelector":false}}
   }
 }
