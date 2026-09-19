@@ -666,3 +666,14 @@ Success is still determined by downstream Android CellBroadcast evidence. ADB pr
 2. The workflow validates frontend glass/interaction markers and bundles only the intended runtime resources.
 3. A successful Windows build is installed and inspected by the operator before a release is published.
 4. After the rebuild passes CI and device testing, main can receive a [release] commit for v2.0.0.
+
+
+## Mission 4 completion note
+
+Status: COMPLETE and merged to main on 2026-09-19.
+
+The Windows product is now a Tauri 2 + Rust + HTML/CSS/JavaScript desktop application with the custom glass visual system. GitHub Actions successfully builds the Windows application and NSIS installer.
+
+Galaxy A35 stock handling is diagnostic-only. Production user builds do not receive an adb root restart request. The app exposes device details, the local Samsung PNG hardware preview, a non-invasive dry run, and a direct Android Developer Options action. The previously demonstrated genuine CellBroadcast path remains restricted to controlled root/userdebug Android targets.
+
+The previous v1.1.0 GitHub release is no longer present.
