@@ -5,44 +5,85 @@
 
 ## Current status
 
-**Phase 1 (research / feasibility) — COMPLETE for the source-analysis portion.**
-**Milestone "Prove the ADB → AOSP test app → genuine alert path" — BLOCKED in this environment;**
-**one compensating experiment (Experiment 3) executed against a real AOSP image.**
+**Mission 2A — Android/AOSP test environment — CHECKPOINT 1 COMPLETE.**
+An Android **userdebug** target is running and the production Cell Broadcast pipeline has been reached
+from a root identity. The AOSP test application was proven **absent on a live device**, confirming the
+earlier offline finding and ruling out the Mission 2B plan of driving it.
 
-No implementation has begun, by design. The deliverables so far are the documentation set under
-`docs/`, plus `report.md`, which together answer the central feasibility question with cited evidence.
+**Previous phase:** Phase 1 research / feasibility — COMPLETE (offline image analysis in Experiment 3).
 
 The central question:
 
 > Can a PC or controller phone legitimately cause an Android device to process a controlled Cell
 > Broadcast test message through Android's *genuine* emergency-alert subsystem?
 
-**Answer: yes — via the mechanism AOSP itself provides, on a device we control at the system level.
-It is not possible on a stock, unrooted retail device, and not possible over ADB alone.**
+**Answer so far:** the production pipeline is reachable on a **userdebug** device via `adb root`, and
+the protected-broadcast gate is passed by root — but the *message payload* is the real injection
+point, and the AOSP test app that would normally supply it does not exist on any shipping image.
 
-**Refinement established this run (Experiment 3): the AOSP test application ships on *no* build type.
-It is absent from a real Google AOSP image and from every `PRODUCT_PACKAGES`. So even on a
-userdebug/eng device, the test APK must be built and installed deliberately. And because its activity
-has no Intent-driven trigger, ADB cannot complete the chain alone — it must drive the UI.**
+## Environment — established this mission
 
-## What has been established
+| Capability | Verdict |
+| --- | --- |
+| Android emulator | **AVAILABLE** — boots under software emulation (QEMU TCG) with `-accel off` |
+| KVM / hardware virtualization | **BLOCKED** — no `vmx`/`svm`, `/dev/kvm` impossible to create even as root |
+| Full AOSP source build | **BLOCKED** — needs 100–250 GB source + 50–150 GB out; we have 59+25 GB, 15 GB RAM, no swap |
+| adb / platform-tools | AVAILABLE — `37.0.1` |
+| JDK | AVAILABLE — OpenJDK **21** (Debian 13 ships 21, not 17) |
+| Android SDK | AVAILABLE — `/opt/android-sdk`, cmdline-tools 12.0 |
+
+Target: `emulator-5554`, AVD `test35`, image `android-35;google_apis;x86_64`,
+fingerprint `google/sdk_gphone64_x86_64/emu64xa:15/...:userdebug/dev-keys`, `ro.debuggable=1`, ~9 min
+cold boot without KVM.
+
+Details: [`docs/environment.md`](docs/environment.md),
+[`docs/environment-setup.md`](docs/environment-setup.md).
+
+## What has been established (cumulative)
 
 * The genuine pipeline and its exact component boundaries (source-verified).
 * The AOSP test application's identity, permissions, UID, signing and exact call path.
-* Where the test path enters the real pipeline: at the ordered-broadcast boundary between
+* Where the test path enters the real pipeline: at the broadcast/service boundary between
   `CellBroadcastService` (CBS) and `CellBroadcastReceiver` (CBR).
 * The four security gates that block a normal app, and which one is load-bearing.
-* The channel-configuration filters (`testing_mode`, `debug_build`, `display`) and the user-toggle
-  defaults, including the important fact that a channel with no configured range is silently dropped.
+* The channel-configuration filters (`testing_mode`, `debug_build`, `display`) and user-toggle defaults.
 * The ETWS-vs-CMAS test mechanisms and which categories are safe to use.
-* That no "rocket attack" alert class exists in Android, and that the visible body text is free-form.
-* That the genuine alert UI, sound and vibration depend on nothing from the modem.
-* **(new) The Cell Broadcast module ships as an APEX**, present even on a `user` build.
-* **(new) The test APK ships nowhere**, and its activity is not Intent-drivable.
-* **(new) Both CB entry actions are `<protected-broadcast>` in the shipping framework**, confirmed
-  from the image rather than inferred.
-* **(new) The exact emergency action string** is
-  `android.provider.action.SMS_EMERGENCY_CB_RECEIVED`.
+* No "rocket attack" alert class exists in Android; the visible body text is free-form.
+* The genuine alert UI, sound and vibration depend on nothing from the modem.
+* The Cell Broadcast module ships as an **APEX**, present even on a `user` build (Experiment 3).
+* Both CB entry actions are `<protected-broadcast>` in the shipping framework (Experiment 3).
+* The exact emergency action is `android.provider.action.SMS_EMERGENCY_CB_RECEIVED`.
+
+### New this mission (live device, Mission 2A)
+
+* **The emulator boots without KVM.** Software emulation is a workable fallback (EXP-ENV-001).
+* **The production receiver/service are present and are the *Google* build of the APEX module**, not
+  pure AOSP, plus a `/system/priv-app` legacy shim (EXP-ENV-002).
+* **The AOSP test app is absent on a live device**, not merely by image analysis (EXP-ENV-002).
+* **Shell (uid 2000) is refused the protected broadcast** with a `SecurityException` from
+  `ActivityManagerService.broadcastIntentLockedTraced` (EXP-ALERT-001).
+* **Root (uid 0) passes the gate**: the broadcast is delivered and
+  `CellBroadcastReceiver.onReceive` runs (EXP-ALERT-001).
+* **But the broadcast alone is inert**: `CBAlertService` bails with
+  `received SMS_CB_RECEIVED_ACTION with no extras!`. No alert UI, sound or vibration occurred.
+* **The authoritative data contract** is an `SmsCbMessage` Parcelable under the extra key
+  `"message"`; the real delivery path is binder (`ICellBroadcastService`), not an Intent (EXP-ENV-003).
+
+## Current milestone
+
+**Mission 2A — build the Android/AOSP test environment and establish the injection boundary.**
+
+Checkpoint status:
+
+| Checkpoint | Status |
+| --- | --- |
+| 1 — Environment assessment | **DONE** (`docs/environment.md`, `docs/environment-setup.md`) |
+| 2 — AOSP source/image setup | **PARTIALLY DONE** — target running; source build BLOCKED and documented |
+| 3 — Build/install | **BLOCKED** — no AOSP build capability here; test APK cannot be produced locally |
+| 4 — Test app verification | **DONE, as a negative result** — test app confirmed absent |
+| 5 — Manual alert test | **PARTIALLY DONE** — broadcast reaches receiver; payload delivery is the open problem |
+| 6 — ADB automation | NOT STARTED |
+| 7 — Minimal Windows controller | NOT STARTED |
 
 
 ## Completed
@@ -213,42 +254,47 @@ Prior deliverables (still current):
 
 ## Next exact actions
 
-Small, ordered, actionable. **All require hardware.**
+Ordered by value. **Item 1 is the decisive open question.**
 
-1. **Experiment 6 (highest value).** On a userdebug/eng or rooted device:
-   build `CellBroadcastReceiverTests`, install it, then:
-   * `am start -n com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity`
-   * confirm from `logcat` that **nothing** is sent without a tap (validates finding 18)
-   * `uiautomator dump` to resolve button coordinates, then `input tap`
-   * capture `logcat -v threadtime` and record whether a genuine alert appears.
-2. **Experiment 4.** Build and install the test APK from a matching AOSP tree.
-3. **Experiment 5.** Confirm the alert reaches the genuine UI/sound/vibration.
-4. **Experiment 7.** Establish the minimal privilege set for a custom helper.
-5. **Experiments 1 and 2** on the same device: read-only inspection of settings and toggles.
-6. **Experiment 15** only after 1–5: the smallest ADB-driven controller.
+1. **EXP-ALERT-002 — deliver a real `SmsCbMessage` payload.** The broadcast gate is proven passable by
+   root; the missing piece is a correctly formed `SmsCbMessage` under extra key `"message"`.
+   Candidate approaches, cheapest first:
+   a. Build the message in an **on-device** process that is permitted to construct the hidden type —
+      e.g. a small helper APK using platform stubs, or better, checking whether the *receiver app
+      itself* exposes any exported entry point we have not yet enumerated.
+   b. Check whether `CellBroadcastReceiverTests` is obtainable prebuilt from any official source
+      (CI artifacts, prebuilt GSI test suites) — **do not assume**; verify.
+   c. Trace `SmsCbMessage`'s constructor and `Parcel` layout to determine whether a hand-crafted
+      parcel is feasible in principle. This is a research step, and must be evaluated against the
+      safety rules: it must produce a *test-labelled* alert through the genuine service.
+2. **EXP-ALERT-003 — enable a displayable channel range.** Recall `range != null && range.mDisplay`
+   gates the database write, and `channelManager.isEmergencyMessage()` decides the full-screen path.
+   Determine from the live device which channels are enabled and which classify as emergency, so the
+   test message lands on a channel that produces the genuine full-screen experience.
+3. **Verify the alert experience** objectively: screen wake, full-screen dialog, sound, vibration,
+   notification, database row, dismissal.
+4. Only then, **Checkpoint 6**: ADB automation of whatever sequence is proven.
 
-Do **not** start the GUI, the Wi-Fi transport, or the multi-device fan-out before 1–5 conclude.
+Do **not** build the Windows controller or the multi-device fan-out yet.
 
 
 ## Last known working state
 
-* Repository: branch `main`. Working tree clean at the end of this run after committing.
-* Environment: `/usr/local/bin/python` (Python 3.13), git, `curl`. **No** `adb`, **no** Android SDK,
-  **no** JDK, **no** KVM (`CapEff: 0000000000000000`, no `/dev/kvm`). `unzip`/`apt-get` unavailable.
+* Repository: branch `main`. Working tree clean after committing.
+* **A live Android target is available and was used for this milestone:**
+  * AVD `test35`, device `emulator-5554`
+  * image `system-images;android-35;google_apis;x86_64`
+  * fingerprint `google/sdk_gphone64_x86_64/emu64xa:15/AE3A.240806.043/12960925:userdebug/dev-keys`
+  * `ro.build.type=userdebug`, `ro.debuggable=1`, SDK 35
+  * boot command and env vars in [`docs/environment-setup.md`](docs/environment-setup.md)
+  * **~9 minute cold boot without KVM — start it early in any future session**
+* Toolchain: OpenJDK 21.0.12.1, Android SDK at `/opt/android-sdk`, adb `37.0.1`, emulator `37.1.11.0`.
+* Host: Debian 13, 4 vCPU, 15 GB RAM, **no swap**, **no KVM** (see `docs/environment.md`).
+* Environment: `/usr/local/bin/python` 3.13.15, git 2.47.3.
 * Git identity: `TIRO <68867160+tirodz@users.noreply.github.com>` (the repository's existing identity).
-* No Android builds have been attempted. No device or emulator has been used. No instrumentation tests
-  have been run.
-* Repo-level validation performed this run: internal Markdown link check (no broken links).
-* Image analysis artefacts (not committed; large):
-  * `/tmp/gsi/gsi_aosp_x86_64.zip` — 1,243,476,645 bytes,
-    SHA-256 `9aa638ec20577ac4d15610527d2da2e7e3fc8388ae7ca23c2de3cb4e3df535c1`
-  * `/tmp/gsi/system.img` — 2.30 GB ext4, 553,271 blocks
-  * `/tmp/gsi/apex_payload.img`, `CellBroadcastApp.apk`, `framework-res.apk`, `framework.jar`
-  * Only `tools/*.py` from this work is committed; the images can be re-downloaded from the URL in
-    `docs/experiments.md`.
-* AOSP reference clones live outside the repository (under `/tmp`). They are **not** required to
-  continue: every path, branch and commit SHA is recorded in `docs/sources.md`.
+* Repo tools available: `tools/ext4ls.py`, `tools/findapks.py`, `tools/axml.py`.
 * Remote: `origin` = `tirodz/Emergency-Simulator-.git`.
+* AppOps and SELinux have **not** been exercised yet.
 
 ## Git commit
 
@@ -275,8 +321,11 @@ Do **not** start the GUI, the Wi-Fi transport, or the multi-device fan-out befor
 | --- | --- |
 | `11050a6` | research: execute Experiment 3 against a real AOSP system image |
 | `27cbeaa` | docs: record milestone outcome and correct the feasibility matrix |
+| `1b08597` | docs: record final commit list in progress.md |
+| _(this commit)_ | chore: establish Android test environment and record the injection boundary |
 
-**Source-analysis phase and the offline portion of the milestone are complete. The next session must
-be a hardware run: build and install `CellBroadcastReceiverTests` on a userdebug/eng or rooted device,
-then drive its UI over ADB and observe whether a genuine alert results.**
+**Mission 2A Checkpoint 1 is complete.** The next session should start the emulator immediately (nine
+minute boot without KVM), then tackle **EXP-ALERT-002** — delivering a real `SmsCbMessage` payload
+into the genuine pipeline. Building the AOSP test app is not possible in this environment and is no
+longer on the critical path.
 

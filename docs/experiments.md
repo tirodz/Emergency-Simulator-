@@ -596,6 +596,8 @@ pending one.
 
 **Design constraints.**
 * One transport only (ADB).
+---
+
 * No GUI beyond a terminal prompt / single window with two buttons.
 * Every send requires explicit confirmation.
 * The payload text is always prefixed `TEST ALERT - SIMULATION`.
@@ -604,3 +606,257 @@ pending one.
 **Expected result.** A working PC → device → genuine alert path, with the alert labelled as a test.
 
 **Actual result.** _(pending)_
+
+---
+
+# Mission 2A experiments — live emulator
+
+These experiments were executed against a running Android emulator, not inferred from source. Each
+has an explicit classification. See [`environment.md`](environment.md) and
+[`environment-setup.md`](environment-setup.md) for how the target was produced, and
+[`device-cellbroadcast.md`](device-cellbroadcast.md) for the component inventory.
+
+```
+Device   : emulator-5554, AVD test35
+Image    : system-images;android-35;google_apis;x86_64
+Build    : google/sdk_gphone64_x86_64/emu64xa:15/AE3A.240806.043/12960925:userdebug/dev-keys
+           ro.build.type=userdebug, ro.debuggable=1, SDK 35
+Host     : no KVM; emulator runs under software emulation (QEMU TCG), ~9 min cold boot
+```
+
+## EXP-ENV-001 — Can this environment host an Android target?
+
+**Status: CONFIRMED**
+
+**Objective.** Determine whether an Android emulator can be made to run here, given no KVM.
+
+**Commands.**
+
+```bash
+emulator -accel-check
+emulator -avd test35 -no-window -no-audio -no-boot-anim \
+         -gpu swiftshader_indirect -accel off -no-snapshot -memory 2048
+adb devices
+adb shell getprop sys.boot_completed
+```
+
+**Expected result.** UNKNOWN — the emulator may refuse to start without KVM.
+
+**Actual result.** `-accel-check` reports *"KVM requires a CPU that supports vmx or svm"*, and
+`/dev/kvm` cannot even be created (`mknod: Operation not permitted` as root). Nevertheless, with
+`-accel off` the emulator **booted successfully**: `emulator-5554  device`, `sys.boot_completed=1`
+after **≈9 minutes** (poll t=540 s). `adb root` succeeds.
+
+**Evidence.**
+
+```
+$ adb devices
+List of devices attached
+emulator-5554   device
+
+$ adb shell getprop sys.boot_completed
+1
+
+$ adb shell getprop ro.build.type
+userdebug
+```
+
+**Conclusion.** Software emulation is a viable fallback. The mission's requirement for a userdebug
+AOSP-family target with `adb` and `logcat` is **satisfied in this environment**, at the cost of slow
+boots. No KVM is required for correctness — only for speed.
+
+**Next action.** Target acquired; proceed to component inventory (EXP-ENV-002).
+
+---
+
+## EXP-ENV-002 — Are the Cell Broadcast components present on the target?
+
+**Status: CONFIRMED**
+
+**Objective.** Establish whether the production Cell Broadcast receiver and service exist on the
+running emulator, and in what form.
+
+**Commands.**
+
+```bash
+adb shell pm list packages | grep -i cellbroadcast
+adb shell pm list packages -f | grep -i cellbroadcast
+adb shell dumpsys package com.google.android.cellbroadcastreceiver
+adb shell dumpsys package com.google.android.cellbroadcastservice
+```
+
+**Expected result.** The receiver and service should be present; the APEX form was expected from
+Experiment 3. The test app was expected to be absent.
+
+**Actual result.**
+
+```
+package:com.google.android.cellbroadcastreceiver
+package:com.google.android.cellbroadcastservice
+package:com.android.cellbroadcastreceiver
+
+/apex/com.android.cellbroadcast/priv-app/GoogleCellBroadcastApp@350820300/GoogleCellBroadcastApp.apk
+    = com.google.android.cellbroadcastreceiver
+/apex/com.android.cellbroadcast/priv-app/GoogleCellBroadcastServiceModule@350820300/GoogleCellBroadcastServiceModule.apk
+    = com.google.android.cellbroadcastservice
+/system/priv-app/CellBroadcastLegacyApp/CellBroadcastLegacyApp.apk
+    = com.android.cellbroadcastreceiver
+```
+
+The service is `PERSISTENT`; the receiver is `PRIVILEGED`. Both live in the
+`com.android.cellbroadcast` **APEX**; a legacy shim coexists on `/system/priv-app`.
+
+**The AOSP test application is absent**, exactly as predicted offline:
+
+```
+adb shell pm list packages | grep -iE 'tests|testapp'                      -> (empty)
+adb shell find /system /product /vendor /apex -iname '*ellBroadcast*est*'  -> (empty)
+```
+
+**Evidence.** Full transcript in [`device-cellbroadcast.md`](device-cellbroadcast.md) §3–§4.
+
+**Conclusion.** The production pipeline is fully present and is the *Google* build of the module, not
+the pure-AOSP package. The test app is confirmed absent **on a live device** — previously only an
+image-analysis inference. Consequently Mission 2B's "launch `SendTestBroadcastActivity`" is not
+attemptable on this target.
+
+**Next action.** Determine whether a message can be delivered into the real pipeline another way
+(EXP-ALERT-001).
+
+---
+
+## EXP-ENV-003 — What is the authoritative delivery contract for a Cell Broadcast?
+
+**Status: CONFIRMED (source trace), with a live confirmation of the failure mode**
+
+**Objective.** Since the test app is unavailable, establish from AOSP exactly what the receiver
+expects, so an alternative legitimate injection can be evaluated.
+
+**Commands (source fetch).**
+
+```bash
+curl -sL "https://android.googlesource.com/platform/packages/apps/CellBroadcastReceiver/+/refs/heads/android15-release/src/com/android/cellbroadcastreceiver/CellBroadcastReceiver.java?format=TEXT" | base64 -d
+curl -sL "https://android.googlesource.com/platform/packages/apps/CellBroadcastReceiver/+/refs/heads/android15-release/src/com/android/cellbroadcastreceiver/CellBroadcastAlertService.java?format=TEXT" | base64 -d
+```
+
+**Actual result.** The delivery mechanism is **binder**, not an Intent extra:
+
+* `CellBroadcastServiceManager` binds `CellBroadcastService.CELL_BROADCAST_SERVICE_INTERFACE` and
+  delivers decoded messages over `ICellBroadcastService`.
+* `CellBroadcastReceiver.onReceive()` forwards the *same* Intent to the alert service:
+  ```java
+  } else if (Telephony.Sms.Intents.ACTION_SMS_EMERGENCY_CB_RECEIVED.equals(action) ||
+          Telephony.Sms.Intents.SMS_CB_RECEIVED_ACTION.equals(action)) {
+      intent.setClass(mContext, CellBroadcastAlertService.class);
+      mContext.startService(intent);
+  }
+  ```
+* `CellBroadcastAlertService.handleCellBroadcastIntent()` expects:
+  ```java
+  private static final String EXTRA_MESSAGE = "message";
+  ...
+  SmsCbMessage message = (SmsCbMessage) extras.get(EXTRA_MESSAGE);
+  if (message == null) { Log.e(TAG, "received SMS_CB_RECEIVED_ACTION with no message extra"); return; }
+  ```
+* Downstream gates: `shouldDisplayMessage(message)`, an enabled channel range with `mDisplay == true`,
+  then `channelManager.isEmergencyMessage(cbm)` decides full-screen + sound + vibration versus a
+  quiet notification.
+
+**Live confirmation of the failure mode.** Broadcasting the action without the extra produced exactly
+the predicted error:
+
+```
+E CBAlertService: received SMS_CB_RECEIVED_ACTION with no extras!
+```
+
+**Conclusion.** The data contract is `SmsCbMessage` under the extra key `"message"`. `SmsCbMessage` is
+a hidden/`@SystemApi` Parcelable, so constructing it externally requires platform stubs or reflection.
+Merely sending the action reaches the receiver but is inert — the receiver is not the injection point;
+the *message payload* is.
+
+**Next action.** EXP-ALERT-001 below.
+
+---
+
+## EXP-ALERT-001 — Can root UID perform the injection, and does shell?
+
+**Status: CONFIRMED — root reaches the receiver; shell is denied before dispatch**
+
+**Objective.** Determine empirically which identities can send the protected broadcast, since the
+AOSP test app (which would supply the privileged identity) is unavailable.
+
+**Setup.** Target as above. `adb root` for the root case; `adb unroot` for the shell case.
+
+**Commands.**
+
+```bash
+# root case
+adb root && sleep 5 && adb wait-for-device
+adb shell id
+adb logcat -c
+adb shell am broadcast -a android.provider.action.SMS_EMERGENCY_CB_RECEIVED \
+    -p com.google.android.cellbroadcastreceiver
+adb logcat -d
+
+# shell case
+adb unroot && sleep 3 && adb wait-for-device
+adb shell id
+adb logcat -c
+adb shell am broadcast -a android.provider.action.SMS_EMERGENCY_CB_RECEIVED \
+    -p com.google.android.cellbroadcastreceiver
+adb logcat -d
+```
+
+**Expected result.** Per the privilege model, shell (uid 2000) should be denied and root (uid 0)
+should be permitted.
+
+**Actual result.**
+
+*Root case — the broadcast is delivered and the receiver runs:*
+
+```
+$ adb shell id
+uid=0(root) ... context=u:r:su:s0
+
+$ adb shell am broadcast -a android.provider.action.SMS_EMERGENCY_CB_RECEIVED -p com.google...
+Broadcasting: Intent { act=...SMS_EMERGENCY_CB_RECEIVED flg=0x400000 pkg=com.google.android.cellbroadcastreceiver }
+Broadcast completed: result=0
+
+# logcat
+I ActivityManager: Start proc 2595:com.google.android.cellbroadcastreceiver/u0a199 for broadcast {...
+    CellBroadcastReceiver}
+D CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+    flg=0x400010 pkg=com.google.android.cellbroadcastreceiver cmp=.../CellBroadcastReceiver }
+E CBAlertService: received SMS_CB_RECEIVED_ACTION with no extras!
+```
+
+*Shell case — denied before dispatch:*
+
+```
+$ adb shell id
+uid=2000(shell) ... context=u:r:shell:s0
+
+$ adb shell am broadcast -a android.provider.action.SMS_EMERGENCY_CB_RECEIVED -p com.google...
+Exception occurred while executing 'broadcast':
+java.lang.SecurityException: Permission Denial: not allowed to send broadcast
+  android.provider.action.SMS_EMERGENCY_CB_RECEIVED from pid=5889, uid=2000
+    at com.android.server.am.ActivityManagerService.broadcastIntentLockedTraced(...)
+```
+
+**Evidence.** Raw logcat above; reproduced twice.
+
+**Conclusion.**
+
+1. **The protected-broadcast gate is real and enforced.** Shell is refused with a `SecurityException`
+   raised inside `ActivityManagerService.broadcastIntentLockedTraced`. This experimentally confirms,
+   on a running device, the `BroadcastController`/`isCallerSystem` analysis from Phase 1.
+2. **Root UID 0 passes the gate.** The receiver process started and `onReceive` logged the action.
+   So on a **userdebug** build, `adb root` is a sufficient identity for the *broadcast half* of the
+   problem.
+3. **But the broadcast alone is inert.** The pipeline then demanded the `"message"` extra and bailed
+   with `received SMS_CB_RECEIVED_ACTION with no extras!`. The alert UI/sound/vibration did **not**
+   occur. This is the crucial distinction: passing the broadcast gate is necessary, not sufficient.
+
+**Next action.** Determine whether a well-formed `SmsCbMessage` can be delivered alongside the
+broadcast from the root identity, so that `shouldDisplayMessage` and `isEmergencyMessage` run for
+real. This is the remaining unknown for the genuine-alert path.
