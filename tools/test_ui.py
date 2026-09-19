@@ -93,6 +93,7 @@ def main() -> int:
     from app.models import AlertState, DeviceState, FailureCode, SendResult, SupportLevel
     from app.models import TransactionState
     from app.ui import SAFETY_STRIP, EmergencySimulatorUI
+    from app.widgets import ERR, OK
 
     # A controller that never touches a device: adb is pointed at nothing and discovery is stubbed.
     controller = EmergencySimulatorController.__new__(EmergencySimulatorController)
@@ -130,7 +131,7 @@ def main() -> int:
     feedback = ui.msg_feedback.cget("text")
     check("rejection is shown to the operator",
           "rejected" in feedback.lower() or "must begin" in feedback.lower())
-    check("rejection is coloured as an error", ui.msg_feedback.cget("fg") == "#d95f52")
+    check("rejection is coloured as an error", ui.msg_feedback.cget("fg") == ERR)
 
     ui.msg_var.set("TEST DRILL - HOUSEHOLD DEVICE")
     pump(root, 0.05)
@@ -138,7 +139,7 @@ def main() -> int:
           validate_body(ui.msg_var.get()) == "TEST DRILL - HOUSEHOLD DEVICE")
     check("acceptance is confirmed to the operator",
           "accepted" in ui.msg_feedback.cget("text"))
-    check("acceptance is coloured as ok", ui.msg_feedback.cget("fg") == "#4fae74")
+    check("acceptance is coloured as ok", ui.msg_feedback.cget("fg") == OK)
     check("body prefix enforced in the entry widget",
           validate_body(ui.msg_var.get()).startswith("TEST"))
 
@@ -201,7 +202,7 @@ def main() -> int:
     pump(root, 0.05)
     check("a displayed alert is reported as success",
           ui.result_pill._value.cget("text") == "ALERT DISPLAYED")
-    check("success is coloured as ok", ui.result_pill._value.cget("fg") == "#4fae74")
+    check("success is coloured as ok", ui.result_pill._value.cget("fg") == OK)
     check("the success banner names the device",
           "emulator-5554" in ui.outcome_banner._label.cget("text"))
     check("the success banner says to dismiss on the device",
@@ -220,7 +221,7 @@ def main() -> int:
     check("a blocked send is reported as a failure",
           ui.result_pill._value.cget("text") == "DUPLICATE_SEND_BLOCKED")
     check("a blocked send is coloured as an error",
-          ui.result_pill._value.cget("fg") == "#d95f52")
+          ui.result_pill._value.cget("fg") == ERR)
     check("a blocked send explains itself to the operator",
           "stack a second dialog" in ui.log_text.get("1.0", "end"))
     check("the safety statement survives a failure banner",
