@@ -79,6 +79,20 @@ Commit inspected: `main` = `16ff738f4b4d8bfdffef4df4682230571caa67df`
 | --- | --- |
 | `src/java/com/android/internal/telephony/CellBroadcastServiceManager.java` | Binds to the CB service and forwards raw modem messages via `ICellBroadcastService` |
 
+## Binary artefacts inspected
+
+These were read directly, not quoted from a web page. Tooling for reading them is in `tools/`.
+
+| Artefact | Source | Notes |
+| --- | --- | --- |
+| AOSP GSI system image | `https://dl.google.com/developers/android/cinnamonbun/images/gsi/aosp_x86_64-exp-CP41.260828.004.A8-16319058-9aa638ec.zip` | Android 17 / SDK 37, `user` build, `ro.debuggable=0`, `release-keys`. SHA-256 `9aa638ec20577ac4d15610527d2da2e7e3fc8388ae7ca23c2de3cb4e3df535c1`. |
+| `com.android.cellbroadcast.capex` | inside the image at `/system/apex/` | Manifests as `com.android.cellbroadcast`. |
+| `CellBroadcastApp.apk` | inside the APEX payload, `priv-app/CellBroadcastApp@<build>/` | The production receiver app. |
+| `com.android.cellbroadcastreceiver.module.xml` | inside the APEX payload, `etc/permissions/` | The privileged-permission allowlist. |
+| `framework-res.apk` | image, `/system/framework/` | Its binary `AndroidManifest.xml` carries the `<protected-broadcast>` declarations. |
+
+The exact commands used to read these are in `docs/experiments.md`, Experiment 3.
+
 ## Official documentation
 
 * Android Developers — Cell Broadcast / Wireless Emergency Alerts (overview and API surface).
@@ -92,3 +106,4 @@ Commit inspected: `main` = `16ff738f4b4d8bfdffef4df4682230571caa67df`
 Anything not listed here is either marked `UNKNOWN` in the relevant document or backed only by
 inspection of the sources above. Third-party articles are not used as the basis of any claim in
 `report.md`.
+

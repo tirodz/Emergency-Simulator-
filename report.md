@@ -3,12 +3,16 @@
 **Subject:** Can a PC or controller phone cause Android test devices to experience a *genuine* Android
 Cell Broadcast emergency alert through Android's own emergency-alert machinery?
 
-**Phase:** 1 — source analysis. No device has been used yet; every claim below is derived from AOSP
-source or the framework's own security code, with the repository and commit recorded in
-[`docs/sources.md`](docs/sources.md).
+**Phase:** 1 — source analysis, plus one executed experiment against a real AOSP system image
+(Experiment 3). No device or emulator was available for this run: the execution environment has no
+KVM, no ADB and no Android SDK. Every claim below is derived from AOSP source, from the framework's
+own security code, or from bytes read out of a Google-published AOSP image — with the repository,
+branch, commit and image hash recorded in [`docs/sources.md`](docs/sources.md) and
+[`docs/experiments.md`](docs/experiments.md).
 
-**Method:** clone and read the real components, trace the real execution path, and quote the decisive
-code. Unknowns are marked `UNKNOWN` rather than guessed.
+**Method:** clone and read the real components, trace the real execution path, quote the decisive
+code, and where possible verify against a shipping image. Unknowns are marked `UNKNOWN` rather than
+guessed.
 
 ---
 
@@ -253,13 +257,25 @@ This is the recommended path, and it is the path the first proof of concept shou
 ADB is a **transport, not an authority**. Specifically:
 
 * `am broadcast` of the protected action from shell is expected to fail with `SecurityException`.
+  This is now backed by the shipping image: both CB actions are declared `<protected-broadcast>`.
 * There is **no** `cmd`/`service` injection interface for CB.
-* ADB **can** enumerate devices (`adb devices -l`), read logs (`logcat`), and — most importantly —
-  **start the test app's own exported activity** via `am start`. If that works, the activity performs
-  the privileged broadcast *as itself*, and ADB becomes a viable trigger with no custom privilege
-  work at all.
+* ADB **can** enumerate devices (`adb devices -l`), read logs (`logcat`), and start the test app's own
+  exported activity via `am start`.
 
-**That last point is the single highest-value unknown in the project.** It is Experiment 6.
+The hope was that the last point would make ADB a sufficient trigger. **Experiment 3 disproved that
+for any shipping device**, for two independent reasons:
+
+1. `CellBroadcastReceiverTests` is not present in a real AOSP image and not in any `PRODUCT_PACKAGES`.
+   It ships on no build type. There is nothing for ADB to launch.
+2. `SendTestBroadcastActivity` has no `onNewIntent` override and never calls `getIntent()`. It is a
+   pure GUI. `am start` renders the UI and sends nothing; a UI tap is mandatory.
+
+So ADB remains the right *transport*, but it cannot *initiate* the privileged operation. It can only
+drive a test app that a custom build or a rooted device has already installed. The controller is a UI
+driver plus a logcat observer, not a broadcaster.
+
+The decisive device question therefore narrows from "can ADB send the broadcast?" (no) to
+"can ADB drive the test app's UI once the test app exists?" — which remains Experiment 6.
 
 ## 25. Local testing
 
@@ -363,11 +379,11 @@ version:
 
 | Goal | Stock unrooted | ADB only | Root | Root + system helper | AOSP userdebug/eng | Actual cellular |
 | --- | --- | --- | --- | --- | --- | --- |
-| Trigger a test alert | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | **CONFIRMED** | works (real broadcast) |
-| Genuine system UI | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | **CONFIRMED** | CONFIRMED |
-| Genuine alert sound | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | **CONFIRMED** | CONFIRMED |
-| Genuine vibration | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | **CONFIRMED** | CONFIRMED |
-| PC control | n/a | viable transport | LIKELY | LIKELY | **CONFIRMED** | n/a |
+| Trigger a test alert | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | LIKELY (needs test APK built + installed) | works (real broadcast) |
+| Genuine system UI | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | LIKELY | CONFIRMED |
+| Genuine alert sound | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | LIKELY | CONFIRMED |
+| Genuine vibration | NOT POSSIBLE | NOT POSSIBLE | LIKELY | LIKELY | LIKELY | CONFIRMED |
+| PC control | n/a | viable transport | LIKELY | LIKELY | LIKELY | n/a |
 | Wi-Fi control | n/a | n/a | LIKELY | LIKELY | LIKELY | n/a |
 | Multiple phones | n/a | LIKELY | LIKELY | LIKELY | LIKELY | n/a |
 | Works without internet | CONFIRMED | CONFIRMED | CONFIRMED | CONFIRMED | CONFIRMED | CONFIRMED |
@@ -375,10 +391,27 @@ version:
 | Cancel pending alert | n/a | LIKELY | LIKELY | LIKELY | LIKELY | n/a |
 | Remotely dismiss displayed alert | NOT POSSIBLE | NOT POSSIBLE | UNKNOWN | UNKNOWN | UNKNOWN | NOT POSSIBLE |
 
-"CONFIRMED" for the development-build column means *confirmed by construction from AOSP source*: the
-test application exists in the tree, is platform-signed, shares `android.uid.phone`, and its call site
-is traced into `CellBroadcastReceiver`. It has not yet been executed on hardware, and
-[`docs/experiments.md`](docs/experiments.md) says so explicitly.
+### How to read this matrix
+
+Two columns were downgraded from the Phase 1 draft after Experiment 3, and the reason matters:
+
+* **"ADB only" is NOT POSSIBLE for triggering.** ADB is a transport, not an authority, and there is
+  no longer any test app for it to drive. Experiment 3 confirmed that
+  `CellBroadcastReceiverTests` ships on no build type and is absent from a real AOSP image. There is
+  therefore no ADB-only path from a stock device to a genuine alert. This is a negative result, and it
+  is the single most important correction in this report.
+* **"AOSP userdebug/eng" was downgraded from CONFIRMED to LIKELY for *triggering*.** The path is
+  confirmed *by construction* from source — the test app exists, is platform-signed, shares
+  `android.uid.phone`, and its call site traces into `CellBroadcastReceiver`. But it has not been
+  executed on hardware, and two things must hold at run time: the test APK must be built and installed
+  deliberately (it is not in `PRODUCT_PACKAGES`), and the send must be driven through the activity's
+  UI because there is no Intent-driven trigger. Neither has been observed. `LIKELY` is the honest
+  label.
+
+The "CONFIRMED" entries for the AOSP column are confirmed *by construction from AOSP source*, not by
+execution. [`docs/experiments.md`](docs/experiments.md) states this explicitly, and Experiment 5
+exists to convert them to observed results.
+
 
 ## 35. Recommended development sequence
 
@@ -392,6 +425,100 @@ is traced into `CellBroadcastReceiver`. It has not yet been executed on hardware
    (Experiment 9).
 7. Only then build the smallest controller (Experiment 15).
 8. Only after that: Wi-Fi transport, multi-device fan-out, device selection, logging, and UI.
+
+---
+
+# Addendum — Milestone: proving the ADB → test-app → genuine-alert chain
+
+This addendum records the outcome of the specific milestone requested after Phase 1:
+*prove or disprove that `Windows/ADB → exported AOSP test activity → SendTestMessages →
+CellBroadcastReceiver → genuine production alert` is a working path.*
+
+## Outcome
+
+**The chain is architecturally valid but has two preconditions that make it unprovable on any
+shipping device, and unprovable in the current execution environment.**
+
+The chain, as specified, is:
+
+```
+Windows / ADB
+  → exported AOSP CellBroadcast test activity
+  → existing SendTestMessages logic
+  → CellBroadcastReceiver receives injected SmsCbMessage
+  → genuine production alert processing
+  → system UI / notification
+```
+
+Analysed stage by stage:
+
+| Stage | Verdict | Basis |
+| --- | --- | --- |
+| ADB can reach the device | YES | ADB is a normal transport. |
+| The exported test activity exists *on a shipping device* | **NO** | Not in the AOSP image, not in `PRODUCT_PACKAGES`. Build-time only. |
+| ADB can launch the activity | Would be yes *if installed* | `exported="true"` on 14/15/16/main. |
+| Launching alone sends a message | **NO** | No `onNewIntent`, no `getIntent()`. Pure GUI. |
+| A UI tap invokes `SendTestMessages` | YES | Standard `OnClickListener`s; stable button IDs. |
+| The injection uses the real action | YES | `android.provider.action.SMS_EMERGENCY_CB_RECEIVED`. |
+| The send passes the security gates | YES, *as the test app* | Platform-signed, `sharedUserId=android.uid.phone` (UID 1001), in `isCallerSystem`. |
+| The production receiver handles it | YES | Explicit `setPackage()` + `receiverPermission`. |
+| Genuine UI / sound / vibration occur | **UNKNOWN** | Requires a device; not observable here. |
+
+## The two blocking preconditions
+
+**Precondition 1 — the test APK must exist on the device.** It ships nowhere. Installing it requires
+either:
+
+* an AOSP userdebug/eng build produced by us (`m CellBroadcastReceiverTests`), or
+* a rooted device on which a platform-signed APK can be placed as a system app.
+
+`adb install` of a third-party-signed build of the same package will not work: the platform signature
+and the shared `android.uid.phone` UID are what grant the privilege.
+
+**Precondition 2 — ADB cannot inject the broadcast, only drive a GUI.** Because the activity has no
+Intent-driven trigger and no instrumentation test bodies, the only entry into `SendTestMessages` is
+the button callbacks. The controller must resolve button coordinates at run time via
+`uiautomator dump` and issue `input tap`. This is workable but layout-dependent.
+
+## Why it could not be proven in this run
+
+The execution environment has `CapEff: 0000000000000000`, no `/dev/kvm`, no ADB, no Android SDK and
+no JDK. No emulator can start and no device can attach. Experiments 1, 2, 6 and 7 are device
+experiments and remain blocked.
+
+To compensate, Experiment 3 was executed offline against a real Google AOSP image (Android 17, `user`
+build, SHA-256 `9aa638ec20577ac4d15610527d2da2e7e3fc8388ae7ca23c2de3cb4e3df535c1`) using minimal
+ext4/AXML tooling written for the purpose. That produced the byte-level evidence above rather than
+inference.
+
+## What was positively established this run
+
+* The receiver and service ship inside an APEX module, present even on a `user` build.
+* The test application ships on **no** build type — the central negative result.
+* Both CB actions are `<protected-broadcast>` in the shipping framework.
+* The exact emergency action string is
+  `android.provider.action.SMS_EMERGENCY_CB_RECEIVED` (`provider.action`, not
+  `provider.Telephony`) — a silent-failure trap now documented.
+* The receiver's privileged-permission allowlist was read from the shipping APEX.
+* `SendTestBroadcastActivity` is not Intent-drivable and the testapp has no instrumentation bodies,
+  so neither `am start` nor `am instrument` is a non-UI trigger.
+
+## Consequence for the architecture
+
+The controller reduces to: **install/push a platform-signed test APK onto a development or rooted
+device, then drive its UI over ADB, using logcat for observability.** That is a legitimate design, but
+it is materially more constrained than "ADB sends the broadcast". The constraint must be reflected in
+the feasibility matrix, which is updated accordingly.
+
+## Verdict against the milestone
+
+`We have established the mechanism; the original approach is blocked on device prerequisites X
+(test APK presence) and Y (UI-driven trigger), not on the security model. The security model is
+satisfied, not bypassed.`
+
+The next run must be a **hardware run**. There is no further source or image analysis that can
+advance the decisive question.
+
 
 ---
 
@@ -471,18 +598,32 @@ Only a *real* Cell Broadcast. Everything the project wants does not.
 
 ## Recommended Proof of Concept
 
-The smallest thing that proves the concept:
+The smallest thing that proves the concept, **corrected after Experiment 3**:
 
 ```
 Hardware  : 1 PC + 1 Android device running an AOSP userdebug/eng build
-            (or an emulator, if Experiment 3 succeeds)
+            (a rooted device is the fallback; an emulator is not available in this environment)
 Software  : the AOSP `CellBroadcastReceiverTests` APK, built from the matching tree
-Sequence  : PC script -> adb -> launch SendTestBroadcastActivity / trigger one ETWS test message
-            -> genuine full-screen alert with sound and vibration
+            (`m CellBroadcastReceiverTests`) and installed deliberately — it is NOT in
+            PRODUCT_PACKAGES and NOT present in any shipping image
+Sequence  : PC script
+            -> adb: am start -n .../.SendTestBroadcastActivity      (renders the UI)
+            -> adb: uiautomator dump; input tap <button coords>     (invokes the send)
+            -> genuine CellBroadcastReceiver -> genuine alert
 Evidence  : logcat showing CellBroadcastReceiver -> CellBroadcastAlertService ->
             CellBroadcastAlertDialog, plus the row in Android's own CB history
 Guarantee : the chosen channel is ETWS test (0x1103) and the body begins "TEST ALERT — SIMULATION"
 ```
+
+Two corrections relative to the Phase 1 proposal, both forced by Experiment 3:
+
+1. **The APK must be built, not assumed.** It is absent from every shipping image.
+2. **The trigger is a UI tap, not an Intent.** `am start` alone sends nothing.
+
+A useful intermediate step — cheaper than the full PoC and worth doing first — is to run the same
+sequence and confirm the *negative* result: launch the UI, issue no tap, and show from logcat that
+nothing is broadcast. That single observation validates the "pure GUI" analysis on real hardware
+before any privilege work is attempted.
 
 If, and only if, that works, the same broadcast can be driven by a purpose-built device-side agent and
 then by a network controller.
@@ -525,20 +666,36 @@ environment supplies the privilege.
 
 ## Exact Next OpenHands Task
 
-> Run **Experiment 1**, **Experiment 2**, **Experiment 3** and **Experiment 6** from
-> [`docs/experiments.md`](docs/experiments.md) against whatever Android hardware or emulator is
-> available. Record the raw command output for each. Do not write application code. Do not build the
-> GUI. Do not implement the transport.
+> **This must be a hardware run.** Source and image analysis are exhausted for the decisive question;
+> no further offline work can advance it.
 >
-> Experiment 6 is the decisive one: determine whether
-> `adb shell am start -n com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity`
-> (or an equivalent instrumentation invocation) can produce a genuine alert on a device that has the
-> test app installed — and if the test app is not installed, record that fact together with
-> `adb shell pm list packages | grep cellbroadcast`.
+> Run **Experiment 6** (and, if possible, 4, 5, 7) on a real device. The device must be either an AOSP
+> userdebug/eng build or a rooted device, because Experiment 3 proved the test APK ships nowhere and
+> must be installed deliberately.
 >
-> Then update `docs/experiments.md` with actual results, update `progress.md`, and commit.
-
-If no Android hardware is available, the next task instead is a **pure source-analysis task**: trace
-`GsmCellBroadcastHandler` in CBS line by line to determine how `SmsCbEtwsInfo.getWarningType()` is
-populated for identifier `0x1103` on the production decode path, and resolve open question 25/26 in
-[`docs/open-questions.md`](docs/open-questions.md).
+> Concretely, in order:
+>
+> 1. On a userdebug/eng AOSP checkout:
+>    `m CellBroadcastReceiverTests`, then locate the APK under
+>    `out/target/product/<device>/testcases/CellBroadcastReceiverTests/`.
+> 2. Install it (platform-signed) — `adb install` if the build is userdebug, otherwise push into
+>    `/system/priv-app` and reboot.
+> 3. Verify it is present and privileged:
+>    `adb shell pm list packages | grep cellbroadcast` and
+>    `adb shell dumpsys package com.android.cellbroadcastreceiver.tests | grep -i signature|userId`.
+> 4. Launch the UI:
+>    `adb shell am start -n com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity`
+> 5. Confirm the negative result first: with the UI open and **no** tap, verify from logcat that
+>    nothing is sent. This validates the "pure GUI" finding.
+> 6. Resolve button coordinates with `adb shell uiautomator dump` and tap the ETWS test / Monthly test
+>    button. Capture `adb logcat -v threadtime` throughout.
+> 7. Record whether the genuine alert UI, sound and vibration occur, and whether
+>    `CellBroadcastReceiver.onReceive` appears in the log.
+>
+> Record raw command output in [`docs/experiments.md`](docs/experiments.md), update `progress.md`,
+> and commit. Do not write application code. Do not build the GUI. Do not implement the transport.
+>
+> If **no** Android hardware is available again, the next task is limited to a pure source-analysis
+> item: trace `GsmCellBroadcastHandler` in CBS to determine how `SmsCbEtwsInfo.getWarningType()` is
+> populated for identifier `0x1103` on the production decode path (open questions 25/26). Be explicit
+> that this does not advance the milestone.
