@@ -138,3 +138,46 @@ Format: **question** — status — next action.
 31. **What would a genuine cellular Cell Broadcast test require?** A CBC, RAN equipment, core-network
     configuration, spectrum and authorization. Recorded in `feasibility.md` §5 as *not required* for
     this project. No further investigation planned, deliberately.
+---
+
+## H. Resolved by Mission 2
+
+These were open questions; they now have answers, recorded here so the numbering above stays stable.
+
+32. **Does an approved alert path need the AOSP test APK?** — **RESOLVED: no.** `CellBroadcastReceiver`
+    takes an `SmsCbMessage` in a broadcast extra. A small reflective builder run as root is
+    equivalent. Recorded in `aosp-test-path.md` §10 and `experiments/EXP-15.md`.
+
+33. **Can a displayed emergency alert be dismissed remotely?** — **RESOLVED: no, by design.** BACK is
+    swallowed by an `OnBackInvokedCallback` the alert window registers, and `CLOSE_SYSTEM_DIALOGS` is
+    ignored. Confirmed on a live device (EXP-ALERT-004). The controller therefore reports remote
+    dismissal as unsupported instead of pretending otherwise.
+
+34. **Is a clean exit code sufficient to conclude the alert was shown?** — **RESOLVED: no, and this
+    was demonstrated the hard way.** `adb shell` flattened a multi-word body into its first word; the
+    injector exited 0 and the alert was displayed with truncated text, with no error reported
+    anywhere. Only the history database exposed it. Result detection is now based on the production
+    components in logcat. See EXP-CTL-003.
+
+35. **Is the secret code a setter or a toggle?** — **RESOLVED: a toggle.** Reading the current state
+    before sending it is mandatory; sending it blindly can disable a working configuration.
+
+## I. Still open
+
+36. **Lock-screen full-screen presentation, vibration and DND override** — Status: UNKNOWN — requires
+    `EXP-ALERT-002`. The device was never locked during Mission 2, so these remain unverified. The
+    emulator may be unable to demonstrate vibration at all (it logged `no pulsation pattern` in
+    Mission 1).
+
+37. **Do Android 14 and 16 accept the same injection path?** — Status: LIKELY but UNVERIFIED.
+    Android 15 is confirmed. 14 and 16 are inferred from APIs that are stable across these versions.
+    The cheapest resolution is to run the controller against a 14 and a 16 system image.
+
+38. **Do rooted retail devices work via `su`?** — Status: LIKELY but UNVERIFIED on real hardware.
+    The code path exists and is exercised by a synthetic adb presenting a non-root device, which
+    tests the decision logic but not a real phone's `su` implementation.
+
+39. **Do OEM builds (Samsung, Xiaomi, Motorola, Nothing) keep the same receiver, extras key and
+    preference names?** — Status: UNKNOWN. The controller probes both known CellBroadcast package
+    names and falls back to a listing, but the `testing_mode` / `enable_test_alerts` preference names
+    are AOSP/Google specific and may differ.

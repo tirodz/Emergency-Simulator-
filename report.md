@@ -663,23 +663,104 @@ confirmation before each send.
 
 ## Exact Next OpenHands Task
 
-> Build the smallest local controller, `tools/test_alert.py`, with no GUI and no Wi-Fi.
+**Mission 2 delivered this task.** The controller exists and is verified. The next task is
+`EXP-ALERT-002`.
+
+> **Task: verify the alert experience on a locked screen.**
 >
-> It should:
-> 1. shell out to `adb devices` and list attached devices;
-> 2. for a chosen serial, confirm root with `adb shell id` and report clearly if it is absent;
-> 3. set `enable_test_alerts=true` and `testing_mode=true` in the receiving app's private prefs
->    file, force-stop the app, and say what it changed;
-> 4. push and run `alertinject.jar` with the ETWS test category `4355` and a `TEST`-prefixed body;
-> 5. print a confirmation prompt before step 4 and require an explicit yes;
-> 6. offer `--dry-run` that performs steps 1–3 and stops;
-> 7. read back `adb logcat -d` filtered for `CellBroadcastReceiver`, `CBAlertService` and
->    `CellBroadcastAlertDialog`, and report whether the alert was displayed or filtered, quoting the
->    reason;
-> 8. never send anything without step 5.
+> 1. Boot the emulator first (`emulator -avd test35 -no-window -no-audio -accel off`, ~9 minutes).
+> 2. Lock the device: `adb shell input keyevent KEYCODE_SLEEP`.
+> 3. Send an alert with the existing controller: `python3 tools/test_alert.py --yes`.
+> 4. Capture whether `CellBroadcastAlertDialog` appears over the lock screen, and record the exact
+>    window state from `dumpsys window`.
+> 5. Check vibration: `adb logcat -d | grep -i vibra`. If the emulator reports no pulsation pattern,
+>    record that as an emulator limitation and mark vibration UNKNOWN rather than claiming success.
+> 6. Attempt a DND override: set Do Not Disturb, send again, and observe whether the alert still
+>    sounds.
+> 7. Append the results to `docs/experiments.md` as `EXP-ALERT-002`, update `progress.md`, commit.
 >
-> Verify it end to end against the `test35` emulator. Record the transcript in
-> [`docs/experiments.md`](docs/experiments.md) as Experiment 15, update `progress.md`, and commit.
->
-> Do not build a GUI. Do not implement Wi-Fi. Do not implement multi-device fan-out yet. Do not
-> attempt to make dismissal of a displayed alert remote — it has been shown not to work.
+> Do not build Wi-Fi, multi-device fan-out or remote dismissal. Those are later milestones.
+
+---
+
+# Addendum — Mission 2: the controller is built
+
+The proof of concept is now a usable application. `tools/test_alert.py` and the Tkinter GUI
+(`app/main.py`) both drive the same controller, and CI produces a real Windows executable.
+
+## What was built
+
+| Component | Path | Role |
+| --- | --- | --- |
+| ADB layer | `app/adb.py` | Argument-array subprocess calls; device discovery and readiness assessment |
+| Controller | `app/controller.py` | Validation, preparation, injection, evidence-based result detection |
+| Models | `app/models.py` | Device states, alert states, failure codes |
+| Logging | `app/logsetup.py` | Persistent local log |
+| CLI | `tools/test_alert.py` | The control engine with no GUI |
+| GUI | `app/ui.py`, `app/main.py` | Tkinter desktop interface |
+| Packaging | `packaging/` | PyInstaller spec and Windows build script |
+| CI | `.github/workflows/build-windows.yml` | Produces `Emergency-Simulator.exe` |
+| Tests | `tools/test_controller.py`, `tools/test_ui.py` | Safety invariants; real widget tree |
+
+## End-to-end result
+
+Against `emulator-5554` (Android 15 / API 35, userdebug), a controller-invoked send produced:
+
+```
+CellBroadcastReceiver.onReceive          -- message accepted by the receiver
+CellBroadcastAlertService.onStartCommand -- alert service started
+CellBroadcastAlertAudio                  -- genuine alert audio engaged
+CellBroadcastAlertDialog                 -- genuine full-screen alert displayed
+```
+
+and a row in the genuine history database (`7|4355|1|TEST ALERT - SIMULATION`).
+
+## The finding that justifies the design
+
+`adb shell` flattens its arguments into a string the device's shell re-parses. A multi-word body was
+silently truncated to `TEST`: the injector exited 0, the genuine alert appeared, and nothing anywhere
+reported an error. Only the history database revealed it. The fix is `shlex.quote` on every remote
+argument, and the lesson is that **a clean exit code is not evidence**. The controller therefore
+decides success from the production components in logcat, and a result is never reported as success on
+the injector's exit status alone.
+
+## Safety, as implemented
+
+* The service category is a module constant, `4355` (0x1103). No parameter, config key, API field or
+  CLI flag can change it; tests assert both the value and the absence of any hazard-selecting option.
+* Bodies must begin with `TEST` and are validated before any device is touched.
+* The CLI requires an explicit `y`; the GUI requires a confirmation dialog that repeats target,
+  build, type, locked channel and message, defaulting to "no".
+* `prepare_test_mode` refuses to act when a preference read fails, rather than guessing, because the
+  secret code is a toggle and a wrong guess could disable a working configuration.
+* The dry run was verified to leave the device's preference file byte-identical.
+* There is no modem, radio or RF path, and no scheduling or retry.
+
+## CANCEL
+
+Before delivery, STOP cancels the pending local operation. After delivery it reports that Android
+does not permit remote dismissal and points at the alert's own on-device control. This reflects
+EXP-ALERT-004: BACK is swallowed by an `OnBackInvokedCallback` the alert window registers
+deliberately, and `CLOSE_SYSTEM_DIALOGS` is ignored. No bypass is attempted.
+
+## What is still not established
+
+* `EXP-ALERT-002`: lock-screen presentation, vibration and DND override. The device was never locked,
+  so these remain unverified.
+* Vibration in particular was logged as `no pulsation pattern` on the emulator, so the emulator may
+  not be able to demonstrate it at all.
+* Android 14 and 16 are inferred, not tested. 15 is verified.
+* Rooted retail devices via `su`: the code path exists and is unit-exercised, but has not been run
+  against real hardware.
+
+## Still out of scope
+
+Not because they are hard, but because they come after the mechanism is proven:
+
+* Wi-Fi control, an HTTP server, phone-to-phone control
+* multi-device fan-out and device selection
+* remote dismissal of a displayed alert (shown not to work; see `EXP-ALERT-004`)
+* a cloud backend, accounts, or wide-area deployment
+
+The milestone was one Windows PC reliably controlling one rooted Android test device, and that is
+delivered.

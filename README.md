@@ -20,7 +20,7 @@ builds, with what privileges, on which OEMs, and what would require real cellula
 
 ## Status
 
-**Phase: Mission 2A complete — the alert chain is proven. Implementation begins next.**
+**Phase: Mission 2 complete — the controller is built and `Emergency-Simulator.exe` is produced by CI.**
 
 | | |
 | --- | --- |
@@ -29,10 +29,37 @@ builds, with what privileges, on which OEMs, and what would require real cellula
 | Result | Real `CellBroadcastReceiver` → real `CellBroadcastAlertService` → real alert UI + sound + TTS |
 | Requires | Root. Not an AOSP build, not a platform signature, not a system app. |
 | Transmission | None. No modem, no radio, no network, at any point. |
+| Controller | `tools/test_alert.py` (CLI) and the Tkinter GUI — one engine, two front ends |
+| Windows app | `Emergency-Simulator.exe`, built by `.github/workflows/build-windows.yml` |
 
-See [`progress.md`](progress.md) for the live state, [`report.md`](report.md) for the consolidated
-findings and the exact next task, and [`docs/environment-setup.md`](docs/environment-setup.md) §8 for
-the proven end-to-end recipe.
+## Quick start
+
+```powershell
+# 1. adb must be available
+$env:ADB_PATH = "C:\platform-tools\adb.exe"
+
+# 2. the target device must be rooted
+adb devices
+
+# 3. check what is attached, then dry-run, then send
+python tools\test_alert.py --list
+python tools\test_alert.py --dry-run
+python tools\test_alert.py --device emulator-5554
+```
+
+Or run the desktop application:
+
+```powershell
+python app\main.py
+# or, once built:
+.\dist\Emergency-Simulator.exe
+```
+
+The message must begin with `TEST`. The alert channel is fixed to the ETWS test channel `4355`
+(0x1103) and cannot be changed.
+
+Full instructions, including how to build the injector and the executable, are in
+[`docs/windows-controller.md`](docs/windows-controller.md).
 
 ## What this project is NOT
 
@@ -47,6 +74,7 @@ the proven end-to-end recipe.
 | --- | --- |
 | [`progress.md`](progress.md) | Live project state, findings, blockers, next actions |
 | [`report.md`](report.md) | Consolidated technical investigation report |
+| [`docs/windows-controller.md`](docs/windows-controller.md) | The desktop application: install, build, safety, CANCEL, troubleshooting |
 | [`docs/architecture.md`](docs/architecture.md) | End-to-end architecture, verified against AOSP |
 | [`docs/android-cellbroadcast.md`](docs/android-cellbroadcast.md) | What Cell Broadcast is and how Android models it |
 | [`docs/aosp-test-path.md`](docs/aosp-test-path.md) | AOSP test application: exact call path and its boundaries |
@@ -58,6 +86,7 @@ the proven end-to-end recipe.
 | [`docs/transport-options.md`](docs/transport-options.md) | PC→device control channels (ADB, Wi-Fi, peer phone) |
 | [`docs/feasibility.md`](docs/feasibility.md) | Feasibility matrix and answer to "can it be done" |
 | [`docs/experiments.md`](docs/experiments.md) | Controlled experiment plan with objectives and expected results |
+| [`docs/experiments/EXP-15.md`](docs/experiments/EXP-15.md) | The full end-to-end controller experiment, including the bugs found |
 | [`docs/security-and-safety.md`](docs/security-and-safety.md) | Safety boundaries for the tool and for the controller |
 | [`docs/open-questions.md`](docs/open-questions.md) | Explicit unknowns, no guesses |
 | [`docs/critical-questions.md`](docs/critical-questions.md) | Direct answers to the project's 68 critical questions |

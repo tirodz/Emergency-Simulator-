@@ -256,3 +256,70 @@ Design constraints to keep the system from being fragile:
 
 Target scale: 3–10 devices on one LAN, which is well within the capability of a trivial HTTP/WebSocket
 fan-out. No performance engineering is warranted before the mechanism itself is proven.
+---
+
+# Mission 2 addendum — transport decision, implemented
+
+The mission chose **USB/ADB** and built it. The reasoning: it is the most reliable transport, needs
+no network discovery, and is the right choice for a first proof of concept. It is also what the
+proven path already used, so no new risk was introduced.
+
+## What was built
+
+`app/adb.py` is the transport layer. It is deliberately thin and separate from the alert logic in
+`app/controller.py`, so a different transport can be added underneath without touching preparation,
+injection or evidence detection.
+
+Two implementation notes that matter:
+
+**Argument arrays, not shell strings.** Every call is `subprocess.run([adb, ...args])`. The one place
+a device-side shell is unavoidable is `adb shell`, which flattens its arguments into a string the
+*device's* shell re-parses. That flattening silently truncated a multi-word alert body to `TEST`
+(EXP-CTL-003). Every remote argument is now passed through `shlex.quote`, which closes both the
+correctness bug and the injection surface, since the body is operator-supplied.
+
+**Readiness is assessed, not assumed.** `adb devices` listing a device does not mean it is usable. The
+layer distinguishes `READY`, `BUSY`, `OFFLINE`, `UNAUTHORIZED`, `NO_ROOT` and `UNSUPPORTED`, and
+treats a listed-but-unresponsive device as `BUSY` rather than ready.
+
+## ADB discovery
+
+The executable is resolved in this order, and never downloaded:
+
+1. an explicit `--adb` path;
+2. the `ADB_PATH` environment variable (file or directory);
+3. `PATH`;
+4. conventional SDK locations (`%LOCALAPPDATA%\Android\Sdk`, `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`,
+   `/opt/android-sdk`).
+
+If adb cannot be found the tool explains where to obtain Platform Tools
+(https://developer.android.com/tools/releases/platform-tools) and stops.
+
+## What this means for the deferred Wi-Fi work
+
+The controller interface a Wi-Fi transport would have to satisfy is already fixed by what the ADB
+layer exposes: enumerate devices, run a remote command, read and write a device file, push a file,
+and dump logcat. A network transport can implement the same surface.
+
+The security constraints from §7 still apply and are not yet implemented, because USB/ADB makes them
+moot for now: pairing, per-device tokens, local-only binding, replay protection and an audit log all
+become necessary the moment a network listener exists.
+
+---
+
+# Mission 2 addendum — the multi-device requirements, restated
+
+The design constraints in §8 remain the target and none are implemented yet. They are restated here
+because the single-device implementation now fixes several of them by construction:
+
+* **Command ids and per-device acknowledgement.** Not implemented. A single send is one explicit
+  operator action with one evidence-based result, so there is no fan-out to confuse.
+* **Explicit device states.** Implemented. `app/models.py` defines `READY`, `BUSY`, `OFFLINE`,
+  `UNAUTHORIZED`, `NO_ROOT`, `UNSUPPORTED`, and a device is only usable when it is `READY`, rooted and
+  has a CellBroadcast package.
+* **Timeouts never reported as success.** Implemented as a rule and covered by tests: `TIMEOUT` and
+  `ALERT_PROCESSING_FAILED` are distinct failure codes, and `ALERT_DISPLAYED` requires the alert
+  dialog in logcat.
+* **Duplicate alerts.** The alert queue accumulates on the device (two sends produced `OK (1/2)` in
+  Mission 1), and there is no retry anywhere in the code, so a retry cannot silently duplicate.
+* **Idempotency and replay.** Not applicable yet; required before any network transport.

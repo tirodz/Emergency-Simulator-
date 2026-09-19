@@ -1149,3 +1149,93 @@ as a supported capability.
 The full chain was run a third time on the same target and produced the same components
 (`CellBroadcastAlertAudio` with `onInit() TTS engine status: 0`, and `CellBroadcastAlertDialog` at
 `RESUMED`). The mechanism is repeatable.
+---
+
+# Mission 2 — the controller experiments
+
+The controller is a new artefact with its own failure modes, so it was tested as a system rather than
+assumed correct. The full record is in [experiments/EXP-15.md](experiments/EXP-15.md); the findings
+that matter are summarised here.
+
+## EXP-CTL-001: the controller drives the proven path end to end
+
+**Objective.** Establish that a Python controller can inject through `android/alertinject` and detect
+the outcome from evidence.
+
+**Result.** CONFIRMED. Against `emulator-5554` (Android 15 / API 35, userdebug) the controller
+observed `CellBroadcastReceiver.onReceive`, `CellBroadcastAlertService.onStartCommand`,
+`CellBroadcastAlertAudio` and `CellBroadcastAlertDialog`, and a row appeared in
+`cell_broadcasts_v13.db`:
+
+```
+7|4355|1|TEST ALERT - SIMULATION
+```
+
+## EXP-CTL-002: the dry run mutates nothing
+
+**Objective.** Prove `--dry-run` changes no device state.
+
+**Setup.** Hash the receiver's preference file before and after.
+
+```
+before: fce0e6bd951c3579d252e9ed96246ffc822e166072666b8650e998fc553ee074
+after:  fce0e6bd951c3579d252e9ed96246ffc822e166072666b8650e998fc553ee074
+```
+
+**Conclusion.** CONFIRMED identical. The dry run performs discovery, root verification and the
+test-mode *reasoning* without writing.
+
+## EXP-CTL-003: `adb shell` silently truncated the alert body
+
+**Objective.** Determine whether a multi-word body survives the transport intact.
+
+**Result.** It did not. The injector reported `body = TEST` and exited 0. The alert was displayed, and
+no layer reported an error. The history database recorded the truncated text: `4|4355|1|TEST`.
+
+**Cause.** `adb shell` joins its arguments into one string that the **device's** shell re-parses.
+`TEST ALERT - SIMULATION` became three command words, and only the first reached the injector.
+
+**Conclusion.** CONFIRMED and FIXED. Every remote argument is now quoted with `shlex.quote`. Re-run:
+`body = TEST ALERT - SIMULATION` arrived intact, and row `5|4355|1|TEST ALERT - SIMULATION` proves it.
+
+**Why this matters.** This is the failure mode that a test relying on exit codes would have missed
+entirely. It is the strongest argument in the project for evidence-based result detection.
+
+## EXP-CTL-004: negative cases behave correctly
+
+| Case | Expected | Observed |
+| --- | --- | --- |
+| No device attached | `NO_DEVICE` | `NO_DEVICE`, exit 1 |
+| Device present but not root | `NO_ROOT`, send blocked | `NO_ROOT`, exit 1, send blocked |
+| Body not beginning with TEST | refused | `REFUSED: ... must begin with 'TEST'`, exit 3 |
+| Operator declines confirmation | nothing sent | `Cancelled. Nothing was sent.`, exit 4 |
+| Stop while waiting for evidence | stop waiting, report | stops and reports what was seen |
+
+**Conclusion.** CONFIRMED. The root case was exercised with a synthetic adb presenting a non-root
+device, which is honest about what it tests: the controller's decision logic, not a real retail phone.
+
+## EXP-CTL-005: the packaged executable works
+
+**Objective.** Establish that the frozen build is functional, not merely produced.
+
+**Result.** CONFIRMED. A local PyInstaller build produced a 12 MB onefile binary that launched under
+Xvfb, discovered `emulator-5554`, and wrote its log to the per-user path
+(`~/.emergency-simulator/logs/emergency-simulator.log`), which is the frozen-mode branch.
+
+**CI.** `.github/workflows/build-windows.yml` ran green on `windows-latest` in 50 seconds and uploaded
+`Emergency-Simulator.exe` (11.0 MB, DOS `MZ` header) as the artifact `Emergency-Simulator-windows`.
+
+## EXP-CTL-006: the GUI drives the same engine
+
+**Objective.** Establish that the desktop interface is functional and enforces the same rules,
+rather than being an untested shell.
+
+**Setup.** tkinter plus Xvfb were installed on the headless host so the real widget tree could be
+built and the real callbacks driven. No UI mocks.
+
+**Result.** CONFIRMED. `tools/test_ui.py` passes 16 checks covering the title and safety strip,
+rejection of hazard wording through the message field, log rendering, and the stop semantics
+(including that stop reports remote dismissal as unavailable and points at the on-device control).
+
+The GUI calls the same `EmergencySimulatorController` methods as the CLI, so the two front ends cannot
+diverge on safety behaviour.

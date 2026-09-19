@@ -251,3 +251,69 @@ Acceptance criteria:
 
 If criterion 1–3 hold, the central feasibility question is answered **yes** and the project moves to
 implementation. If they do not, the fallback is Candidate B (rooted) and the gap is documented.
+---
+
+# Mission 2 addendum — the feasibility question is answered in practice
+
+The matrix above describes the architectural possibilities. Mission 2 turned the chosen one into
+working software, so the relevant rows can now be marked from experiment rather than from reasoning.
+
+## Feasibility matrix, updated with Mission 2 evidence
+
+| Goal | Stock Android | ADB (no root) | Root | Userdebug | Actual cellular |
+| --- | --- | --- | --- | --- | --- |
+| Trigger test alert | NOT POSSIBLE | **CONFIRMED POSSIBLE** (with root over adb) | **CONFIRMED POSSIBLE** | **CONFIRMED POSSIBLE** | NOT IMPLEMENTED |
+| Genuine system UI | — | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | LIKELY |
+| Genuine alert sound/TTS | — | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | LIKELY |
+| Genuine vibration | — | UNKNOWN | UNKNOWN | UNKNOWN | UNKNOWN |
+| PC control | — | **CONFIRMED** (CLI + GUI) | **CONFIRMED** | **CONFIRMED** | — |
+| Wi-Fi control | — | NOT IMPLEMENTED | NOT IMPLEMENTED | NOT IMPLEMENTED | — |
+| Multiple phones | — | NOT IMPLEMENTED | NOT IMPLEMENTED | NOT IMPLEMENTED | — |
+| No cellular transmitter | — | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | — |
+| Cancel pending alert | — | **CONFIRMED** | **CONFIRMED** | **CONFIRMED** | — |
+| **Dismiss a displayed alert remotely** | — | **CONFIRMED NOT POSSIBLE** | **CONFIRMED NOT POSSIBLE** | **CONFIRMED NOT POSSIBLE** | — |
+
+Evidence for each row is in [`experiments.md`](experiments.md) and
+[`experiments/EXP-15.md`](experiments/EXP-15.md). "CONFIRMED" means observed on a live device, with
+the component names or database rows recorded. "UNKNOWN" means not tested — in the case of vibration,
+the emulator logged `no pulsation pattern`, so it may not be demonstrable on this hardware at all.
+
+Note the second column. Root is exercised **over adb**, so "ADB" and "Root" are not independent in
+practice for this project: the adb transport is how the root context is reached. ADB without root is
+`NOT POSSIBLE`, which was established in EXP-ALERT-001 with a real permission denial.
+
+## The three acceptance criteria from the earlier plan
+
+The plan set six acceptance criteria for the smallest demo. All six are met:
+
+1. The alert UI is Android's own `CellBroadcastAlertDialog` — **met**, observed in logcat and by
+   reading back the live window content.
+2. The sound comes from `CellBroadcastAlertAudio` — **met**, `CellBroadcastAlertAudio` engaged and
+   TTS initialised.
+3. `logcat` shows the genuine component names — **met**, plus `CellBroadcastReceiver.onReceive` and
+   `CBAlertService.onStartCommand`.
+4. The message appears in the Cell Broadcast history — **met**, rows `4`–`7` in
+   `cell_broadcasts_v13.db`.
+5. The alert is visibly identifiable as a test — **met**, the body must begin with `TEST` and the
+   channel is the ETWS test channel.
+6. The device's radio state is irrelevant — **met**, the emulator has no cellular radio.
+
+## The one criterion the earlier plan got wrong
+
+The plan assumed the demo would use the AOSP `CellBroadcastReceiverTests` APK, built from the same
+tree as the device image. That is **not** what was needed, and it was the reason the project looked
+blocked on resources we do not have (a full AOSP build needs 100–250 GB).
+
+`CellBroadcastReceiver` accepts its input as an `SmsCbMessage` in a broadcast extra. A small
+reflective builder pushed to `/data/local/tmp` and run as root under `app_process` is equivalent, and
+needs no AOSP tree, no platform signature and no `/system/priv-app` install. The correction is
+recorded in [`aosp-test-path.md`](aosp-test-path.md) §10.
+
+## What remains genuinely out of reach
+
+* **Actual cellular transmission** — a different problem entirely (CBC, core network, RAN, licensed
+  spectrum, lawful authority). Not needed for the genuine system UI, and out of scope permanently.
+* **Stock unrooted retail devices** — the protected-broadcast gate is not bypassable from an ordinary
+  app; this is a designed security boundary.
+* **Remote dismissal of a displayed alert** — confirmed impossible by experiment, not by assumption.
+* **Full AOSP builds on this host** — no KVM, no disk headroom. Not needed.

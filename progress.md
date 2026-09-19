@@ -5,6 +5,122 @@
 
 ## Current status
 
+**Mission 2 — Windows controller — COMPLETE. `Emergency-Simulator.exe` IS BUILT.**
+
+The proof of concept is now a usable application. A PC controller discovers a rooted device, verifies
+root, establishes the test-alert prerequisites, requires explicit confirmation, injects through the
+proven path, and decides the outcome from real Cell Broadcast evidence. The GUI drives the same
+engine as the command line.
+
+Verified end to end against `emulator-5554` (Android 15 / API 35, userdebug), with the alert reaching
+`CellBroadcastReceiver`, `CBAlertService`, `CellBroadcastAlertAudio` and `CellBroadcastAlertDialog`
+and a row written to the genuine history database. See
+[`docs/experiments/EXP-15.md`](docs/experiments/EXP-15.md).
+
+The Windows executable is produced by CI. The workflow `build-windows.yml` ran green on
+`windows-latest` and uploaded the artifact **`Emergency-Simulator-windows`**
+(`Emergency-Simulator.exe`, 11.0 MB, DOS `MZ` header).
+
+**The Android question was answered in Mission 1 / 2A** (see the archive at the end of this file): a
+root tool can inject a constructed `SmsCbMessage` into the stock `CellBroadcastReceiver`, and
+Android's own components then produce the real alert dialog, audio, TTS and history row. No AOSP
+build, platform signature or system-app install is needed. The remaining work is controller
+engineering.
+
+## Current milestone
+
+Mission 2 is delivered. The open work is `EXP-ALERT-002` (lock-screen, vibration, DND override), and
+then the deferred features: Wi-Fi transport, multi-device fan-out.
+
+## What has been established (Mission 2)
+
+* **The controller works end to end** on the proven injection path, with evidence-based result
+  detection.
+* **The channel is structurally locked.** `SERVICE_CATEGORY = 4355` is a module constant with no
+  parameter, config key, API field or CLI flag that can change it. Tests assert both the value and
+  the absence of any hazard-selecting option.
+* **A clean injector exit code is not success.** `ALERT_DISPLAYED` requires
+  `CellBroadcastAlertDialog` in logcat. Everything else maps to a specific failure code.
+* **The dry run provably changes nothing**, verified by hashing the device's preference file before
+  and after (identical).
+* **CANCEL is honest.** It cancels before delivery; after delivery it reports that Android does not
+  permit remote dismissal.
+* **A packaged build works.** The frozen executable runs, resolves the injector and log paths per
+  mode, and CI produces a real Windows binary.
+
+## Findings (Mission 2)
+
+### Confirmed facts
+
+* `adb shell` flattens its arguments into a string the **device's** shell re-parses. Unquoted
+  arguments containing spaces are silently split: a body of `TEST ALERT - SIMULATION` reached the
+  injector as `TEST`, with exit code 0 and no error. Confirmed by a history row `4|4355|1|TEST`.
+  Fixed with `shlex.quote` on every remote argument. `app/adb.py:shell`.
+* The secret code `2627` is a **toggle**. Reading state before sending it is mandatory; sending it
+  blindly can disable a working configuration. `app/controller.py:prepare_test_mode`.
+* On a userdebug emulator the adb shell is already uid 0 and there is **no `su`**. Root file access
+  must try the uid-0 shell first and only fall back to `su`. `app/adb.py:read_file`.
+* A preference read failure must not be treated as "disabled". The controller refuses instead of
+  guessing. `app/controller.py:prepare_test_mode`.
+* A packaged PyInstaller build has no repository next to it, so the injector location and log
+  directory must be resolved per mode. Log goes to `%LOCALAPPDATA%\Emergency-Simulator\logs\`.
+* GitHub Actions on `windows-latest` builds the executable from `packaging/Emergency-Simulator.spec`
+  in about 50 seconds.
+
+### Hypotheses (not yet verified)
+
+* Android 14 and 16 accept the same injection path. 15 is verified; 14/16 are inferred from stable
+  APIs.
+* Rooted retail devices work via `su` (the code path exists and is exercised by a synthetic adb, but
+  has not been run against real hardware).
+* Lock-screen presentation, vibration and DND override behave as the AOSP source suggests.
+
+## Blockers
+
+* **No KVM** on this host: the emulator uses software emulation and takes ~9 minutes to cold boot.
+  Start it before doing anything else.
+* **`EXP-ALERT-002` needs a locked device.** The device was never locked during Mission 2, so
+  lock-screen full-screen presentation, vibration and DND override remain unverified.
+* **Vibration specifically** was logged as `no pulsation pattern` on the emulator in Mission 1, so
+  the emulator may not be able to demonstrate it at all.
+
+## Next exact actions
+
+1. **`EXP-ALERT-002`** — lock the device (`adb shell input keyevent KEYCODE_SLEEP`), send an alert,
+   and capture whether the dialog appears over the lock screen. Attempt vibration and DND override.
+   Record in `docs/experiments.md`. If the emulator cannot show vibration, say so and mark it
+   UNKNOWN rather than claiming success.
+2. **Wi-Fi transport** — the controller is transport-agnostic; add a network path alongside adb.
+   Keep the same evidence-based result detection.
+3. **Multi-device fan-out** — iterate the existing per-device send; do not build a parallel pipeline.
+
+## Last known working state
+
+* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`.
+* **Target:** AVD `test35`, `emulator-5554`, Android 15 / API 35, `userdebug`, `ro.debuggable=1`.
+* **Run the CLI:** `ADB_PATH=/opt/android-sdk/platform-tools/adb python3 tools/test_alert.py --list`
+* **Run the GUI:** `DISPLAY=:99 python3 app/main.py` (headless host) or `dist\Emergency-Simulator.exe`
+  on Windows.
+* **Tests:** `python3 tools/test_controller.py` (29 checks, no device needed),
+  `DISPLAY=:99 python3 tools/test_ui.py` (16 checks).
+* **Build the exe locally:** `pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec`.
+* **CI artifact:** `Emergency-Simulator-windows`.
+* Boot the emulator first: `emulator -avd test35 -no-window -no-audio -accel off` (~9 min).
+
+## Git commits
+
+Mission 2:
+
+| Commit | Subject |
+| --- | --- |
+| `ec40f49` | feat: add test alert controller core |
+| `420ef33` | feat: add Windows desktop interface |
+| `6851814` | feat: add Windows packaging and a CI build |
+
+---
+
+## Archive — Mission 1 and 2A (complete)
+
 **Mission 2A — Android/AOSP test environment — CHECKPOINT 3 COMPLETE. THE CHAIN IS PROVEN.**
 
 The central question is answered affirmatively, with raw device evidence:
@@ -24,13 +140,10 @@ any tool that can construct one and pass the protected-broadcast gate is equival
 [`docs/experiments.md`](docs/experiments.md) EXP-ALERT-002 and the correction in
 [`docs/aosp-test-path.md`](docs/aosp-test-path.md) §10.
 
-**We are ready for implementation.** The remaining work is controller engineering, not Android
-research. See `# Next exact actions`.
-
 **Previous phases:** Phase 1 research / feasibility — COMPLETE. Mission 2A checkpoints 1 and 2 —
 COMPLETE.
 
-## Environment — established this mission
+### Environment — established in Mission 2A
 
 | Capability | Verdict |
 | --- | --- |
@@ -355,8 +468,8 @@ controller must not present it as a capability.
 | `740156a` | feat: prove the genuine Cell Broadcast alert chain on a live device |
 | `4bb720e` | docs: record the proven state in the README and progress logs |
 
-**Mission 2A is complete and pushed.** `origin/main` is at `4bb720e`. The next session should start
-by booting the emulator (nine minutes without KVM), then implement **Experiment 15** —
-`tools/test_alert.py`, the smallest local controller. There is no remaining Android research task on
-the critical path.
+**Mission 2 is complete and pushed.** The next session should start by booting the emulator (nine
+minutes without KVM), then run **`EXP-ALERT-002`** (lock-screen, vibration, DND override). The
+controller work is done; the remaining items are the deferred features listed in
+`# Next exact actions`.
 
