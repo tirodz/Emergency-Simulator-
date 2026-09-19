@@ -22,6 +22,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -54,8 +55,17 @@ TESTING_MODE_ACTION = "android.telephony.action.SECRET_CODE"
 REQUIRED_PREFIX = "TEST"
 DEFAULT_BODY = "TEST ALERT - SIMULATION"
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-INJECTOR_DIR = REPO_ROOT / "android" / "alertinject"
+if getattr(sys, "frozen", False):
+    # Packaged executable: the repository is not present, so everything mutable lives in a
+    # per-user directory and the injector jar is expected alongside the executable.
+    BUNDLE_DIR = Path(sys.executable).resolve().parent
+    REPO_ROOT = BUNDLE_DIR
+    INJECTOR_DIR = BUNDLE_DIR / "android" / "alertinject"
+else:
+    BUNDLE_DIR = Path(__file__).resolve().parent.parent
+    REPO_ROOT = BUNDLE_DIR
+    INJECTOR_DIR = REPO_ROOT / "android" / "alertinject"
+
 INJECTOR_JAR = INJECTOR_DIR / "out" / "alertinject.jar"
 INJECTOR_REMOTE = "/data/local/tmp/alertinject.jar"
 INJECTOR_CLASS = "org.emergencysim.alertinject.AlertInjector"
@@ -373,10 +383,28 @@ class EmergencySimulatorController:
     # -- injector ----------------------------------------------------------
 
     def ensure_injector_built(self, dry_run: bool = False) -> Path:
-        """Build the Java injector if the jar is missing or older than its sources."""
+        """Build the Java injector if the jar is missing or older than its sources.
+
+        In a packaged build the sources are not present, so the jar must ship next to the
+        executable; there is nothing to build from and we say so plainly.
+        """
+        frozen = getattr(sys, "frozen", False)
         sources = sorted(INJECTOR_DIR.rglob("*.java"))
-        if not sources:
-            raise SafetyError(f"injector sources not found under {INJECTOR_DIR}")
+
+        if frozen and not INJECTOR_JAR.exists():
+            raise SafetyError(
+                "the Android injector jar is missing.\n"
+                f"  Expected at: {INJECTOR_JAR}\n"
+                "  The packaged executable does not carry the injector sources, so the jar must be\n"
+                "  placed in that location next to Emergency-Simulator.exe.\n"
+                "  Build it from the repository with: android/alertinject/build.sh\n"
+                "  (requires the Android SDK and a JDK)."
+            )
+
+        if not sources and not INJECTOR_JAR.exists():
+            raise SafetyError(
+                f"injector sources not found under {INJECTOR_DIR} and no jar is present"
+            )
 
         stale = True
         if INJECTOR_JAR.exists():
@@ -659,4 +687,16 @@ class EmergencySimulatorController:
 
 
 def default_log_dir() -> Path:
+    """Where the persistent log lives.
+
+    A packaged executable is read-only relative to its own directory in the general case, so the log
+    goes to a per-user location. Running from the repository keeps logs/ alongside the code.
+    """
+    import os as _os
+
+    if getattr(sys, "frozen", False):
+        base = _os.environ.get("LOCALAPPDATA") or _os.environ.get("XDG_STATE_HOME")
+        if base:
+            return Path(base) / "Emergency-Simulator" / "logs"
+        return Path.home() / ".emergency-simulator" / "logs"
     return REPO_ROOT / "logs"
