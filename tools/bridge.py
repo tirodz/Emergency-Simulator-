@@ -58,6 +58,7 @@ import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -149,6 +150,15 @@ class Handler(BaseHTTPRequestHandler):
             return b""
         return self.rfile.read(length)
 
+    def _send_bytes(self, status: int, body: bytes, filename: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
     # -- routes -----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 (http.server's naming)
@@ -169,6 +179,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/task":
             self._send_json(200, load_tasks(self.server.task_file))  # type: ignore[attr-defined]
+            return
+
+        # A built artifact to hand the operator, and its hash so they can verify the transfer.
+        # Only files named on the command line are reachable: the path is checked by equality
+        # against that allow-list, so a traversal or a guessed name cannot select anything else.
+        if path.startswith("/download/"):
+            name = unquote(path[len("/download/"):])
+            artifacts = self.server.artifacts  # type: ignore[attr-defined]
+            if name not in artifacts:
+                self._send_json(404, {"error": "no such artifact", "available": sorted(artifacts)})
+                return
+            target = Path(artifacts[name])
+            if not target.is_file():
+                self._send_json(404, {"error": f"artifact {name} is registered but missing on disk"})
+                return
+            self._send_bytes(200, target.read_bytes(), name)
+            return
+
+        if path == "/artifacts":
+            out = []
+            for name, file in self.server.artifacts.items():  # type: ignore[attr-defined]
+                p = Path(file)
+                entry = {"name": name, "available": p.is_file()}
+                if p.is_file():
+                    entry["bytes"] = p.stat().st_size
+                    entry["sha256"] = hashlib.sha256(p.read_bytes()).hexdigest()
+                    entry["url"] = f"{self.server.public_base}/download/{name}"  # type: ignore[attr-defined]
+                out.append(entry)
+            self._send_json(200, {"artifacts": out})
             return
 
         if path == "/evidence":
@@ -228,22 +267,46 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=12000)
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--tasks", default=str(TASK_FILE),
+    parser.add_argument("--task-file", dest="task_file", default=str(TASK_FILE),
                         help="task batch JSON to serve (default: bridge-tasks.json)")
+    parser.add_argument("--artifact", action="append", default=[], metavar="NAME=PATH",
+                        help="offer NAME for download at /download/NAME (repeatable)")
+    parser.add_argument("--public-base", default=os.environ.get("BRIDGE_PUBLIC_BASE", ""),
+                        help="external base URL, used only to print download links")
     parser.add_argument("--print", dest="show", action="store_true",
                         help="print the token and pending tasks, then serve")
     args = parser.parse_args()
 
-    task_file = Path(args.tasks).resolve()
+    task_file = Path(args.task_file).resolve()
     token = load_or_create_token()
     tasks = load_tasks(task_file)
+
+    artifacts: dict[str, str] = {}
+    for spec in args.artifact:
+        if "=" not in spec:
+            parser.error(f"--artifact expects NAME=PATH, got {spec!r}")
+        name, _, path = spec.partition("=")
+        if "/" in name or name in {"", ".", ".."}:
+            parser.error(f"artifact name must be a bare filename, got {name!r}")
+        artifacts[name] = str(Path(path).expanduser().resolve())
 
     print("Emergency-Simulator bridge")
     print(f"  repository : {REPO}")
     print(f"  listening  : http://{args.host}:{args.port}")
     print(f"  token file : {TOKEN_FILE}")
     print(f"  task file  : {task_file}")
-    print(f"  endpoints  : GET /health (open), GET /task, GET /evidence, POST /evidence (token)")
+    print(f"  endpoints  : GET /health (open), GET /task, GET /evidence, GET /artifacts, POST /evidence (token)")
+    if artifacts:
+        base = (args.public_base or f"http://{args.host}:{args.port}").rstrip("/")
+        print("  artifacts  :")
+        for name, file in artifacts.items():
+            p = Path(file)
+            exists = "ok" if p.is_file() else "MISSING"
+            size = f"{p.stat().st_size:,} bytes" if p.is_file() else "-"
+            print(f"    {name}  [{exists}] {size}")
+            print(f"      {base}/download/{name}")
+            if p.is_file():
+                print(f"      sha256 {hashlib.sha256(p.read_bytes()).hexdigest()}")
     if args.show:
         print()
         print(f"  TOKEN: {token}")
@@ -255,6 +318,8 @@ def main() -> int:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token  # type: ignore[attr-defined]
     server.task_file = task_file  # type: ignore[attr-defined]
+    server.artifacts = artifacts  # type: ignore[attr-defined]
+    server.public_base = (args.public_base or f"http://{args.host}:{args.port}").rstrip("/")  # type: ignore[attr-defined]
     try:
         server.serve_forever()
     except KeyboardInterrupt:

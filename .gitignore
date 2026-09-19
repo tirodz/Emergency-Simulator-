@@ -22,3 +22,4 @@ evidence/
 
 # The rendered one-paste, which carries the live token. Never committed.
 docs/connect-one-paste.local.md
+artifacts/
