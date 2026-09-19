@@ -180,13 +180,19 @@ $token = "<TOKEN>"
   Say "Tell the agent the batch is posted. Do not summarise the output; it was sent raw."
 
   # ---------------------------------------------------------------------------
-  # 5. Confirm the phone was left untouched
+  # 5. Did anything change
   # ---------------------------------------------------------------------------
 
   Say ""
-  Say "== 5. Confirm nothing changed on the phone =="
-  Say "  adb shell settings list global | Select-String -Pattern 'emergency|cellbroadcast'"
-  Say "  (compare against task 8 from this same batch: the values should be identical)"
+  Say "== 5. Did anything change? =="
+  if ($script:Device) {
+      Say "  This batch was authored read-only. Confirm the phone's settings are unchanged:"
+      Say "    adb shell settings list global | Select-String -Pattern 'emergency|cellbroadcast'"
+      Say "    (compare against the settings task from this same batch)"
+  } else {
+      Say "  No phone attached, so there is nothing phone-side to compare."
+      Say "  This batch was authored read-only: it reads state and writes nothing to any device."
+  }
 }
 
 ```

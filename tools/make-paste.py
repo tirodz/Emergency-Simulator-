@@ -66,10 +66,8 @@ def render(host: str, token: str, task_file: str | None = None) -> str:
 
     host = host.rstrip("/")
     block = (
-        f"{BEGIN_MARK}"
         f'$base  = "{host}"\n'
         f'$token = "{token}"\n'
-        f"{END_MARK}"
     )
     # Substitute the config block first. Any later insertion changes the offsets, so slicing with
     # positions computed before it would corrupt the document.
