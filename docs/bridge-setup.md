@@ -17,7 +17,7 @@ That leaves exactly one workable topology, and this directory records it:
         adb --->|---> Samsung Galaxy A35   (stock, read-only)
                 |
         HTTPS --|------------------------>  Analysis container (agent)
-                |                            https://work-1-...prod-runtime.all-hands.dev
+                |                            https://<HOST>  (per session)
 ```
 
 The laptop collects raw output and posts it to the container. The container analyses it and hands
@@ -30,8 +30,12 @@ back the next batch of commands. This is the whole transport.
 The bridge is already running. From your laptop:
 
 ```powershell
-Invoke-RestMethod https://work-1-pwbsbhsbekdvcouf.prod-runtime.all-hands.dev/health
+Invoke-RestMethod <HOST>/health
 ```
+
+`<HOST>` is the URL the agent gives you for the current session. It changes whenever the analysis
+environment is restarted, and the old one stops answering, so always take the current one from the
+agent rather than reusing a URL from an earlier session or from this document.
 
 Expected:
 
@@ -49,8 +53,8 @@ Every endpoint except `/health` needs a bearer token. The agent will give you th
 never committed to the repository.
 
 ```powershell
-$base  = "https://work-1-pwbsbhsbekdvcouf.prod-runtime.all-hands.dev"
-$token = "<PASTE TOKEN FROM THE AGENT>"
+$base  = "<HOST>"
+$token = "<TOKEN FROM THE AGENT>"
 ```
 
 ---

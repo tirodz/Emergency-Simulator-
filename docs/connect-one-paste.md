@@ -9,8 +9,13 @@ far is read-only, and it finishes by telling you how to confirm that.
 
 ```powershell
 # --- Emergency-Simulator: connect this laptop to the analysis environment ---
-$base  = "https://work-1-pwbsbhsbekdvcouf.prod-runtime.all-hands.dev"
-$token = "MWXAp6Jco9T5wvEzCOeLnNooSBjUWoiR7GA3S9lGrwY"
+# @@BEGIN-CONFIG@@
+# This committed file lives in a public repository, so it carries no live host or token: the host
+# changes every session and the token is a per-session secret. The real values are rendered from the
+# gitignored bridge-token.txt by tools/make-paste.py into docs/connect-one-paste.local.md.
+$base  = "<HOST>"
+$token = "<TOKEN>"
+# @@END-CONFIG@@
 
 # Wrapped so an early stop does not close your PowerShell window.
 & {
