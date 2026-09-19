@@ -95,16 +95,16 @@ def load_or_create_token() -> str:
     return token
 
 
-def load_tasks() -> dict:
+def load_tasks(path: Path) -> dict:
     """Return the task batch to serve, or an empty one if none has been authored yet."""
-    if not TASK_FILE.is_file():
+    if not path.is_file():
         return {
             "batch": "none",
-            "note": "No task batch has been authored yet.",
+            "note": f"No task batch at {path}.",
             "tasks": [],
         }
     try:
-        return json.loads(TASK_FILE.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return {"batch": "error", "note": f"task file unreadable: {exc}", "tasks": []}
 
@@ -168,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/task":
-            self._send_json(200, load_tasks())
+            self._send_json(200, load_tasks(self.server.task_file))  # type: ignore[attr-defined]
             return
 
         if path == "/evidence":
@@ -228,17 +228,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=int, default=12000)
     parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--tasks", default=str(TASK_FILE),
+                        help="task batch JSON to serve (default: bridge-tasks.json)")
     parser.add_argument("--print", dest="show", action="store_true",
                         help="print the token and pending tasks, then serve")
     args = parser.parse_args()
 
+    task_file = Path(args.tasks).resolve()
     token = load_or_create_token()
-    tasks = load_tasks()
+    tasks = load_tasks(task_file)
 
     print("Emergency-Simulator bridge")
     print(f"  repository : {REPO}")
     print(f"  listening  : http://{args.host}:{args.port}")
     print(f"  token file : {TOKEN_FILE}")
+    print(f"  task file  : {task_file}")
     print(f"  endpoints  : GET /health (open), GET /task, GET /evidence, POST /evidence (token)")
     if args.show:
         print()
@@ -250,6 +254,7 @@ def main() -> int:
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     server.token = token  # type: ignore[attr-defined]
+    server.task_file = task_file  # type: ignore[attr-defined]
     try:
         server.serve_forever()
     except KeyboardInterrupt:
