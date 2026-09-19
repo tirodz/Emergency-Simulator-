@@ -28,6 +28,7 @@ from .controller import (
 from .models import AlertState, Device, FailureCode, SupportLevel, TransactionState
 from .widgets import (
     ACCENT,
+    ACCENT_DIM,
     BG,
     BG_ALT,
     BORDER,
