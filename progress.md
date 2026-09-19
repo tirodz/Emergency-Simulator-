@@ -609,3 +609,18 @@ The desktop interface has been refreshed into a dark, layered control console in
 The Windows workflow now validates the application/PE version match, builds the self-contained executable, builds an x64 per-user Inno Setup installer, hashes both artifacts and publishes them on version tags. The installer does not request administrator rights.
 
 Version 1.1.0 is the coordinated desktop release version. Actual alert delivery remains restricted to the proven controlled-development path; stock retail devices are not claimed supported.
+
+
+## Mission 3E — 1.1.0 Windows release candidate (2026-09-19)
+
+**Release candidate status: CI GREEN for the full executable, GUI-only build, controller tests and desktop interface tests. Installer creation and upload were also confirmed on run 35464661558.**
+
+The polished desktop console is now the main UI: dark layered panels, orange accent, sidebar navigation, status pills, metrics, target/device cards, test-alert composer and activity log. Its visual language is inspired by the separate CMF Ringtone Tool reference; no CMF project files or code are shared.
+
+The release pipeline produces a self-contained x64 Emergency-Simulator.exe, a GUI-only review build, and a per-user Emergency-Simulator-Setup-1.1.0.exe. The installer requires no administrator rights.
+
+The verified full executable from the successful Windows build was 15,776,936 bytes with SHA-256 3BA5F164D4E74286BCBFBF690CDAAED56D3172345454AC448E2D2A9EEB872501. The verified installer was 17,512,914 bytes with SHA-256 BCA8A498CFC4A1603F32862CBD1DC939E746DEAC948BB79695BD8925E5DCD58E.
+
+The controller duplicate-send safety gate persists across restarts; an outstanding or uncertain alert cannot be forgotten by reopening the application.
+
+Actual alert injection remains limited to the proven controlled-development path on a rooted/userdebug Android target. Stock retail Android without root is not claimed supported. No cellular transmission or RF path exists in the application.

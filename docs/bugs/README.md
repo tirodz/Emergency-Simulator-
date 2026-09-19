@@ -56,3 +56,7 @@ So: no silent patches.
 | HIGH | Produces a wrong result, a false success, or blocks a supported device entirely |
 | MEDIUM | Degrades reliability or diagnostics; workaround exists |
 | LOW | Cosmetic or documentation |
+| [BUG-011](BUG-011-ui-accent-token-missing.md) | Polished UI referenced an undefined accent token | HIGH | FIXED |
+| [BUG-012](BUG-012-ui-devicestate-import-missing.md) | Polished device renderer referenced an undefined DeviceState | HIGH | FIXED |
+| [BUG-013](BUG-013-ui-tests-hardcoded-theme-colors.md) | UI regression tests kept stale hardcoded palette values after theme refresh | MEDIUM | FIXED |
+| [BUG-014](BUG-014-installer-artifact-path-mismatch.md) | Installer job looked for the executable at the wrong artifact path | HIGH | FIXED |
