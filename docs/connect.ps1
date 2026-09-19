@@ -61,10 +61,15 @@ function Find-Adb {
     if ($c) { $candidates += $c.Source }
 
     # Beside the built executable, wherever it happens to be.
-    $candidates += (Join-Path $PWD "platform-tools\adb.exe")
-    $candidates += (Join-Path $PWD "dist\platform-tools\adb.exe")
-    $candidates += (Join-Path $PSScriptRoot "..\packaging\platform-tools\adb.exe")
-    $candidates += (Join-Path $PSScriptRoot "..\dist\platform-tools\adb.exe")
+    # $PSScriptRoot is empty when this block is pasted into the console rather than run from a .ps1
+    # file, and Join-Path rejects an empty base. Guard every Join-Path so one bad candidate cannot
+    # abort the search.
+    $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+
+    $candidates += (Join-Path $here "platform-tools\adb.exe")
+    $candidates += (Join-Path $here "dist\platform-tools\adb.exe")
+    $candidates += (Join-Path (Join-Path $here "..") "packaging\platform-tools\adb.exe")
+    $candidates += (Join-Path (Join-Path $here "..") "dist\platform-tools\adb.exe")
 
     # An SDK install, if there is one.
     if ($env:LOCALAPPDATA) {
@@ -105,7 +110,9 @@ function adb { & $script:AdbPath @args }
 
 Say ""
 Say "== 3. Device =="
-$devices = (& $script:AdbPath devices) -split "`n" | Where-Object { $_ -match "\tdevice$" }
+# @() so a single device stays an array: Where-Object returns a scalar for one match, and
+# $devices[0] would then index a character instead of the element.
+$devices = @((& $script:AdbPath devices) -split "`n" | Where-Object { $_ -match "\tdevice$" })
 if (-not $devices) {
     Warn "  No authorized device."
     & $script:AdbPath devices -l
