@@ -25,7 +25,7 @@ from .controller import (
     SafetyError,
     validate_body,
 )
-from .models import AlertState, Device, FailureCode, SupportLevel, TransactionState
+from .models import AlertState, Device, DeviceState, FailureCode, SupportLevel, TransactionState
 from .widgets import (
     ACCENT,
     ACCENT_DIM,
