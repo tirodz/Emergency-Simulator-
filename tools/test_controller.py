@@ -10,9 +10,12 @@ the fixed channel, and the logcat evidence state machine.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO = Path(__file__).resolve().parent.parent
+
+sys.path.insert(0, str(REPO))
 
 from app.controller import (  # noqa: E402
     DEFAULT_BODY,
@@ -203,6 +206,48 @@ def test_runtime_layout_finds_the_injector() -> None:
         check("the jar is non-trivial in size", jar.stat().st_size > 500)
 
 
+def test_selftest_argument_parsing() -> None:
+    """`--selftest=<path>` must survive a path containing spaces, quoted or not.
+
+    Windows temp paths contain spaces often enough that this is not hypothetical, and the test
+    verification runs from `%TEMP%`. The quotes are stripped because the argument is parsed here
+    rather than by a shell.
+    """
+    print("selftest argument")
+    import subprocess
+
+    from app.main import _selftest
+
+    with tempfile.TemporaryDirectory() as tmp:
+        spaced = Path(tmp) / "dir with spaces"
+        spaced.mkdir()
+        plain = spaced / "plain.txt"
+        quoted = spaced / "quoted.txt"
+
+        rc = _selftest([f"--selftest={plain}"])
+        check("a path with spaces is accepted unquoted", plain.is_file())
+        check("the report is written there", "RESULT:" in plain.read_text())
+
+        rc2 = _selftest([f'--selftest="{quoted}"'])
+        check("a path with spaces is accepted when quoted", quoted.is_file())
+        check("the quotes are stripped", "RESULT:" in quoted.read_text())
+        check("a literal quoted name is not created", not (spaced / '"quoted.txt"').exists())
+
+        # A real run of the executable, so the argument parsing is exercised as it is in production.
+        # Whether adb is available is not asserted: this test is about argument handling, and CI runs
+        # it on a host with no adb staged yet.
+        real = spaced / "real.txt"
+        proc = subprocess.run(
+            [sys.executable, str(REPO / "app" / "main.py"), f"--selftest={real}"],
+            capture_output=True, text=True, cwd=str(REPO),
+        )
+        check("the process reports rather than crashing", "Traceback" not in proc.stderr)
+        check("the process wrote its report", real.is_file())
+        check("the report reached a verdict", "RESULT:" in real.read_text())
+        check("the process exits with a verdict, not an error",
+              proc.returncode in (0, 1))
+
+
 def test_capability_classification() -> None:
     """Support level must come from observed facts, not from the device's brand."""
     print("capability classification")
@@ -243,6 +288,7 @@ def main() -> int:
     test_send_gate()
     test_adb_probe_rejects_a_non_working_executable()
     test_runtime_layout_finds_the_injector()
+    test_selftest_argument_parsing()
     test_capability_classification()
     print()
     if FAILURES:

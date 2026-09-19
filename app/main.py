@@ -73,6 +73,10 @@ def _selftest(argv: list) -> int:
     for arg in argv:
         if arg.startswith("--selftest="):
             explicit = arg.split("=", 1)[1]
+            # The path may have been quoted by the caller (Windows temp paths can contain spaces), and
+            # it arrives here with the quotes still attached because we do our own argv parsing.
+            if len(explicit) >= 2 and explicit[0] == explicit[-1] and explicit[0] in ("'", '"'):
+                explicit = explicit[1:-1]
     if explicit:
         destination = explicit
     elif sys.stdout is None:

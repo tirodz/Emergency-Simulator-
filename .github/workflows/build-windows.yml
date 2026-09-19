@@ -51,10 +51,6 @@ jobs:
       - name: Install PyInstaller
         run: python -m pip install --upgrade pip pyinstaller
 
-      - name: Run the controller safety tests
-        # These need no device and no display; they assert the invariants that must not regress.
-        run: python tools/test_controller.py
-
       - name: Verify the committed injector is present
         shell: pwsh
         run: |
@@ -84,6 +80,11 @@ jobs:
           }
           & "$stage\adb.exe" version
 
+      - name: Run the controller safety tests
+        # These need no device. They must not require adb either: they assert invariants, and a host
+        # without Platform Tools is a legitimate place to run them.
+        run: python tools/test_controller.py
+
       - name: Build the executable
         run: pyinstaller --clean --noconfirm packaging/Emergency-Simulator.spec
 
@@ -110,7 +111,8 @@ jobs:
             # A windowed executable is a GUI-subsystem binary: invoking it directly returns
             # immediately without waiting, so the report would be read before it is written.
             # Start-Process -Wait is the way to wait for it.
-            $proc = Start-Process -FilePath $exe -ArgumentList "--selftest=$report" -Wait -PassThru
+            # The argument is quoted because a temp path can contain spaces.
+            $proc = Start-Process -FilePath $exe -ArgumentList "--selftest=`"$report`"" -Wait -PassThru
             $code = $proc.ExitCode
             if (-not (Test-Path $report)) {
               throw "The self-test wrote no report to $report (exit $code)."
