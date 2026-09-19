@@ -17,3 +17,5 @@ __pycache__/
 # Android SDK. android/alertinject/.gitignore un-ignores that one file for exactly this reason.
 !/android/alertinject/out/
 !/android/alertinject/out/alertinject.jar
+bridge-token.txt
+evidence/
