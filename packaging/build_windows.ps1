@@ -140,10 +140,16 @@ Write-Host "Verifying the frozen build resolves its bundled resources"
 Push-Location (Join-Path $RepoRoot "dist")
 try {
     # The executable is a GUI application with no console, so the self-test writes a file. Ask for one
-    # explicitly rather than relying on stdout, which is not attached in a windowed build.
+    # explicitly rather than relying on stdout, which is not attached in a windowed build. Start-Process
+    # -Wait is also required: a GUI-subsystem binary returns immediately when invoked directly, and the
+    # report would be read before the process had written it.
     $Report = Join-Path $env:TEMP "emergency-simulator-selftest.txt"
-    & $Exe "--selftest=$Report"
-    $SelfTestCode = $LASTEXITCODE
+    Remove-Item $Report -ErrorAction SilentlyContinue
+    $Proc = Start-Process -FilePath $Exe -ArgumentList "--selftest=$Report" -Wait -PassThru
+    $SelfTestCode = $Proc.ExitCode
+    if (-not (Test-Path $Report)) {
+        throw "The self-test wrote no report to $Report (exit $SelfTestCode)."
+    }
     $SelfTestText = Get-Content $Report -Raw
     Write-Host $SelfTestText
     if ($SelfTestCode -ne 0) { throw "The frozen build failed its self-test (exit $SelfTestCode)." }

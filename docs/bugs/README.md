@@ -46,6 +46,7 @@ So: no silent patches.
 | [BUG-007](BUG-007-timeout-treated-as-failure.md) | A timeout was reported as a failure, implying nothing was delivered | HIGH | FIXED |
 | [BUG-008](BUG-008-default-log-dir-namerror.md) | `default_log_dir()` referenced a removed constant | MEDIUM | FIXED |
 | [BUG-009](BUG-009-safety-strip-overwritten.md) | A result banner could overwrite the permanent safety statement | HIGH | FIXED |
+| [BUG-010](BUG-010-selftest-race.md) | The self-test verification read its report before the executable wrote it | MEDIUM | FIXED |
 
 ## Severity scale
 

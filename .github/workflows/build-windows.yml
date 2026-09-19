@@ -103,11 +103,18 @@ jobs:
         shell: pwsh
         run: |
           $report = "$env:TEMP\selftest-report.txt"
+          Remove-Item $report -ErrorAction SilentlyContinue
           $exe = (Resolve-Path "dist/Emergency-Simulator.exe").Path
           Push-Location "$env:TEMP"
           try {
-            & $exe "--selftest=$report"
-            $code = $LASTEXITCODE
+            # A windowed executable is a GUI-subsystem binary: invoking it directly returns
+            # immediately without waiting, so the report would be read before it is written.
+            # Start-Process -Wait is the way to wait for it.
+            $proc = Start-Process -FilePath $exe -ArgumentList "--selftest=$report" -Wait -PassThru
+            $code = $proc.ExitCode
+            if (-not (Test-Path $report)) {
+              throw "The self-test wrote no report to $report (exit $code)."
+            }
             $text = Get-Content $report -Raw
             Write-Host $text
             if ($code -ne 0) { throw "The frozen build failed its self-test (exit $code)." }
