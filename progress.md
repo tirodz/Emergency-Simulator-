@@ -624,3 +624,45 @@ The verified full executable from the successful Windows build was 15,776,936 by
 The controller duplicate-send safety gate persists across restarts; an outstanding or uncertain alert cannot be forgotten by reopening the application.
 
 Actual alert injection remains limited to the proven controlled-development path on a rooted/userdebug Android target. Stock retail Android without root is not claimed supported. No cellular transmission or RF path exists in the application.
+
+
+## Mission 4 — Tauri + Liquid Glass desktop rebuild (2026-09-19)
+
+**Status: REBUILD IN PROGRESS on branch rebuild/tauri-liquid-glass.**
+
+The 1.1.0 Tkinter/Python desktop shell is being retired from the product path after visual and runtime defects were observed on a real Windows screenshot. The replacement desktop application uses Tauri 2 + Rust + HTML/CSS/JavaScript and is designed around the glassy visual language of the separate CMF Ringtone Tool frontend.
+
+### Confirmed design requirements
+
+* Translucent/frosted layered surfaces with backdrop blur.
+* Dark ambient gradient background with soft green illumination.
+* Emerald green glowing status dots and primary action.
+* Crisp vector SVG icons; no raster UI icons.
+* Custom undecorated Windows title bar with native Rust window controls.
+* Midnight, OLED and Light themes.
+* Emerald, Cyan and Orange accent choices.
+* Capability-aware device states with explicit USB authorization help.
+* Inline failure/toast handling so a controller error does not close the application.
+* The safe ETWS TEST channel remains fixed at 4355 and message bodies must begin with TEST.
+
+### Architecture
+
+* Product UI: Tauri 2 WebView2 frontend in src/index.html.
+* Desktop/controller backend: Rust in src-tauri/src/lib.rs.
+* Windows packaging: Tauri NSIS.
+* ADB and the controlled development-only injector JAR are bundled as resources.
+* The Java injector remains only because SmsCbMessage is a hidden Android framework type; it is not the desktop application language.
+* Python desktop modules are no longer part of the Windows runtime.
+
+### Safety boundary
+
+CONTROLLED DEVELOPMENT MODE remains the only demonstrated end-to-end alert path: rooted/userdebug Android target. STOCK DEVICE MODE remains unproven and is never shown as READY.
+
+Success is still determined by downstream Android CellBroadcast evidence. ADB process exit status alone is not success.
+
+### Verification plan
+
+1. GitHub Actions builds the real Tauri application and NSIS installer on windows-latest.
+2. The workflow validates frontend glass/interaction markers and bundles only the intended runtime resources.
+3. A successful Windows build is installed and inspected by the operator before a release is published.
+4. After the rebuild passes CI and device testing, main can receive a [release] commit for v2.0.0.

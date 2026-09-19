@@ -1,0 +1,35 @@
+{
+  "$schema":"https://schema.tauri.app/config/2",
+  "productName":"Emergency Simulator",
+  "version":"2.0.0",
+  "identifier":"com.tirod.emergency-simulator",
+  "build":{"frontendDist":"../src"},
+  "app":{
+    "withGlobalTauri":true,
+    "windows":[{
+      "label":"main",
+      "title":"Emergency Simulator — Android Alert Lab",
+      "width":1440,
+      "height":900,
+      "minWidth":1080,
+      "minHeight":700,
+      "resizable":true,
+      "decorations":false,
+      "transparent":true,
+      "center":true
+    }],
+    "security":{"csp":"default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"}
+  },
+  "bundle":{
+    "active":true,
+    "targets":["nsis"],
+    "icon":["icons/icon.png"],
+    "resources":[
+      "../android/alertinject/out/alertinject.jar",
+      "../packaging/platform-tools/adb.exe",
+      "../packaging/platform-tools/AdbWinApi.dll",
+      "../packaging/platform-tools/AdbWinUsbApi.dll"
+    ],
+    "windows":{"nsis":{"installMode":"perUser","displayLanguageSelector":false}}
+  }
+}
