@@ -248,7 +248,17 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: Emergency-Simulator-windows
-          path: dist
+          path: installer-artifacts
+
+      - name: Prepare installer input
+        shell: pwsh
+        run: |
+          $source = "installer-artifacts\dist\Emergency-Simulator.exe"
+          if (-not (Test-Path $source)) {
+            throw "Downloaded Windows artifact did not contain $source"
+          }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item $source "dist\Emergency-Simulator.exe" -Force
 
       - name: Install Inno Setup
         shell: pwsh
@@ -271,6 +281,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path installer-output -Force | Out-Null
+          if (-not (Test-Path "dist\Emergency-Simulator.exe")) { throw "Installer input EXE is missing." }
           & $env:ISCC_PATH "packaging\Emergency-Simulator.iss"
 
       - name: Verify and hash the installer

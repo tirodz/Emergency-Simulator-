@@ -25,10 +25,9 @@ from .controller import (
     SafetyError,
     validate_body,
 )
-from .models import AlertState, Device, DeviceState, FailureCode, SupportLevel, TransactionState
+from .models import AlertState, Device, FailureCode, SupportLevel, TransactionState
 from .widgets import (
     ACCENT,
-    ACCENT_DIM,
     BG,
     BG_ALT,
     BORDER,
@@ -771,10 +770,10 @@ class EmergencySimulatorUI:
         self._cancel.set()
         self.append_log("STOP requested: cancelling the pending operation.", "warn")
         self.append_log(
-            "If an alert has already been delivered, Android does not permit remote dismissal; "
-            "dismiss it using the alert's own on-device control.",
+            "If an alert has already been delivered, Android does not permit remote dismissal.",
             "warn",
         )
+        self._cancel.clear()
 
     # -- results ------------------------------------------------------------
 
@@ -782,8 +781,7 @@ class EmergencySimulatorUI:
         self._last_result = result
         value = result.state.value
         colour = state_colour(value)
-        pill_value = (result.failure.value if result.failure else value).replace("_", " ")
-        self.result_pill.set(pill_value, colour, "ready" if result.ok else "warn")
+        self.result_pill.set(value.replace("_", " "), colour, "ready" if result.ok else "warn")
         self.outcome_banner.pack(fill="x", pady=(12, 0), after=self.safety_banner)
         if result.ok:
             self.outcome_banner.set(
