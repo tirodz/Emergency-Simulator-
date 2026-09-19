@@ -24,7 +24,7 @@ jobs:
           test -f src-tauri/Cargo.toml
           test -f src-tauri/src/lib.rs
           test -f src-tauri/tauri.conf.json
-          test -f src-tauri/icons/icon.png
+          test -f tools/make_icon.py
           grep -q "Tauri + Rust" src/index.html
           grep -q "SEND TEST ALERT" src/index.html
           grep -q "backdrop-filter" src/index.html
@@ -51,6 +51,17 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
+      - name: Install icon build dependency
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pillow
+      - name: Generate crisp application icons
+        shell: pwsh
+        run: python tools/make_icon.py
+      - name: Validate generated icons
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "src-tauri/icons/icon.ico")) { throw "icon.ico was not generated." }
+          if (-not (Test-Path "src-tauri/icons/icon.png")) { throw "icon.png was not generated." }
       - name: Stage Android Platform Tools
         shell: pwsh
         run: |
@@ -68,8 +79,10 @@ jobs:
         run: |
           if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing android injector JAR." }
       - name: Install frontend
+        shell: pwsh
         run: npm install
       - name: Build Tauri bundle
+        shell: pwsh
         run: npx tauri build --ci
       - name: Validate and normalize outputs
         shell: pwsh
