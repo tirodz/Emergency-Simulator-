@@ -771,10 +771,10 @@ class EmergencySimulatorUI:
         self._cancel.set()
         self.append_log("STOP requested: cancelling the pending operation.", "warn")
         self.append_log(
-            "If an alert has already been delivered, Android does not permit remote dismissal.",
+            "If an alert has already been delivered, Android does not permit remote dismissal; "
+            "dismiss it using the alert's own on-device control.",
             "warn",
         )
-        self._cancel.clear()
 
     # -- results ------------------------------------------------------------
 
@@ -782,7 +782,8 @@ class EmergencySimulatorUI:
         self._last_result = result
         value = result.state.value
         colour = state_colour(value)
-        self.result_pill.set(value.replace("_", " "), colour, "ready" if result.ok else "warn")
+        pill_value = (result.failure.value if result.failure else value).replace("_", " ")
+        self.result_pill.set(pill_value, colour, "ready" if result.ok else "warn")
         self.outcome_banner.pack(fill="x", pady=(12, 0), after=self.safety_banner)
         if result.ok:
             self.outcome_banner.set(
