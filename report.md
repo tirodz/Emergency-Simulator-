@@ -823,6 +823,42 @@ RESULT: OK
 That process then discovered the live emulator and logged to the per-user path, with no Python, no
 SDK and no JDK on the machine.
 
+And confirmed on the real target platform, by CI run `35449434829` on `windows-latest`, against the
+artifact that is uploaded:
+
+```
+  frozen      : True
+  bundle root : C:\Users\RUNNER~1\AppData\Local\Temp\_MEI000023142
+  injector    : FOUND  C:\...\_MEI000023142\android\alertinject\out\alertinject.jar  (3385 bytes)
+  bundled adb : C:\...\_MEI000023142\platform-tools\adb.exe
+  adb         : BUNDLED
+  adb version : Android Debug Bridge version 1.0.41
+RESULT: OK
+```
+
+`adb: BUNDLED` on Windows also proves the companion DLLs were staged correctly, since `adb.exe` fails
+at load time without `AdbWinApi.dll` and `AdbWinUsbApi.dll`.
+
+## CI found real defects, twice
+
+The first two runs of the revised workflow failed, and both failures were genuine — neither would
+have been caught by the local Linux test run:
+
+1. **The adb probe test asserted a POSIX-only error string.** It expected the failure text to contain
+   exit status `127`, which a Windows exit code cannot produce. The property under test is that a
+   present-but-unusable executable is rejected and the reason reported; the reason is
+   platform-specific, so only the POSIX branch may assert it.
+2. **The self-test verification read its report before the executable wrote it** (BUG-010). A
+   windowed PyInstaller build is a GUI-subsystem binary, so PowerShell does not wait for it: the check
+   read the file in the same breath as starting the process, then failed with "cannot find path"
+   *before* the "report written" line appeared. `Start-Process -Wait -PassThru` is required.
+
+The second is worth dwelling on. The verification was written specifically to catch BUG-004 — a build
+that cannot find its own resources — and was itself broken from the moment it was written. On Linux
+the binary is a console executable that does block, so it passed locally and failed only on Windows,
+the one platform it existed for. It is recorded as BUG-010 with that observation, because a check that
+cannot fail for the right reason is not a check.
+
 ## The interface is an instrument
 
 The desktop window was rebuilt so it cannot be mistaken for, or overwritten by, the thing it tests.
@@ -875,11 +911,14 @@ Unchanged from Mission 2, and stated here so it is not mistaken for finished wor
 * Vibration in particular may not be demonstrable on the emulator at all.
 * Android 14 and 16 remain inferred from stable APIs; 15 is verified.
 * Rooted retail devices via `su` remain untested against real hardware.
-* The revised CI workflow has not yet run: it needs a push.
+* **The Windows artifact has not been driven against a device on Windows.** CI has no device, so the
+  build is verified to resolve its resources and to start, but the Windows adb transport has not been
+  exercised end to end. The driving code is identical Python and was exercised on Linux.
 
 ## Verdict
 
 The release is now something that can be handed over: one executable, no dependencies, and a build
-that proves the artifact works before it is published. What remains is not controller engineering but
+that proves the artifact works before it is published — on the platform it targets, with CI catching
+two genuine defects that the local Linux run could not. What remains is not controller engineering but
 the open Android questions above, and the deferred transports — Wi-Fi and multi-device — which the
 controller is already structured to accept.

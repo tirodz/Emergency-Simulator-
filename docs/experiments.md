@@ -1239,3 +1239,68 @@ rejection of hazard wording through the message field, log rendering, and the st
 
 The GUI calls the same `EmergencySimulatorController` methods as the CLI, so the two front ends cannot
 diverge on safety behaviour.
+
+---
+
+# Mission 2B — release hardening experiments
+
+These tested the release as a distributable artefact rather than the controller as a mechanism. The
+full record is in [experiments/EXP-16.md](experiments/EXP-16.md).
+
+## EXP-REL-001: the release resolves its own resources
+
+**Objective.** Establish that a released executable drives a device with no Python, no Android SDK,
+no JDK and no configuration on the host — the failure mode BUG-004 recorded.
+
+**Setup.** A PyInstaller onefile build launched from an empty directory that is not the repository,
+with `ADB_PATH` explicitly removed from the environment.
+
+**Result.** CONFIRMED.
+
+```
+  frozen      : True
+  bundle root : /tmp/_MEI00004316fqxBqu
+  injector    : FOUND  .../android/alertinject/out/alertinject.jar  (3385 bytes)
+  adb         : BUNDLED  .../platform-tools/adb
+  adb version : Android Debug Bridge version 1.0.41
+RESULT: OK
+```
+
+Launched normally, the same executable discovered `emulator-5554` and logged to the per-user path.
+
+## EXP-REL-002: the same, on real Windows
+
+**Objective.** Confirm the self-contained build on the actual target platform, using the artifact that
+is actually uploaded.
+
+**Setup.** GitHub Actions `windows-latest`, run `35449434829`. The workflow stages Platform Tools from
+Google's official repository, builds, then runs the artifact with `--selftest` from outside the
+repository.
+
+**Result.** CONFIRMED. `injector: FOUND`, `adb: BUNDLED`, `adb version: Android Debug Bridge version
+1.0.41`, `RESULT: OK`; job conclusion **success**; artifact `Emergency-Simulator-windows` uploaded.
+
+`adb: BUNDLED` also proves the companion DLLs were staged: without `AdbWinApi.dll` and
+`AdbWinUsbApi.dll`, `adb.exe` fails at load time and this line would read `MISSING`.
+
+## EXP-REL-003: the send gate holds against a live device
+
+**Objective.** Verify that a second alert cannot be stacked on a device already showing one, and that
+a result cannot overwrite the permanent safety statement.
+
+**Setup.** The real interface under Xvfb driving the real controller against `emulator-5554`.
+
+**Result.** CONFIRMED.
+
+```
+RESULT PILL : ALERT DISPLAYED          GATE        : DELIVERED
+SEND ENABLED: False                    ACK ENABLED : True
+SAFETY      : TEST ONLY   CONTROLLED DEVICE   NO CELLULAR TRANSMISSION
+  CellBroadcastReceiver.onReceive -- message accepted by the receiver
+  CellBroadcastAlertService.onStartCommand -- alert service started
+  CellBroadcastAlertAudio -- genuine alert audio engaged
+  CellBroadcastAlertDialog -- genuine full-screen alert displayed
+```
+
+The chain is still the production one, the gate moves to `DELIVERED` and disables SEND, and the
+safety statement reads exactly as it does at rest while the outcome appears on its own strip.

@@ -5,7 +5,7 @@
 
 ## Current status
 
-**Mission 2B — release hardening — COMPLETE. The Windows release is self-contained and verified.**
+**Mission 2B — release hardening — COMPLETE. CI is green and the artifact is verified on Windows.**
 
 The controller from Mission 2 now ships as a single Windows executable that carries its own Android
 Platform Tools and its own injector, and a build can no longer be produced that is unable to find
@@ -13,58 +13,83 @@ those resources: the release verifies itself before the artifact is uploaded. Th
 has been rebuilt as an instrument with explicit visual language, a device/support verdict board, a
 live send gate and a permanent safety statement that no result can overwrite.
 
-Verified end to end against `emulator-5554` (Android 15 / API 35, userdebug): a real send through the
-interface reached `CellBroadcastReceiver`, `CellBroadcastAlertService`, `CellBroadcastAlertAudio` and
-`CellBroadcastAlertDialog`, the gate moved to `DELIVERED`, SEND disabled itself, and the permanent
-safety strip was untouched. A onefile build was then launched from an empty directory with no
-`ADB_PATH` set; it resolved its bundled injector and adb (`adb: BUNDLED`), discovered the emulator
-and logged to the per-user path.
+CI run [`35449434829`](https://github.com/tirodz/Emergency-Simulator-/actions/runs/35449434829) is
+green on `windows-latest`, and the uploaded artifact reports:
+
+```
+  frozen      : True
+  injector    : FOUND  ...\android\alertinject\out\alertinject.jar  (3385 bytes)
+  bundled adb : ...\platform-tools\adb.exe
+  adb         : BUNDLED
+  adb version : Android Debug Bridge version 1.0.41
+RESULT: OK
+```
+
+`adb: BUNDLED` also proves the companion DLLs were staged, since `adb.exe` fails at load time without
+them. Verified locally too: a onefile build launched from an empty directory with no `ADB_PATH`
+resolved its bundled injector and adb, discovered the live emulator and logged to the per-user path.
+And the real interface, driven against `emulator-5554`, produced a genuine alert
+(`CellBroadcastReceiver` → `CBAlertService` → `CellBroadcastAlertAudio` → `CellBroadcastAlertDialog`),
+moved the gate to `DELIVERED`, disabled SEND and left the safety strip untouched.
+
+Everything is pushed on the branch `release/self-contained-windows-build`, in PR
+[#1](https://github.com/tirodz/Emergency-Simulator-/pull/1) (draft, awaiting review).
 
 ## Current milestone
 
-Mission 2B is delivered. The next milestones, in order:
+Mission 2B is delivered and verified. The next milestones, in order:
 
-1. **`EXP-ALERT-002`** — lock-screen presentation, vibration and DND override. Still the oldest open
+1. **Merge PR #1.** It is a draft; the branch is ready and CI is green.
+2. **`EXP-ALERT-002`** — lock-screen presentation, vibration and DND override. Still the oldest open
    item, and still blocked on the same two things as before (see Blockers).
-2. **Wi-Fi transport** — the controller is transport-agnostic; add a network path alongside adb,
+3. **Wi-Fi transport** — the controller is transport-agnostic; add a network path alongside adb,
    with pairing and authentication, keeping the same evidence-based result detection.
-3. **Multi-device fan-out** — iterate the existing per-device send; do not build a parallel pipeline.
+4. **Multi-device fan-out** — iterate the existing per-device send; do not build a parallel pipeline.
 
 ## What has been established (Mission 2B)
 
-* **The release is self-contained.** The spec bundles the injector and stages Platform Tools; a
-  missing injector fails the build rather than producing an artifact that cannot drive a device.
+* **The release is self-contained, on the real platform.** Confirmed by CI on `windows-latest` against
+  the uploaded artifact, and locally against a onefile build run from outside the repository.
 * **The build verifies itself.** `app/main.py --selftest` reports the search roots, the injector, the
   bundled adb and its version. It writes a file when there is no console, which is the case for a
   windowed Windows build, and CI reads that file instead of trusting an exit code.
 * **The committed injector is a deliberate trade.** One 3 KB jar is committed so a fresh checkout can
   produce a working release without a JDK or the Android SDK.
+* **The send gate holds against a live device.** After a real alert the device is `DELIVERED`, SEND is
+  disabled, Acknowledge is offered, and a second send is refused before the device is touched.
 * **The safety statement is permanent.** Outcomes announce themselves on a separate strip, asserted
   by test, so the one line that must always be true cannot be replaced by a transient one.
-* **SEND requires both a usable device and a clear send gate.** Either alone is not enough, and a
-  non-root device disables it with the reason shown.
-* **Status is never carried by colour alone.** Every state is a word first, and no glyph is
-  load-bearing, so the interface is correct without an emoji font and readable in monochrome.
+* **CI catches platform-specific defects.** The first two CI runs each failed on a genuine
+  bug (BUG-010 and the adb probe assertions) that passed locally on Linux. The Windows job is doing
+  its job.
 
 ## Findings (Mission 2B)
 
 ### Confirmed facts
 
-* A PyInstaller **windowed** build has `sys.stdout is None` on Windows. Anything that prints during
-  startup must handle that or the output is lost. `app/main.py:_selftest`.
+* A PyInstaller **windowed** build has `sys.stdout is None` on Windows, and it is a **GUI-subsystem
+  binary**: invoking it directly from PowerShell returns immediately without waiting, so neither a
+  file it writes nor its exit code is available yet. `Start-Process -Wait -PassThru` is required.
+  This is BUG-010, found by CI.
 * `adb.exe` fails at **load time** if `AdbWinApi.dll` / `AdbWinUsbApi.dll` are absent, which is
   indistinguishable from "no adb" to a file check. Discovery executes `adb version`; the build script
   asserts the DLLs are staged beside the binary.
 * The injector jar was gitignored, so a fresh clone could not build a working release. Now committed;
   only `classes/` and `dex` remain ignored. `android/alertinject/out/.gitignore`.
 * A frozen build resolves resources through `sys._MEIPASS` and then the executable's directory.
-  Verified: `bundle root: /tmp/_MEI...`, with both the injector and adb found there.
+  Verified on both Linux and Windows.
+* **A test that asserts a platform-specific error string is not portable.** The adb probe test
+  asserted a POSIX exit status of 127, which Windows cannot produce. The property under test is that a
+  present-but-unusable executable is rejected; the reason is platform-specific, so only the POSIX
+  branch may check it.
+* `python3-tk` installs against the **distribution** Python, so a `setup-python` build may have no
+  tkinter. The interface CI job uses `/usr/bin/python3`.
 
 ### Hypotheses (not yet verified)
 
-* The same self-contained build works on Windows. The spec, the PowerShell staging and the CI
-  verification are all written for Windows, but this host is Linux, so the Windows artifact has only
-  ever been produced by CI — and CI has not yet run this revised workflow.
+* The Windows artifact has not been driven against a device on Windows: CI has no device. The
+  device-driving path is identical Python and was exercised on Linux, but the Windows adb transport
+  is untested end to end.
 * Android 14 and 16 accept the same injection path. 15 is verified; 14/16 are inferred.
 * The `TERM`/font fallbacks render as intended on a real Windows desktop with Segoe UI.
 
@@ -76,12 +101,10 @@ Mission 2B is delivered. The next milestones, in order:
   presentation, vibration and DND override remain unverified.
 * **Vibration specifically** was logged as `no pulsation pattern` on the emulator, so the emulator
   may not be able to demonstrate it at all.
-* **The revised CI workflow has not run.** It needs a push, which has not been done.
 
 ## Next exact actions
 
-1. **Run the revised CI workflow.** Push `main` and confirm the `ui` job (Xvfb interface tests) and
-   the `build` job (injector check, Platform Tools staging, self-test verification) both pass.
+1. **Merge PR #1** once reviewed. It is a draft; CI is green.
 2. **`EXP-ALERT-002`** — lock the device (`adb shell input keyevent KEYCODE_SLEEP`), send an alert,
    and capture whether the dialog appears over the lock screen. Attempt vibration and DND override.
    Record in `docs/experiments.md`. If the emulator cannot show vibration, say so and mark it UNKNOWN
@@ -91,6 +114,7 @@ Mission 2B is delivered. The next milestones, in order:
 ## Last known working state
 
 * **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `11acbbd`.
+* **Active branch:** `release/self-contained-windows-build`, pushed, PR #1 (draft), CI green.
 * **Target:** AVD `test35`, `emulator-5554`, Android 15 / API 35, `userdebug`, `ro.debuggable=1`.
 * **Run the CLI:** `ADB_PATH=/opt/android-sdk/platform-tools/adb python3 tools/test_alert.py --list`
 * **Run the GUI:** `DISPLAY=:99 python3 app/main.py` (headless host) or `dist\Emergency-Simulator.exe`
@@ -100,7 +124,7 @@ Mission 2B is delivered. The next milestones, in order:
   `DISPLAY=:99 python3 tools/test_ui.py` (all pass).
 * **Build the exe locally:** `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`
   (stages Platform Tools, runs the tests, builds, then verifies the artifact).
-* **CI artifact:** `Emergency-Simulator-windows`.
+* **CI artifact:** `Emergency-Simulator-windows`, from a green run.
 * Boot the emulator first: `emulator -avd test35 -no-window -no-audio -accel off` (~9 min).
 
 ## Git commits
@@ -109,10 +133,15 @@ Mission 2B (most recent first):
 
 | Commit | Subject |
 | --- | --- |
+| `9269862` | docs: record BUG-009, the safety statement being overwritten by a result |
+| `699f50e` | docs: record Mission 2B — the self-contained, self-verifying release |
 | `11acbbd` | feat: make the Windows release genuinely self-contained and verifiable |
 | `1fed923` | feat: rebuild the desktop interface as a laboratory instrument |
 | `ea7b5a4` | docs: add a bug journal and tests for the hard-won invariants |
 | `7c4e857` | feat: make the runtime self-contained and locate resources reliably |
+
+Plus, on the release branch and not yet on `main`: the adb-probe portability fix and the
+`Start-Process -Wait` fix, with BUG-010 recorded.
 
 Mission 2:
 
