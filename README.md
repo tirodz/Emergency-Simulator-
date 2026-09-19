@@ -20,7 +20,7 @@ builds, with what privileges, on which OEMs, and what would require real cellula
 
 ## Status
 
-**Phase: Mission 2B complete — the release is self-contained, self-verifying and hardened.**
+**Phase: Windows release candidate — polished UI, self-contained EXE, and per-user installer are implemented.**
 
 | | |
 | --- | --- |
@@ -65,6 +65,12 @@ The message must begin with `TEST`. The alert channel is fixed to the ETWS test 
 
 Full instructions, including how to build the injector and the executable, are in
 [`docs/windows-controller.md`](docs/windows-controller.md).
+
+## Windows release
+
+Version **1.1.0** is the coordinated desktop build. GitHub Actions builds three deliverables: the self-contained `Emergency-Simulator.exe`, a GUI-only review build, and `Emergency-Simulator-Setup-1.1.0.exe`, a per-user Windows installer. The release workflow publishes those files to GitHub Releases when a `v*` tag is pushed.
+
+The installed application still requires a controlled development target for actual injection. A stock retail Android phone is not presented as supported by this release.
 
 ## What this project is NOT
 
