@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .adb import Adb, AdbError, platform_setup_hint
+from .runtime import INJECTOR_JAR_NAME, runtime_layout
 from .models import (
     AlertState,
     Device,
@@ -35,6 +36,7 @@ from .models import (
     FailureCode,
     SendResult,
     TestModeStatus,
+    TransactionState,
 )
 
 log = logging.getLogger("emergency_simulator")
@@ -55,18 +57,21 @@ TESTING_MODE_ACTION = "android.telephony.action.SECRET_CODE"
 REQUIRED_PREFIX = "TEST"
 DEFAULT_BODY = "TEST ALERT - SIMULATION"
 
-if getattr(sys, "frozen", False):
-    # Packaged executable: the repository is not present, so everything mutable lives in a
-    # per-user directory and the injector jar is expected alongside the executable.
-    BUNDLE_DIR = Path(sys.executable).resolve().parent
-    REPO_ROOT = BUNDLE_DIR
-    INJECTOR_DIR = BUNDLE_DIR / "android" / "alertinject"
-else:
-    BUNDLE_DIR = Path(__file__).resolve().parent.parent
-    REPO_ROOT = BUNDLE_DIR
-    INJECTOR_DIR = REPO_ROOT / "android" / "alertinject"
+#: The injector jar is located through the runtime layout, which knows about both a repository
+#: checkout and a packaged build (where resources live in PyInstaller's unpack directory). The
+#: release ships the jar prebuilt, so a user never needs the Android SDK or a JDK.
+_INJECTOR_CACHE: dict = {}
 
-INJECTOR_JAR = INJECTOR_DIR / "out" / "alertinject.jar"
+
+def injector_jar_path() -> Optional[Path]:
+    """Path to the prebuilt injector jar, or None when it is genuinely absent."""
+    layout = runtime_layout()
+    found = layout.injector_jar
+    _INJECTOR_CACHE["jar"] = found
+    _INJECTOR_CACHE["layout"] = layout
+    return found
+
+
 INJECTOR_REMOTE = "/data/local/tmp/alertinject.jar"
 INJECTOR_CLASS = "org.emergencysim.alertinject.AlertInjector"
 
@@ -133,10 +138,51 @@ class EmergencySimulatorController:
         self._adb: Optional[Adb] = None
         self._adb_path = adb_path
         self.adb_error: Optional[str] = None
+        # Per-device send gate, keyed by serial. See :class:`~app.models.TransactionState`.
+        self._transactions: dict = {}
         try:
             self._adb = Adb(adb_path, cancel_check=cancel_check)
         except AdbError as exc:
             self.adb_error = str(exc)
+
+    # -- transaction gate --------------------------------------------------
+
+    def transaction_state(self, serial: str) -> TransactionState:
+        return self._transactions.get(serial, TransactionState.READY)
+
+    def acknowledge(self, serial: str) -> None:
+        """Clear the gate after the operator has dealt with the device.
+
+        Deliberately explicit. The controller will not decide on the operator's behalf that a
+        displayed alert has been dismissed, because it has no way to know.
+        """
+        self._transactions[serial] = TransactionState.READY
+
+    def _gate(self, serial: str) -> Optional[str]:
+        """Return a refusal reason if this device may not be sent to yet."""
+        state = self.transaction_state(serial)
+        if state is TransactionState.READY:
+            return None
+        return self.gate_explanation(serial)
+
+    def gate_explanation(self, serial: str) -> str:
+        """Why this device is currently gated, in operator-facing terms."""
+        state = self.transaction_state(serial)
+        if state is TransactionState.BUSY:
+            return "a test alert is already being sent to this device"
+        if state is TransactionState.DELIVERED:
+            return (
+                "the previous test alert is still outstanding on this device. Android queues "
+                "alerts, so sending again would stack a second dialog. Dismiss the alert on the "
+                "device, then acknowledge it here."
+            )
+        if state is TransactionState.UNCERTAIN:
+            return (
+                "the previous attempt to this device had an uncertain outcome. Check the device "
+                "screen before sending again: a timeout is not proof that the alert was not "
+                "delivered."
+            )
+        return ""
 
     # -- logging -----------------------------------------------------------
 
@@ -190,6 +236,15 @@ class EmergencySimulatorController:
             ("debuggable", "ro.debuggable"),
         ):
             setattr(dev, field_name, self.adb.getprop(dev.serial, prop))
+
+        dev.adb_connected = True
+        # Read for diagnostics only. Nothing in the send path depends on the brand, and OEM identity
+        # deliberately does not influence the support verdict: that comes from observed capability.
+        dev.build_fingerprint = self.adb.getprop(dev.serial, "ro.build.fingerprint")
+        dev.manufacturer = self.adb.getprop(dev.serial, "ro.product.manufacturer")
+        one_ui = self.adb.getprop(dev.serial, "ro.build.version.oneui")
+        if one_ui:
+            dev.one_ui_version = one_ui
 
         if not dev.is_root:
             dev.is_root = self.adb.try_root(dev.serial)
@@ -383,43 +438,50 @@ class EmergencySimulatorController:
     # -- injector ----------------------------------------------------------
 
     def ensure_injector_built(self, dry_run: bool = False) -> Path:
-        """Build the Java injector if the jar is missing or older than its sources.
+        """Resolve the injector jar, building it only in a development checkout.
 
-        In a packaged build the sources are not present, so the jar must ship next to the
-        executable; there is nothing to build from and we say so plainly.
+        A release ships the jar prebuilt and must never need the Android SDK. In a checkout we may
+        rebuild it, but only if the sources are actually present and newer than the jar; otherwise a
+        stale jar silently masks source changes.
         """
-        frozen = getattr(sys, "frozen", False)
-        sources = sorted(INJECTOR_DIR.rglob("*.java"))
+        layout = runtime_layout()
+        jar = layout.injector_jar
+        frozen = layout.is_frozen
 
-        if frozen and not INJECTOR_JAR.exists():
+        if jar is None:
+            if frozen:
+                raise SafetyError(
+                    "the bundled Android injector is missing from this build.\n"
+                    "  This is a packaging fault, not a device fault: the release archive should\n"
+                    "  contain android/alertinject/out/alertinject.jar.\n"
+                    "  Development runs can rebuild it with android/alertinject/build.sh."
+                )
             raise SafetyError(
-                "the Android injector jar is missing.\n"
-                f"  Expected at: {INJECTOR_JAR}\n"
-                "  The packaged executable does not carry the injector sources, so the jar must be\n"
-                "  placed in that location next to Emergency-Simulator.exe.\n"
-                "  Build it from the repository with: android/alertinject/build.sh\n"
-                "  (requires the Android SDK and a JDK)."
+                "the Android injector jar is missing and no sources were found to build it.\n"
+                "  Expected the jar at android/alertinject/out/alertinject.jar."
             )
 
-        if not sources and not INJECTOR_JAR.exists():
-            raise SafetyError(
-                f"injector sources not found under {INJECTOR_DIR} and no jar is present"
-            )
+        # A release is self-contained by definition; never try to rebuild it.
+        if frozen:
+            self._say(f"Using bundled injector: {jar.name}")
+            return jar
 
-        stale = True
-        if INJECTOR_JAR.exists():
-            jar_mtime = INJECTOR_JAR.stat().st_mtime
-            stale = any(s.stat().st_mtime > jar_mtime for s in sources)
+        sources = sorted(layout.injector_jar.parent.parent.rglob("*.java"))
+        if not sources:
+            self._say(f"Using prebuilt injector: {jar.name}")
+            return jar
 
+        jar_mtime = jar.stat().st_mtime
+        stale = any(s.stat().st_mtime > jar_mtime for s in sources)
         if not stale:
-            self._say(f"Injector jar is current: {INJECTOR_JAR.name}")
-            return INJECTOR_JAR
+            self._say(f"Injector jar is current: {jar.name}")
+            return jar
 
         if dry_run:
-            self._say(f"[dry-run] would build the injector from {len(sources)} source file(s)")
-            return INJECTOR_JAR
+            self._say(f"[dry-run] would rebuild the injector from {len(sources)} source file(s)")
+            return jar
 
-        script = INJECTOR_DIR / ("build.ps1" if os.name == "nt" else "build.sh")
+        script = jar.parent.parent / ("build.ps1" if os.name == "nt" else "build.sh")
         if os.name == "nt" and not script.exists():
             raise SafetyError(
                 "building the injector on Windows needs an Android SDK plus JDK; the repository "
@@ -436,17 +498,17 @@ class EmergencySimulatorController:
                 encoding="utf-8",
                 errors="replace",
                 timeout=300,
-                cwd=str(INJECTOR_DIR),
+                cwd=str(script.parent),
                 env=env,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             raise SafetyError(f"injector build failed to run: {exc}") from exc
 
-        if proc.returncode != 0 or not INJECTOR_JAR.exists():
+        if proc.returncode != 0 or not jar.exists():
             tail = (proc.stdout + proc.stderr).strip().splitlines()[-8:]
             raise SafetyError("injector build failed:\n" + "\n".join(tail))
-        self._say(f"Built {INJECTOR_JAR}")
-        return INJECTOR_JAR
+        self._say(f"Built {jar}")
+        return jar
 
     # -- send --------------------------------------------------------------
 
@@ -471,6 +533,16 @@ class EmergencySimulatorController:
             self._say(result.message, logging.ERROR)
             return result
         result.body = body
+
+        # The gate is checked before anything else, including in a dry run, so the operator learns
+        # about an outstanding alert without us touching the device at all.
+        refusal = self._gate(dev.serial)
+        if refusal:
+            result.state = AlertState.FAILED
+            result.failure = FailureCode.DUPLICATE_SEND_BLOCKED
+            result.message = refusal
+            self._say(f"refusing to send: {refusal}", logging.WARNING)
+            return result
 
         # Refuse outright rather than half-running on an unusable device.
         if dev.state in (DeviceState.OFFLINE, DeviceState.UNKNOWN):
@@ -508,7 +580,7 @@ class EmergencySimulatorController:
 
             # Ensure the injector exists before we touch test mode, so a build failure does not
             # leave the device reconfigured for nothing.
-            self.ensure_injector_built(dry_run=dry_run)
+            jar = self.ensure_injector_built(dry_run=dry_run)
             self._check_cancel()
 
             mode = self.prepare_test_mode(dev, dry_run=dry_run)
@@ -530,13 +602,20 @@ class EmergencySimulatorController:
             result.state = AlertState.READY_TO_SEND
             self._check_cancel()
 
+            # From here on an alert may reach the device, so the gate closes. If anything goes
+            # wrong after this point the outcome is uncertain rather than known-failed, and the
+            # gate stays closed until the operator acknowledges.
+            self._transactions[dev.serial] = TransactionState.BUSY
+
             # Baseline logcat so evidence cannot come from a previous run.
             self.adb.logcat_clear(dev.serial)
 
-            if not self.adb.push(dev.serial, str(INJECTOR_JAR), INJECTOR_REMOTE):
+            if not self.adb.push(dev.serial, str(jar), INJECTOR_REMOTE):
                 result.state = AlertState.FAILED
                 result.failure = FailureCode.INJECTOR_FAILURE
                 result.message = "failed to push the injector to the device"
+                # Nothing was injected, so the device is not left in an unknown state.
+                self._transactions[dev.serial] = TransactionState.READY
                 return result
             self._say(f"Pushed injector to {INJECTOR_REMOTE}")
 
@@ -570,6 +649,8 @@ class EmergencySimulatorController:
             result.state = AlertState.CANCELLED
             result.failure = FailureCode.USER_CANCELLED
             result.message = str(exc)
+            # Cancellation is only reachable before injection begins, so nothing was delivered.
+            self._transactions[dev.serial] = TransactionState.READY
             self._say("Operation cancelled before delivery", logging.WARNING)
             return result
         except SafetyError as exc:
@@ -582,6 +663,8 @@ class EmergencySimulatorController:
             result.state = AlertState.FAILED
             result.failure = FailureCode.UNKNOWN
             result.message = str(exc)
+            # The injector may already have run; we genuinely do not know.
+            self._transactions[dev.serial] = TransactionState.UNCERTAIN
             self._say(str(exc), logging.ERROR)
             return result
 
@@ -642,6 +725,8 @@ class EmergencySimulatorController:
         if seen_dialog:
             result.state = AlertState.ALERT_DISPLAYED
             result.message = "genuine Android emergency-alert UI was displayed on the device"
+            # An alert is on screen and only the operator can dismiss it.
+            self._transactions[dev.serial] = TransactionState.DELIVERED
         elif filtered:
             result.state = AlertState.FAILED
             result.message = f"the message was rejected downstream: {filtered}"
@@ -651,16 +736,20 @@ class EmergencySimulatorController:
                 result.failure = FailureCode.INJECTOR_FAILURE
             else:
                 result.failure = FailureCode.CELLBROADCAST_FILTERED
+            # The pipeline explicitly rejected it, so nothing is outstanding on the device.
+            self._transactions[dev.serial] = TransactionState.READY
         elif seen_receiver and not seen_service:
             result.state = AlertState.FAILED
             result.failure = FailureCode.ALERT_PROCESSING_FAILED
             result.message = "the receiver saw the message but the alert service did not run"
+            self._transactions[dev.serial] = TransactionState.UNCERTAIN
         elif seen_service:
             result.state = AlertState.RECEIVED_BY_CELLBROADCAST
             result.failure = FailureCode.TIMEOUT
             result.message = (
                 "the alert service started but no alert UI was observed within the timeout"
             )
+            self._transactions[dev.serial] = TransactionState.UNCERTAIN
         else:
             result.state = AlertState.FAILED
             result.failure = FailureCode.TIMEOUT
@@ -668,6 +757,7 @@ class EmergencySimulatorController:
                 "no evidence of the message in the Cell Broadcast pipeline. The injector exited "
                 f"with code {result.injector_exit_code}, but that alone proves nothing."
             )
+            self._transactions[dev.serial] = TransactionState.UNCERTAIN
         for line in result.evidence:
             self._say(f"  evidence: {line}")
         self._say(f"Result: {result.state.value}" + (f" / {result.failure.value}" if result.failure else ""))
@@ -692,11 +782,28 @@ def default_log_dir() -> Path:
     A packaged executable is read-only relative to its own directory in the general case, so the log
     goes to a per-user location. Running from the repository keeps logs/ alongside the code.
     """
-    import os as _os
+    from .runtime import runtime_layout
 
-    if getattr(sys, "frozen", False):
+    layout = runtime_layout()
+    if layout.is_frozen:
+        import os as _os
+
         base = _os.environ.get("LOCALAPPDATA") or _os.environ.get("XDG_STATE_HOME")
         if base:
             return Path(base) / "Emergency-Simulator" / "logs"
         return Path.home() / ".emergency-simulator" / "logs"
-    return REPO_ROOT / "logs"
+    return layout.search_roots[-1] / "logs"
+
+
+def settings_path() -> Path:
+    """Where user settings live. Never inside the bundle: a release may be read-only."""
+    from .runtime import persistent_dir
+
+    return persistent_dir() / "settings.json"
+
+
+def history_path() -> Path:
+    """Where the local operation history lives."""
+    from .runtime import persistent_dir
+
+    return persistent_dir() / "history.json"

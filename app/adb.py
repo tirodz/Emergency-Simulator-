@@ -61,50 +61,28 @@ class AdbResult:
 
 
 def find_adb(explicit: Optional[str] = None) -> Optional[str]:
-    """Locate adb without ever downloading it.
+    """Locate a usable adb without ever downloading it.
 
-    Order: an explicit path, the ADB_PATH environment variable, PATH, then the conventional
-    Android SDK locations on each platform.
+    Delegates to :mod:`app.runtime`, which owns the bundled-vs-external policy and verifies that the
+    executable actually runs. Nothing here re-implements that search order, so the CLI, the GUI and
+    the packaged build cannot drift apart on which adb they would pick.
     """
+    from .runtime import AdbMode, locate_adb
+
+    candidate = locate_adb(explicit)
+    if candidate.works and candidate.mode in (AdbMode.BUNDLED, AdbMode.EXTERNAL):
+        return candidate.path
+
     if explicit:
-        p = Path(explicit)
-        if p.is_file():
-            return str(p)
-        raise AdbError(f"adb not found at the configured path: {explicit}")
-
-    env = os.environ.get("ADB_PATH")
-    if env:
-        p = Path(env)
-        if p.is_file():
-            return str(p)
-        if p.is_dir():
-            cand = p / ("adb.exe" if os.name == "nt" else "adb")
-            if cand.is_file():
-                return str(cand)
-
-    found = shutil.which("adb")
-    if found:
-        return found
-
-    exe = "adb.exe" if os.name == "nt" else "adb"
-    candidates: List[Path] = []
-    for var in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
-        root = os.environ.get(var)
-        if root:
-            candidates.append(Path(root) / "platform-tools" / exe)
-    if os.name == "nt":
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidates.append(Path(local) / "Android" / "Sdk" / "platform-tools" / exe)
-    else:
-        candidates.append(Path.home() / "Android" / "Sdk" / "platform-tools" / exe)
-        candidates.append(Path("/opt/android-sdk/platform-tools") / exe)
-        candidates.append(Path("/usr/lib/android-sdk/platform-tools") / exe)
-
-    for c in candidates:
-        if c.is_file():
-            return str(c)
+        raise AdbError(f"adb not found or not usable at the configured path: {explicit}")
     return None
+
+
+def adb_source(explicit: Optional[str] = None):
+    """Return the full :class:`~app.runtime.AdbCandidate` for reporting in the UI."""
+    from .runtime import locate_adb
+
+    return locate_adb(explicit)
 
 
 class Adb:
@@ -378,11 +356,6 @@ class Adb:
 
 def platform_setup_hint() -> str:
     """A short, accurate message about obtaining adb. We never download it for the user."""
-    return (
-        "adb (Android Platform Tools) was not found.\n"
-        "  Install the official Android SDK Platform Tools from:\n"
-        "    https://developer.android.com/tools/releases/platform-tools\n"
-        "  Then either put adb on your PATH, or set the ADB_PATH environment variable,\n"
-        "  or pass --adb <path-to-adb>.\n"
-        f"  (platform: {sys.platform})"
-    )
+    from .runtime import adb_setup_hint
+
+    return adb_setup_hint() + f"\n\n  (platform: {sys.platform})"

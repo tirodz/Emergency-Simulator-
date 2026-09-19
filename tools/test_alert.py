@@ -75,8 +75,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--log-dir", metavar="DIR", help="directory for the persistent log file")
     p.add_argument("--verbose", action="store_true", help="also log to stderr")
+    p.add_argument(
+        "--acknowledge",
+        action="store_true",
+        help=(
+            "clear the 'alert still outstanding' gate for the selected device after you have "
+            "dismissed the previous alert on it"
+        ),
+    )
+    p.add_argument(
+        "--adb-info",
+        action="store_true",
+        help="report which adb would be used (bundled or external) and exit",
+    )
     p.add_argument("--version", action="version", version=f"Emergency-Simulator {__version__}")
     return p
+
+
+def print_adb_info() -> int:
+    """Report which adb would be used, and why."""
+    from app.runtime import locate_adb, runtime_layout
+
+    cand = locate_adb()
+    layout = runtime_layout()
+    print("ADB")
+    print(f"  mode:    {cand.mode.value}")
+    print(f"  path:    {cand.path or '(none found)'}")
+    if cand.version:
+        print(f"  version: {cand.version}")
+    if cand.works:
+        print("  usable:  yes")
+    else:
+        print(f"  usable:  no ({cand.problem})")
+    print()
+    print("Runtime layout")
+    print(f"  packaged build: {'yes' if layout.is_frozen else 'no'}")
+    print(f"  search roots:")
+    for root in layout.search_roots:
+        print(f"    {root}")
+    jar = layout.injector_jar
+    print(f"  injector jar:   {jar if jar else 'NOT FOUND'}")
+    return EXIT_OK if cand.works else EXIT_FAILURE
 
 
 def print_devices(devices) -> None:
@@ -123,6 +162,10 @@ def confirm(device_label: str, release: str, sdk: str, body: str, verbose: bool)
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+
+    if args.adb_info:
+        return print_adb_info()
+
     log_file = configure_logging(
         Path(args.log_dir) if args.log_dir else None,
         to_console=args.verbose,
@@ -176,6 +219,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Channel: {SERVICE_CATEGORY} (0x1103, ETWS test -- locked)")
     print(f"Message: {body}")
     print()
+
+    if args.acknowledge:
+        controller.acknowledge(device.serial)
+        print(f"Acknowledged {device.serial}: the send gate is clear again.")
+        print("Only do this once the previous alert has been dismissed on the device.")
+        return EXIT_OK
+
+    # Report an outstanding alert before anything else, so a blocked send is never a surprise.
+    from app.models import TransactionState
+
+    gate = controller.transaction_state(device.serial)
+    if gate is not TransactionState.READY:
+        print(f"OUTSTANDING: {gate.value}")
+        print(f"  {controller.gate_explanation(device.serial)}", file=sys.stderr)
+        print("  Dismiss any alert on the device, then re-run with --acknowledge.", file=sys.stderr)
+        return EXIT_FAILURE
 
     if not device.is_usable:
         reason = {
