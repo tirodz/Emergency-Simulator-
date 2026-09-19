@@ -1,0 +1,10 @@
+# Build outputs
+android/alertinject/out/
+build/
+dist/
+
+# Runtime
+logs/
+__pycache__/
+*.pyc
+.venv/
