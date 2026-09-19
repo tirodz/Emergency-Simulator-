@@ -357,6 +357,20 @@ async fn send_test_alert(app:tauri::AppHandle,tx:State<'_,SharedTx>,cancel:State
         if let Some(reason)=gate_for(&tx,&serial){result.failure=Some("DUPLICATE_SEND_BLOCKED".into());result.message=reason;return Ok(result)}
         emit_log(&app,format!("Inspecting target {serial}"),"info");
         let device=parse_devices(&app)?.into_iter().find(|d|d.serial==serial).ok_or("The selected device is no longer attached.")?;
+        if dry_run {
+            result.state="READY_TO_SEND".into();
+            result.message=match device.state {
+                DeviceState::Unauthorized => "ADB target exists, but USB debugging authorization is still pending. No device changes were made.",
+                DeviceState::Offline => "ADB target is offline. No device changes were made.",
+                DeviceState::NoRoot => "Galaxy/stock device detected. Read-only diagnostics passed; the controlled protected injection path remains unavailable on this production build. No device changes were made.",
+                DeviceState::Unsupported => "ADB target inspected, but no CellBroadcast receiver package was found. No device changes were made.",
+                DeviceState::Unknown => "ADB target inspected, but its state is unknown. No device changes were made.",
+                DeviceState::Ready => "Controlled target is ready. Dry run made no device changes."
+            }.into();
+            emit_log(&app, format!("Dry run complete · {} · no device changes", serial), "ok");
+            return Ok(result);
+        }
+
         if !matches!(device.state,DeviceState::Ready){
             result.failure=Some(match device.state{DeviceState::Unauthorized=>"DEVICE_UNAUTHORIZED",DeviceState::Offline=>"DEVICE_OFFLINE",DeviceState::NoRoot=>"NO_ROOT",DeviceState::Unsupported=>"CELLBROADCAST_MISSING",DeviceState::Unknown=>"DEVICE_UNKNOWN",DeviceState::Ready=>"UNKNOWN"}.into());
             result.message=match device.state{DeviceState::Unauthorized=>"Accept the USB debugging authorization prompt on the phone first.",DeviceState::Offline=>"ADB reports this device as offline.",DeviceState::NoRoot=>"This stock/non-root device cannot use the protected controlled test path.",DeviceState::Unsupported=>"No CellBroadcast receiver package was detected.",DeviceState::Unknown=>"The device is not in a known ADB-ready state.",DeviceState::Ready=>"Device is ready."}.into();
