@@ -12,6 +12,13 @@ Sources cited:
 * `packages/apps/CellBroadcastReceiver` (`android16-release` = `b97c8a4ffa3946d7206808bf4810746678b44a5c`)
 * `packages/modules/CellBroadcastService`
 
+> **Verified against a real image.** The claims in this document were checked byte-for-byte
+> against a Google-published AOSP system image (Android 17 / SDK 37, `user` build,
+> SHA-256 `9aa638ec20577ac4d15610527d2da2e7e3fc8388ae7ca23c2de3cb4e3df535c1`). See `docs/experiments.md`, Experiment 3. In particular the
+> `<protected-broadcast>` declarations and the receiver's privileged-permission allowlist
+> were read out of the shipping image rather than inferred from documentation.
+
+
 ## 1. The four gates
 
 To trigger the genuine alert through the AOSP test mechanism, a caller must pass **four independent

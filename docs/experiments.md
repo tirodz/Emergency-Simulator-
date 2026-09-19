@@ -82,36 +82,230 @@ design of the "safe channel" choice.
 
 ---
 
-## Experiment 3 — Can the AOSP emulator host the mechanism?
+## Experiment 3 — Inspect a real AOSP system image (EXECUTED)
 
-**Status:** NOT STARTED
+**Status:** CONFIRMED — executed offline against a Google-published AOSP image
 **Risk:** none
 
-**Objective.** Determine whether an AOSP/GSI emulator image contains the CellBroadcast apex and the CB
-receiver, so the whole pipeline can be validated without hardware.
+### Why this variant was run
 
-**Hypothesis.** **UNKNOWN.** A GSI ships the system image; whether the CBR app and the CB apex are
-included is not established.
+The execution environment for this run had no ADB, no Android SDK, no JDK and no KVM
+(`CapEff: 0000000000000000`, no `/dev/kvm`, CPU exposes only `hypervisor`). That makes an
+emulator impossible, so the device experiments (1, 2, 6, 7) could not be run. This
+experiment was designed to extract the maximum verifiable evidence **without a device**, by
+reading a real Google AOSP system image byte-for-byte.
 
-**Setup.** A userdebug AOSP emulator image or a GSI emulator.
+### Objective
 
-**Commands.**
+Determine whether an AOSP image ships the Cell Broadcast components, establish from real
+bytes what the privilege model is, and determine whether the AOSP test application is
+included.
 
-```bash
-adb shell pm list packages | grep -i cellbroadcast
-adb shell cmd package query-receivers -a android.provider.action.SMS_EMERGENCY_CB_RECEIVED
-adb shell getprop ro.debuggable
-adb shell ls /apex | grep -i cellbroadcast
+### Setup
+
+```
+Image: https://dl.google.com/developers/android/cinnamonbun/images/gsi/aosp_x86_64-exp-CP41.260828.004.A8-16319058-9aa638ec.zip
+Size:  1,243,476,645 bytes
+SHA-256: 9aa638ec20577ac4d15610527d2da2e7e3fc8388ae7ca23c2de3cb4e3df535c1
 ```
 
-**Expected result.** Ideally the apex and receiver are present. Absence is a legitimate negative
-result and a blocker for emulator-based work.
+Build properties read from `build.prop` inside the archive:
 
-**Actual result.** _(pending)_
+| Property | Value |
+| --- | --- |
+| `ro.build.fingerprint` | `Android/generic_system/generic:17/CP41.260828.004.A8/16319058:user/release-keys` |
+| `ro.build.type` | **`user`** |
+| `ro.build.tags` | `release-keys` |
+| `ro.debuggable` | **`0`** |
+| `ro.secure` | `1` |
+| `ro.adb.secure` | `1` |
+| `ro.build.version.release` | `17` |
+| `ro.build.version.sdk` | `37` |
 
-**Conclusion.** _(pending)_
+This is a **user** build — the strictest configuration. Anything found here is a lower bound
+on what a userdebug or eng build permits.
 
-**Next step.** If present -> Experiment 4 on the emulator. If absent -> Experiment 4 needs hardware.
+### Tooling
+
+This environment has no root, no loop devices, no `debugfs` and no `simg2img`. Minimal
+read-only tooling was written to read the image anyway and is kept in the repository:
+
+| File | Purpose |
+| --- | --- |
+| `tools/ext4ls.py` | Read-only ext4 walker: superblock, group descriptors, inode table, extent trees, directory entries. Lists directories and extracts files. |
+| `tools/findapks.py` | Recursively walks an image looking for path matches. |
+| `tools/axml.py` | Minimal Android binary-XML (AXML) string-pool and element extractor. |
+
+### Commands
+
+```bash
+python3 tools/ext4ls.py system.img /system
+python3 tools/ext4ls.py system.img /system/apex/com.android.cellbroadcast.capex
+python3 tools/findapks.py system.img cellbroadcast
+```
+
+The `.capex` container is a ZIP whose `original_apex` member is a second ZIP containing an
+ext4 `apex_payload.img`; both layers were opened directly.
+
+### Actual result
+
+**1. Where the components live.** The receiver and service are no longer in
+`system/priv-app`. They ship inside an APEX:
+
+```
+/system/apex/com.android.cellbroadcast.capex            6,090,752 bytes
+    └── original_apex
+          └── apex_payload.img   (ext4, 24,494,080 bytes)
+                └── priv-app/
+                      CellBroadcastApp@CP41.260828.004.A8/CellBroadcastApp.apk   23,944,068 bytes
+                      CellBroadcastServiceModule@CP41.260828.004.A8/
+```
+
+APEX manifest name `com.android.cellbroadcast`, version code `0x01B1E89F` = 28,427,167.
+This confirms that Cell Broadcast is a Mainline/APEX module.
+
+**2. The test application is NOT shipped.** A recursive walk of the entire `system.img` for
+the substring `cellbroadcast` returned only:
+
+```
+/system/apex/com.android.cellbroadcast.capex
+/system/priv-app/CellBroadcastLegacyApp/...        (a separate legacy shim)
+```
+
+A recursive walk of the APEX payload for `test` returned **no matches**. A walk of the whole
+image for `tests` returned only `libcts_flags_tests_rust.dylib.so`. A walk for `sl4a`
+returned **no matches**.
+
+`CellBroadcastReceiverTests` is build-time only, exactly as its `Android.bp` implies.
+
+**3. The privileged permission allowlist, read from the shipping image.**
+`/system/apex/com.android.cellbroadcast.capex/etc/permissions/com.android.cellbroadcastreceiver.module.xml`:
+
+```xml
+<privapp-permissions package="com.android.cellbroadcastreceiver.module">
+    <permission name="android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS"/>
+    <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+    <permission name="android.permission.MANAGE_USERS"/>
+    <permission name="android.permission.STATUS_BAR"/>
+    <permission name="android.permission.MODIFY_PHONE_STATE"/>
+    <permission name="android.permission.MODIFY_CELL_BROADCASTS"/>
+    <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+    <permission name="android.permission.RECEIVE_EMERGENCY_BROADCAST"/>
+    <permission name="android.permission.START_ACTIVITIES_FROM_BACKGROUND"/>
+</privapp-permissions>
+```
+
+This is the authoritative list of what the real receiver may do.
+`RECEIVE_EMERGENCY_BROADCAST` is granted only through this allowlist.
+`START_ACTIVITIES_FROM_BACKGROUND` is what lets the alert dialog appear over the current app.
+
+**4. The emergency action is a protected broadcast.** Extracted from `framework-res.apk`'s
+binary `AndroidManifest.xml`:
+
+```
+protected-broadcast    android.provider.Telephony.SMS_CB_RECEIVED
+protected-broadcast    android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+protected-broadcast    com.android.cellbroadcastreceiver.GET_LATEST_CB_AREA_INFO
+```
+
+Empirical confirmation from a shipping image that the `BroadcastController` `isCallerSystem`
+gate applies.
+
+**5. The exact action string.**
+`android.provider.action.SMS_EMERGENCY_CB_RECEIVED` — note `provider.action`, **not**
+`provider.Telephony`. The non-emergency action is
+`android.provider.Telephony.SMS_CB_RECEIVED`. A wrong action string is a silent no-op, so
+this is recorded explicitly.
+
+**6. Alert tones ship in the APK.**
+
+```
+res/raw/default_tone.ogg
+res/raw/etws_default.ogg
+res/raw/etws_earthquake.ogg
+res/raw/etws_other_disaster.ogg
+res/raw/etws_tsunami.ogg
+res/raw-mcc302/...  (Japan)      res/raw-mcc334/...  (Mexico)
+res/raw-mcc440/...  (Japan)
+```
+
+Confirms ETWS tones ship with the module and that tone selection is MCC-dependent.
+
+**7. Shell wrappers present in the image** (relevant to what `adb shell` reaches):
+
+```
+/system/bin/pm        -> cmd package "$@"
+/system/bin/am        -> cmd activity "$@"   (instrument handled separately)
+/system/bin/appops    -> cmd appops "$@"
+/system/bin/settings  -> cmd settings "$@"
+```
+
+### Conclusion
+
+- The receiver and service ship as an APEX module and are present on a **user** build.
+- The AOSP **test** application does **not** ship on any build type. It is build-time only.
+- `SMS_EMERGENCY_CB_RECEIVED` and `SMS_CB_RECEIVED` are both `<protected-broadcast>` in the
+  shipping framework.
+- The receiver holds `RECEIVE_EMERGENCY_BROADCAST` only as a privileged permission granted
+  via the allowlist above; it is not obtainable by an ordinary app.
+
+### Next step
+
+Experiment 6 still needs a device. The exact command sequence is in Experiment 6 below.
+In that emulator session, `adb shell ls /apex | grep -i cellbroadcast` and
+`adb shell getprop ro.build.type` reproduce the above findings on a live system.
+
+---
+
+## Experiment 3b — Static answers to the Experiment 6 sub-questions
+
+The device-dependent parts of Experiment 6 could not be run. The parts decidable from source
+and from the shipping image are answered so the hardware run only has to confirm interactive
+behaviour.
+
+| # | Question | Answer | Status |
+| --- | --- | --- | --- |
+| 1 | Can the test APK be built/installed on an emulator or dev device? | Target exists: `android_test` `CellBroadcastReceiverTests`, `certificate: "platform"`, `platform_apis: true`, `instrumentation_for: "CellBroadcastApp"`. It is **not** in any `PRODUCT_PACKAGES`, so it is not installed by default even on userdebug; it must be built and installed deliberately, and the build must be platform-signed. | CONFIRMED (build config); device install UNKNOWN |
+| 2 | Is `SendTestBroadcastActivity` exported? | Yes — `android:exported="true"`, identical on android14-release (`346bb74`), android15-release (`62e355a`), android16-release (`b97c8a4`), `main` (`17f1a4a`). | CONFIRMED |
+| 3 | Can `adb shell am start` launch it? | UNKNOWN — needs a device. Exported + `MAIN`/`LAUNCHER` is necessary but **not sufficient**; the platform-signed install with `sharedUserId=android.uid.phone` must also succeed. | UNKNOWN |
+| 4 | Exact component name and required extras? | `com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity`. **No required extras** — the activity reads none. | CONFIRMED |
+| 5 | Does launching alone trigger a message? | **No.** `onCreate()` only calls `setContentView` and wires `OnClickListener`s. No `onNewIntent`, no `getIntent()`, no send call anywhere in the lifecycle. Nothing is sent until a button is clicked. | CONFIRMED |
+| 6 | If ADB input is required? | Buttons are standard `Button` widgets with stable IDs (`button_etws_test_type`, `button_gsm_cmas_monthly_test`, `button_gsm_state_local_test_alert`, ...). Drivable with `adb shell input tap x y` or `uiautomator` automation. Coordinates are resolution-specific and must be read at run time from `uiautomator dump`. | CONFIRMED (mechanism) |
+| 7 | Capture logcat | `adb logcat -c` before, `adb logcat -v threadtime` during. Filters: `CellBroadcastReceiver`, `CellBroadcastAlertService`, `CellBroadcastAlertAudio`, `SendTestBroadcastActivity`, `ActivityManager`, `BroadcastController`. | CONFIRMED (command) |
+| 8 | Does the production receiver handle it? | Yes by construction. The test code calls `sendOrderedBroadcastAsUser` with `SMS_EMERGENCY_CB_RECEIVED` (or `SMS_CB_RECEIVED`), explicit `setPackage()` to the default receiver, `receiverPermission=RECEIVE_EMERGENCY_BROADCAST`, `appOp=OP_RECEIVE_EMERGECY_SMS`. The receiver's `onReceive` is the genuine production entry point. | CONFIRMED (code path) |
+| 9 | Screen / sound / vibration? | UNKNOWN — needs a device. The path requests alarm-stream audio, vibration, and a full-screen dialog with `FLAG_SHOW_WHEN_LOCKED`. | UNKNOWN |
+| 10 | How is the message classified? | By the injected identifier. The test app can send ETWS (`0x1100`–`0x1103`), CMAS (`0x1112`–`0x111E`) or generic GSM/UMTS messages. Classification happens in the production receiver via `SmsCbConstants`, not in the test app. | CONFIRMED (mechanism) |
+| 11 | Emulator vs userdebug vs user? | UNKNOWN — needs devices. The permission model is build-type independent; what differs is whether the platform-signed test APK can be installed at all. | UNKNOWN |
+
+### The critical security question
+
+**Does `exported=true` mean an ordinary external application can perform the privileged
+injection? No.**
+
+The privilege is not conferred by the activity being exported. It is conferred by the
+*identity of the process that executes the send call* — the test app's own process.
+
+| Stage | Identity / control |
+| --- | --- |
+| Caller (ADB `am start`) | shell UID 2000. May start the activity because it is exported. This only causes the activity to **render**. |
+| Activity process | `com.android.cellbroadcastreceiver.tests`, running as `android.uid.phone` (sharedUserId), UID 1001. |
+| Send call | Executed **inside that process**, by that identity — not by shell. |
+| Permission checked | `RECEIVE_EMERGENCY_BROADCAST` — held because the APK is platform-signed and privileged-allowlisted. |
+| Broadcast gate | `BroadcastController` sees `callingUid` = PHONE_UID (1001), which is in the `isCallerSystem` switch, so the protected-broadcast check passes. |
+| AppOp | `OP_RECEIVE_EMERGECY_SMS` / `OP_RECEIVE_SMS` must be `MODE_ALLOWED` for the sender. |
+| Receiver resolution | Explicit `setPackage()` to `com.android.cellbroadcastreceiver[.module]`. |
+| Receiver permission | `RECEIVE_EMERGENCY_BROADCAST`, held by the receiver as a privileged permission. |
+
+So: **the privileged operation is performed by the test application's own privileged
+identity, after ADB merely launched its exported Activity.** ADB cannot perform the
+injection itself. The security boundary is not bypassed — it is *satisfied* by an
+application that legitimately holds the identity. This is why the path is legitimate rather
+than an exploit.
+
+The corollary matters most for the Windows EXE: **ADB is not the injection mechanism.** ADB
+is the transport that reaches the test app. If the test app is absent — which it is on every
+shipping image, including the GSI analysed above — ADB has nothing to launch, and there is
+no ADB-only path to a genuine alert.
 
 ---
 

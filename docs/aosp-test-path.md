@@ -315,3 +315,151 @@ this separation (see `experiments.md`).
 3. Therefore the project needs either (a) a device we are allowed to reflash with an AOSP
    userdebug/eng build, (b) a rooted device where we can install a system app, or (c) a different,
    still-to-be-verified injection point. Option (c) is the subject of the open questions.
+
+## 9. Corrections and additions from image analysis (Experiment 3)
+
+Reading a real Google AOSP image byte-for-byte (`docs/experiments.md`, Experiment 3) corrected or
+sharpened several points that had been inferred from source browsing alone.
+
+### 9.1 The emergency action string
+
+The constant `Telephony.Sms.Intents.ACTION_SMS_EMERGENCY_CB_RECEIVED` expands to:
+
+```
+android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+```
+
+Note `provider.action`, **not** `provider.Telephony`. This is easy to get wrong and a wrong action
+string produces a silent no-op rather than an error. The non-emergency action is
+`android.provider.Telephony.SMS_CB_RECEIVED`. Both were read out of the shipping
+`framework-res.apk`'s `<protected-broadcast>` list:
+
+```
+protected-broadcast    android.provider.Telephony.SMS_CB_RECEIVED
+protected-broadcast    android.provider.action.SMS_EMERGENCY_CB_RECEIVED
+protected-broadcast    com.android.cellbroadcastreceiver.GET_LATEST_CB_AREA_INFO
+```
+
+This is empirical confirmation that the `BroadcastController.isCallerSystem` gate applies to both
+Cell Broadcast entry actions on a shipping **user** build, not merely in the source tree.
+
+### 9.2 The test APK ships on no build type at all
+
+`CellBroadcastReceiverTests` is not present anywhere in the AOSP GSI. A recursive walk of the whole
+image found only the APEX module and a separate `CellBroadcastLegacyApp` shim:
+
+```
+/system/apex/com.android.cellbroadcast.capex
+/system/priv-app/CellBroadcastLegacyApp/...
+```
+
+No `test` entries exist inside the APEX payload either. Combined with the absence of the target from
+any `PRODUCT_PACKAGES`, this means the test app is **build-time only**: it is not installed by
+default on user, userdebug or eng. It must be built and pushed explicitly, and the build must be
+platform-signed.
+
+**Consequence for the milestone:** there is no "ADB-only" path that works on a stock or
+already-flashed device. `adb shell am start` needs the APK to exist on the device first, which
+requires either a custom build or a rooted device where a platform-signed APK can be placed in
+`/system/priv-app` (or installed as a system app).
+
+### 9.3 The receiver's real permission set
+
+The privileged allowlist shipped in the APEX is:
+
+```xml
+<privapp-permissions package="com.android.cellbroadcastreceiver.module">
+    <permission name="android.permission.BROADCAST_CLOSE_SYSTEM_DIALOGS"/>
+    <permission name="android.permission.INTERACT_ACROSS_USERS"/>
+    <permission name="android.permission.MANAGE_USERS"/>
+    <permission name="android.permission.STATUS_BAR"/>
+    <permission name="android.permission.MODIFY_PHONE_STATE"/>
+    <permission name="android.permission.MODIFY_CELL_BROADCASTS"/>
+    <permission name="android.permission.READ_PRIVILEGED_PHONE_STATE"/>
+    <permission name="android.permission.RECEIVE_EMERGENCY_BROADCAST"/>
+    <permission name="android.permission.START_ACTIVITIES_FROM_BACKGROUND"/>
+</privapp-permissions>
+```
+
+`RECEIVE_EMERGENCY_BROADCAST` is granted to the receiver only through this allowlist.
+`START_ACTIVITIES_FROM_BACKGROUND` is what allows the alert dialog to appear over the current app.
+
+### 9.4 Where the components live
+
+The receiver and service ship inside the Cell Broadcast APEX
+(`/system/apex/com.android.cellbroadcast.capex`, manifest name `com.android.cellbroadcast`), as
+`CellBroadcastApp@<build>/CellBroadcastApp.apk` and `CellBroadcastServiceModule@<build>/`. They are
+no longer plain `system/priv-app` entries. This confirms the Mainline/APEX architecture claim.
+
+### 9.5 The activity cannot be driven by an Intent
+
+`SendTestBroadcastActivity.onCreate()` only calls `setContentView(R.layout.test_buttons)` and wires
+`OnClickListener`s. There is no `onNewIntent` override and no `getIntent()` call anywhere in the
+class (verified by grep across all 702 lines). **Therefore no Intent extra can trigger a test
+message.** The activity is a pure GUI.
+
+Consequence: `adb shell am start` will open the UI and *nothing else*. To actually send, a subsequent
+input step is required — either `adb shell input tap x y` on a button, or UI automation via
+`uiautomator`. Button resource IDs are stable and known:
+
+| Test category | Resource ID |
+| --- | --- |
+| ETWS test | `button_etws_test_type` |
+| ETWS earthquake | `button_etws_earthquake_type` |
+| ETWS tsunami | `button_etws_tsunami_type` |
+| ETWS other | `button_etws_other_type` |
+| ETWS cancel | `button_etws_cancel_type` |
+| GSM CMAS monthly test | `button_gsm_cmas_monthly_test` |
+| GSM CMAS exercise test | `button_gsm_cmas_exercise_test` |
+| GSM state/local test | `button_gsm_state_local_test_alert` |
+| GSM public safety | `button_gsm_public_safety_message` |
+| CDMA CMAS monthly test | `button_cmas_monthly_test` |
+
+Screen coordinates for these must be read at run time from `uiautomator dump`, since they depend on
+resolution and layout. Do not hardcode coordinates.
+
+### 9.6 Correction to the "test app is an instrumented test" assumption
+
+`tests/testapp/src/` contains **no JUnit test classes at all** — no `extends TestCase`, no
+`@Test`, no instrumentation test bodies. The `instrumentation` element in its manifest targets
+`com.android.cellbroadcastreceiver`, but there is nothing for the runner to execute. Running
+`am instrument` against the testapp package would find no tests.
+
+This means **`am instrument` is not a usable non-UI trigger path** for the CMAS/ETWS buttons. The
+only way to invoke the send code is through the activity's UI callbacks. That is a significant
+constraint on automating the proof of concept: the controller must drive the GUI, not a test hook.
+
+The separate `tests/unit/` module (`CellBroadcastReceiverUnitTests`,
+`CellBroadcastReceiverPlatformUnitTests`, `certificate: "platform"` / `"networkstack"`) does contain
+real tests, but they are unit tests of the receiver's logic; they do not exercise the production
+alert UI on a device and are not a substitute for the end-to-end proof.
+
+### 9.7 What this means for the next milestone
+
+The chain the milestone hoped to prove is:
+
+```
+ADB → exported test Activity → test code → real CellBroadcastReceiver → genuine alert
+```
+
+It remains a **valid** chain, but with two hard preconditions now confirmed:
+
+1. The test APK must exist on the device. It ships nowhere, so this requires a custom AOSP build or a
+   rooted device.
+2. ADB cannot complete the chain alone — after launching the activity, it must inject a UI tap to
+   invoke the send callback, because the activity has no Intent-driven path.
+
+The device-side prerequisites for the minimal proof of concept are therefore:
+
+```
+device        : userdebug/eng AOSP build or a rooted device
++build target : CellBroadcastReceiverTests   (m CellBroadcastReceiverTests)
++artifact      : out/target/product/<device>/testcases/CellBroadcastReceiverTests/...apk
++install      : platform-signed; push into /system/priv-app (or install as system app)
++drive        : am start  +  input tap (or uiautomator)
++observe      : logcat + Android's own Cell Broadcast history
+```
+
+Note the build target is the Soong module name `CellBroadcastReceiverTests`, not the Java package
+name. Its `instrumentation_for` is `CellBroadcastApp`.
+

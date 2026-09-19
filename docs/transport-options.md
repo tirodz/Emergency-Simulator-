@@ -53,6 +53,63 @@ broadcast directly. So an ADB-only design must be one of:
 
 ADB is a *remote control*, not an authority.
 
+### Confirmed by Experiment 3: the AOSP test app is not an option on a shipping device
+
+The obvious hope was that ADB could simply drive the existing AOSP test app. Experiment 3 established
+that this fails at the first step, for two independent reasons:
+
+1. **The test APK ships on no build type.** It is absent from a real AOSP GSI and from any
+   `PRODUCT_PACKAGES`. There is nothing on a stock or already-flashed device for ADB to launch.
+2. **The activity is not Intent-drivable.** `SendTestBroadcastActivity` has no `onNewIntent` and
+   never reads its Intent. `am start` opens the UI and sends nothing. A UI tap is mandatory.
+
+So the "ADB → exported test Activity → genuine alert" chain is real in principle but **cannot be
+completed by ADB alone on a stock device**. ADB's role is reduced to:
+
+* launching the test UI (`am start`), and
+* injecting the tap that actually invokes the send callback (`input tap` / `uiautomator`).
+
+Both steps are only possible once the platform-signed test APK exists on the device, which requires a
+custom AOSP build or a rooted device.
+
+### The honest shape of the phase-1 PoC
+
+```
+precondition : device running a userdebug/eng AOSP build, or a rooted device
+             : with the platform-signed CellBroadcastReceiverTests APK present
+
+PC                                      Device
+script                                  adbd
+  |                                        |
+  | adb -s <serial> shell am start \        |   (1) render the test UI
+  |   -n com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity
+  +--------------------------------------->|
+                                           |
+  | adb -s <serial> shell input tap X Y     |   (2) press "ETWS test" (coords from uiautomator)
+  +--------------------------------------->|
+                                           v
+                                   SendTestMessages.testSendEtwsMessageTest(...)
+                                   (runs as android.uid.phone, platform-signed)
+                                           |
+                                           v
+                                   sendOrderedBroadcastAsUser(
+                                     ACTION_SMS_EMERGENCY_CB_RECEIVED,
+                                     package = com.android.cellbroadcastreceiver,
+                                     receiverPermission = RECEIVE_EMERGENCY_BROADCAST,
+                                     appOp = OP_RECEIVE_EMERGECY_SMS)
+                                           |
+                                           v
+                                   genuine CellBroadcastReceiver.onReceive
+                                           |
+                                           v
+                                   genuine alert UI + sound + vibration
+```
+
+The controller is therefore a *UI driver* plus a *logcat observer*, not a broadcaster. That is a
+legitimate but more fragile design than originally hoped, because it depends on screen layout.
+`uiautomator dump` should be used to resolve coordinates at run time rather than hardcoding them.
+
+
 ### Sketch
 
 ```
