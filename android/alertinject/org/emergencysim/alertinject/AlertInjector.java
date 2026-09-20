@@ -20,7 +20,7 @@ import java.lang.reflect.Method;
  *       option to select a real hazard category.
  *   <li>The body text must begin with {@code TEST}, or the tool refuses to send.
  *   <li>Nothing is sent automatically. There is no scheduling and no retry.
- *   <li>The target package is fixed to the on-device Cell Broadcast receiver.
+ *   <li>The target package is supplied by the controller from its on-device Cell Broadcast package discovery and is validated before use.
  * </ul>
  *
  * <p>It transmits nothing. There is no radio, modem or network participation of any kind: the
@@ -31,7 +31,7 @@ import java.lang.reflect.Method;
  * <pre>
  *   adb root
  *   adb shell CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin \
- *       org.emergencysim.alertinject.AlertInjector 4355 "TEST ALERT - SIMULATION"
+ *       org.emergencysim.alertinject.AlertInjector 4355 com.google.android.cellbroadcastreceiver "TEST ALERT - SIMULATION"
  * </pre>
  */
 public final class AlertInjector {
