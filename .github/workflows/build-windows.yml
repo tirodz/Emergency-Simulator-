@@ -1,8 +1,8 @@
-name: Build Tauri Windows desktop
+name: Build Emergency Simulator Windows
 
 on:
   push:
-    branches: [main, rebuild/tauri-liquid-glass]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,12 +11,12 @@ permissions:
   contents: write
 
 jobs:
-  frontend:
-    name: Frontend contract checks
+  verify:
+    name: Verify desktop contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Verify glass frontend contract
+      - name: Verify
         shell: bash
         run: |
           set -e
@@ -24,33 +24,33 @@ jobs:
           test -f src-tauri/Cargo.toml
           test -f src-tauri/src/lib.rs
           test -f src-tauri/tauri.conf.json
-          test -f tools/make_icon.py
+          test -f src-tauri/icons/icon.svg
           grep -q "Tauri + Rust" src/index.html
           grep -q "SEND TEST ALERT" src/index.html
+          grep -q "Device workspace" src/index.html
           grep -q "backdrop-filter" src/index.html
-          grep -q 'data-theme="midnight"' src/index.html
-          grep -q 'data-accent="green"' src/index.html
-          grep -q "UNAUTHORIZED" src/index.html
-          grep -q "STOCK / UNPROVEN" src/index.html
-          grep -q "NO CELLULAR TRANSMISSION" src/index.html
-          grep -q "window_toggle_maximize" src/index.html
+          grep -q 'data-theme="oled"' src/index.html
+          grep -q 'data-theme="light"' src/index.html
+          grep -q "adb_diagnostics" src/index.html
           grep -q "send_test_alert" src/index.html
+          grep -q "NO CELLULAR TRANSMISSION" src/index.html
 
   build:
-    name: Build Windows app + installer
+    name: Build Windows app and installer
     runs-on: windows-latest
-    needs: frontend
+    needs: verify
     steps:
       - uses: actions/checkout@v7
-      - name: Install Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: npm install
       - name: Generate application icon set
         shell: pwsh
         run: npx tauri icon src-tauri/icons/icon.svg
@@ -71,38 +71,28 @@ jobs:
           Copy-Item "$env:TEMP\pt\platform-tools\adb.exe" -Destination "$stage\adb.exe" -Force
           Copy-Item "$env:TEMP\pt\platform-tools\AdbWinApi.dll" -Destination "$stage\AdbWinApi.dll" -Force
           Copy-Item "$env:TEMP\pt\platform-tools\AdbWinUsbApi.dll" -Destination "$stage\AdbWinUsbApi.dll" -Force
-          & "$stage\adb.exe" version
+          & "$stage\adb.exe" start-server
+          & "$stage\adb.exe" devices -l
       - name: Verify Android injector
         shell: pwsh
         run: |
-          if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing android injector JAR." }
-      - name: Install frontend
-        shell: pwsh
-        run: npm install
+          if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing Android injector JAR." }
       - name: Build Tauri bundle
         shell: pwsh
         run: npx tauri build --ci
-      - name: Validate and normalize outputs
+      - name: Validate release outputs
         shell: pwsh
         run: |
-          $app = Get-ChildItem "src-tauri\target\release" -Filter "*.exe" -Recurse |
-            Where-Object { $_.FullName -notmatch "\\bundle\\nsis\\" } |
-            Select-Object -First 1
-          $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*.exe" |
-            Select-Object -First 1
-          if (-not $app) { throw "Tauri application EXE was not produced." }
-          if (-not $setup) { throw "Tauri NSIS installer was not produced." }
+          $app = Get-ChildItem "src-tauri\target\release" -Filter "*.exe" -Recurse | Where-Object { $_.FullName -notmatch "\\bundle\\nsis\\" } | Select-Object -First 1
+          $setup = Get-ChildItem "src-tauri\target\release\bundle\nsis" -Filter "*.exe" | Select-Object -First 1
+          if (-not $app) { throw "Tauri application EXE missing." }
+          if (-not $setup) { throw "Tauri NSIS installer missing." }
           New-Item -ItemType Directory -Path release-output -Force | Out-Null
           Copy-Item $app.FullName "release-output\Emergency-Simulator-v1.0.0.exe" -Force
-          Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Force
-          Get-Item "release-output\*.exe" | Format-Table Name,Length
-      - name: Report hashes
-        shell: pwsh
-        run: |
+          Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Force
           Get-FileHash "release-output\Emergency-Simulator-v1.0.0.exe" -Algorithm SHA256 | Format-List
-          Get-FileHash "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Algorithm SHA256 | Format-List
-      - name: Upload release outputs
-        uses: actions/upload-artifact@v7
+          Get-FileHash "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Algorithm SHA256 | Format-List
+      - uses: actions/upload-artifact@v7
         with:
           name: Emergency-Simulator-v1-windows
           path: release-output
@@ -110,12 +100,12 @@ jobs:
           retention-days: 30
 
   release:
-    name: Publish v2.0.0 GitHub release
+    name: Publish v1.0.0 GitHub release
     needs: build
     if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     steps:
-      - name: Remove obsolete v2.0.0 release
+      - name: Remove obsolete v2.0.0 release and tag
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,12 +114,12 @@ jobs:
         with:
           name: Emergency-Simulator-v1-windows
           path: release-assets
-      - name: Publish v2.0.0
+      - name: Publish v1.0.0
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v2.0.0
+          tag_name: v1.0.0
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
             release-assets/Emergency-Simulator-v1.0.0.exe
-            release-assets/Emergency-Simulator-Setup-2.0.0.exe
+            release-assets/Emergency-Simulator-Setup-1.0.0.exe
