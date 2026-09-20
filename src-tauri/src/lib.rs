@@ -968,7 +968,7 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let (_, source) = adb_path(&app);
 
     Ok(AppInfo {
-        version: "2.0.0".to_string(),
+        version: "1.0.0".to_string(),
         adb_source: source,
         injector: injector_path(&app).is_some(),
     })
