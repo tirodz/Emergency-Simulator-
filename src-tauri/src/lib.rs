@@ -2,8 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    io::Write,
     path::PathBuf,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
@@ -963,6 +964,53 @@ pub struct AdbDiagnostics {
     pub devices_raw: String,
 }
 
+fn valid_network_endpoint(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value.chars().all(|c| c.is_ascii_alphanumeric() || ".:-[]".contains(c))
+}
+
+#[tauri::command]
+fn adb_pair(app: tauri::AppHandle, address: String, pairing_code: String) -> Result<String, String> {
+    if !valid_network_endpoint(&address) {
+        return Err("Invalid pairing address. Use the IP:port shown under Wireless debugging.".to_string());
+    }
+    if pairing_code.len() < 4 || pairing_code.len() > 16 || !pairing_code.chars().all(|c| c.is_ascii_digit()) {
+        return Err("Invalid pairing code. Enter the numeric code shown on the phone.".to_string());
+    }
+
+    let (adb, _) = adb_path(&app);
+    let mut child = Command::new(adb)
+        .args(["pair", &address])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("ADB pair could not start: {e}"))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(pairing_code.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .map_err(|e| format!("Could not send pairing code: {e}"))?;
+    }
+
+    let output = child.wait_with_output()
+        .map_err(|e| format!("ADB pair failed: {e}"))?;
+    let text = output_text(&output);
+    if !output.status.success() {
+        return Err(text.trim().to_string());
+    }
+    Ok(text.trim().to_string())
+}
+
+#[tauri::command]
+fn adb_connect(app: tauri::AppHandle, address: String) -> Result<String, String> {
+    if !valid_network_endpoint(&address) {
+        return Err("Invalid device address. Use the IP:port shown under Wireless debugging.".to_string());
+    }
+    adb_call(&app, &["connect", &address])
+}
+
 #[tauri::command]
 fn restart_adb_server(app: tauri::AppHandle) -> Result<String, String> {
     let _ = adb_call(&app, &["kill-server"]);
@@ -1319,6 +1367,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             adb_diagnostics,
+            adb_pair,
+            adb_connect,
             restart_adb_server,
             list_devices,
             open_android_settings,
