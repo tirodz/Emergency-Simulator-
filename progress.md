@@ -677,3 +677,7 @@ The Windows product is now a Tauri 2 + Rust + HTML/CSS/JavaScript desktop applic
 Galaxy A35 stock handling is diagnostic-only. Production user builds do not receive an adb root restart request. The app exposes device details, the local Samsung PNG hardware preview, a non-invasive dry run, and a direct Android Developer Options action. The previously demonstrated genuine CellBroadcast path remains restricted to controlled root/userdebug Android targets.
 
 The previous v1.1.0 GitHub release is no longer present.
+
+## Final v1.0.0 finish
+
+The production branch now uses a dedicated Devices workspace rather than scrolling the Overview when Devices is clicked. The workspace is populated from the Rust/ADB backend and includes a local Samsung PNG hardware reference plus live read-only device metrics. The Windows build generates its icon set from the simple SVG source using Tauri's supported icon pipeline. The release workflow removes the obsolete v2.0.0 release/tag before publishing v1.0.0.

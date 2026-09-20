@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="midnight" data-accent="green">
+<html lang="en" data-theme="oled" data-accent="green">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
 <title>Emergency Simulator — Android Alert Lab</title>
@@ -185,7 +185,7 @@ html.reduced-motion *,html.reduced-motion *::before,html.reduced-motion *::after
 
 <div id="backdrop" class="backdrop"></div>
 <div id="settingsPanel" class="glass settings"><div class="settings-head"><strong>Appearance</strong><button id="closeSettings" class="icon-btn" style="width:32px;height:32px"><svg viewBox="0 0 24 24" fill="none"><path d="m7 7 10 10M17 7 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></button></div>
-<div class="settings-grid"><div><div class="label"><span>Theme</span></div><div class="theme-row"><button class="theme-btn" data-theme="midnight">Midnight</button><button class="theme-btn" data-theme="oled">OLED</button><button class="theme-btn" data-theme="light">Light</button></div></div>
+<div class="settings-grid"><div><div class="label"><span>Theme</span></div><div class="theme-row"><button class="theme-btn" data-theme="oled">Dark</button><button class="theme-btn" data-theme="oled">OLED</button><button class="theme-btn" data-theme="light">Light</button></div></div>
 <div><div class="label"><span>Accent</span></div><div class="accent-row"><button class="accent-btn green" data-accent="green" title="Emerald"></button><button class="accent-btn cyan" data-accent="cyan" title="Cyan"></button><button class="accent-btn orange" data-accent="orange" title="Orange"></button></div></div>
 <div class="setting-row"><div class="setting-copy"><strong>Ambient cursor glow</strong><span>Move the light across glass surfaces.</span></div><button id="glowToggle" class="toggle on"></button></div>
 <div class="setting-row"><div class="setting-copy"><strong>Reduced motion</strong><span>Disable launch and hover motion.</span></div><button id="motionToggle" class="toggle"></button></div>
@@ -199,7 +199,7 @@ html.reduced-motion *,html.reduced-motion *::before,html.reduced-motion *::after
 "use strict";
 const unavailable=()=>Promise.reject(new Error("Tauri runtime is not available. Launch the packaged desktop application."));
 const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)?window.__TAURI__.core.invoke:unavailable;
-const state={devices:[],selected:null,sending:false,theme:localStorage.getItem("es-theme")||"midnight",accent:localStorage.getItem("es-accent")||"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
+const state={devices:[],selected:null,sending:false,theme:localStorage.getItem("es-theme")||"oled",accent:localStorage.getItem("es-accent")||"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
 const $=id=>document.getElementById(id);
 function now(){return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
 function esc(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}

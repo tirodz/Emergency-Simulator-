@@ -92,3 +92,8 @@ The project stays inside a controlled development boundary:
 - no bootloader unlocking or firmware flashing
 - no fake system-alert UI pretending to be Android
 - Android downstream evidence determines whether a test actually reached the system alert UI
+
+
+## Galaxy A35 device workspace
+
+The Devices workspace is a dedicated screen rather than an Overview scroll target. It scans the bundled ADB server, shows each attached target and opens a detailed hardware profile. For a stock Galaxy A35, the app reads RAM, storage, battery level, display resolution, density, Android version and build identity over ADB, while model facts can be filled from Samsung's published specifications. Samsung documents the A35 as a 6.6-inch FHD+ Super AMOLED device with up to 120Hz, 6/8GB memory options, 128/256GB storage options, a 5,000mAh battery and Exynos 1380. citeturn456277search0turn965871search1turn965871search24

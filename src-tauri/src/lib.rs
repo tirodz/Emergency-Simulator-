@@ -379,8 +379,79 @@ fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
     false
 }
 
+fn parse_first_u64(text: &str, key: &str) -> Option<u64> {
+    text.lines().find_map(|line| {
+        line.trim().strip_prefix(key)
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .and_then(|value| value.parse::<u64>().ok())
+    })
+}
+
+fn parse_battery(text: &str) -> Option<u8> {
+    text.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("level:")
+            .and_then(|value| value.trim().parse::<u8>().ok())
+    })
+}
+
+fn parse_storage_gb(text: &str) -> Option<f32> {
+    let line = text.lines().filter(|line| !line.trim().is_empty()).last()?;
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let kb = fields.get(1)?.parse::<f64>().ok()?;
+    Some((kb / 1024.0 / 1024.0 * 10.0).round() as f32 / 10.0)
+}
+
+fn query_device_specs(app: &tauri::AppHandle, serial: &str, model: &str) -> DeviceSpecs {
+    let mem = shell(app, serial, &["cat", "/proc/meminfo"]).unwrap_or_default();
+    let ram_gb = parse_first_u64(&mem, "MemTotal:")
+        .map(|kb| (kb as f32 / 1024.0 / 1024.0 * 10.0).round() / 10.0);
+
+    let storage = shell(app, serial, &["df", "-k", "/data"]).unwrap_or_default();
+    let storage_gb = parse_storage_gb(&storage);
+
+    let battery = shell(app, serial, &["dumpsys", "battery"]).unwrap_or_default();
+    let battery_percent = parse_battery(&battery);
+
+    let size = shell(app, serial, &["wm", "size"]).unwrap_or_default();
+    let screen_resolution = size.lines()
+        .find(|line| line.trim().starts_with("Physical size:"))
+        .and_then(|line| line.split(':').nth(1))
+        .map(|value| value.trim().to_string());
+
+    let density = shell(app, serial, &["wm", "density"]).unwrap_or_default()
+        .lines()
+        .find(|line| line.trim().starts_with("Physical density:"))
+        .and_then(|line| line.split(':').nth(1))
+        .and_then(|value| value.trim().parse::<u32>().ok());
+
+    let lower = model.to_ascii_lowercase();
+    let a35 = lower.contains("sm-a356") || lower.contains("galaxy a35");
+    let mut cpu = getprop(app, serial, "ro.soc.model");
+    if cpu.is_empty() { cpu = getprop(app, serial, "ro.board.platform"); }
+
+    let (announced, dimensions, weight_g, cpu) = if a35 {
+        (
+            Some("March 11, 2024".to_string()),
+            Some("161.7 × 78.0 × 8.2 mm".to_string()),
+            Some(209),
+            Some("Samsung Exynos 1380".to_string()),
+        )
+    } else { (None, None, None, cpu) };
+
+    DeviceSpecs { cpu, ram_gb, storage_gb, battery_percent, screen_resolution, density, announced, dimensions, weight_g }
+}
+
 fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
-    let text = adb_call(app, &["devices", "-l"])?;
+    let _ = adb_call(app, &["start-server"]);
+    let mut text = adb_call(app, &["devices", "-l"])?;
+    if !text.lines().any(|line| {
+        let line = line.trim();
+        !line.is_empty() && !line.starts_with("*") && !line.starts_with("List of devices")
+    }) {
+        thread::sleep(Duration::from_millis(300));
+        text = adb_call(app, &["devices", "-l"])?;
+    }
     let mut devices = Vec::new();
 
     for line in text.lines().skip(1) {
@@ -410,6 +481,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
+                specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None },
                 notes: vec![
                     "Accept the USB debugging authorization prompt on the phone."
                         .to_string(),
@@ -432,6 +504,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
+                specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None },
                 notes: vec!["ADB reports the device as offline.".to_string()],
             });
             continue;
@@ -451,6 +524,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
+                specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None },
                 notes: vec![format!("ADB state: {raw_state}")],
             });
             continue;
@@ -479,6 +553,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             );
         }
 
+        let specs = query_device_specs(app, &serial, &model);
         let (state, support_level) = if cellbroadcast_package.is_none() {
             notes.push("No CellBroadcast receiver package was detected.".to_string());
             (DeviceState::Unsupported, SupportLevel::Unsupported)
@@ -509,6 +584,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             cellbroadcast_package,
             state,
             support_level,
+            specs,
             notes,
         });
     }
@@ -834,6 +910,25 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
         version: "2.0.0".to_string(),
         adb_source: source,
         injector: injector_path(&app).is_some(),
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AdbDiagnostics {
+    pub source: String,
+    pub version: String,
+    pub server: String,
+    pub devices_raw: String,
+}
+
+#[tauri::command]
+fn adb_diagnostics(app: tauri::AppHandle) -> Result<AdbDiagnostics, String> {
+    let (path, source) = adb_path(&app);
+    Ok(AdbDiagnostics {
+        source: format!("{source} · {}", path.display()),
+        version: command_output(&app, &["version"]).map(|out| output_text(&out)).unwrap_or_else(|e| e),
+        server: adb_call(&app, &["start-server"]).unwrap_or_else(|e| e),
+        devices_raw: adb_call(&app, &["devices", "-l"]).unwrap_or_else(|e| e),
     })
 }
 
@@ -1174,6 +1269,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            adb_diagnostics,
             list_devices,
             open_android_settings,
             send_test_alert,

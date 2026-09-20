@@ -1,7 +1,7 @@
 {
   "$schema":"https://schema.tauri.app/config/2",
   "productName":"Emergency Simulator",
-  "version":"2.0.0",
+  "version":"1.0.0",
   "identifier":"com.tirod.emergency-simulator",
   "build":{"frontendDist":"../src"},
   "app":{
@@ -23,7 +23,7 @@
   "bundle":{
     "active":true,
     "targets":["nsis"],
-    "icon":["icons/icon.png"],
+    "icon":["icons/icon.ico","icons/icon.png"],
     "resources":[
       "../android/alertinject/out/alertinject.jar",
       "../packaging/platform-tools/adb.exe",

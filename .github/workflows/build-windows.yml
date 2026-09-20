@@ -51,17 +51,15 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
-      - name: Install icon build dependency
+      - name: Generate application icon set
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check pillow
-      - name: Generate crisp application icons
-        shell: pwsh
-        run: python tools/make_icon.py
+        run: npx tauri icon src-tauri/icons/icon.svg
       - name: Validate generated icons
         shell: pwsh
         run: |
-          if (-not (Test-Path "src-tauri/icons/icon.ico")) { throw "icon.ico was not generated." }
-          if (-not (Test-Path "src-tauri/icons/icon.png")) { throw "icon.png was not generated." }
+          foreach ($p in @("src-tauri/icons/icon.ico","src-tauri/icons/icon.png","src-tauri/icons/32x32.png","src-tauri/icons/128x128.png","src-tauri/icons/128x128@2x.png")) {
+            if (-not (Test-Path $p)) { throw "Missing generated icon: $p" }
+          }
       - name: Stage Android Platform Tools
         shell: pwsh
         run: |
@@ -95,18 +93,18 @@ jobs:
           if (-not $app) { throw "Tauri application EXE was not produced." }
           if (-not $setup) { throw "Tauri NSIS installer was not produced." }
           New-Item -ItemType Directory -Path release-output -Force | Out-Null
-          Copy-Item $app.FullName "release-output\Emergency-Simulator-v2.0.0.exe" -Force
+          Copy-Item $app.FullName "release-output\Emergency-Simulator-v1.0.0.exe" -Force
           Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Force
           Get-Item "release-output\*.exe" | Format-Table Name,Length
       - name: Report hashes
         shell: pwsh
         run: |
-          Get-FileHash "release-output\Emergency-Simulator-v2.0.0.exe" -Algorithm SHA256 | Format-List
+          Get-FileHash "release-output\Emergency-Simulator-v1.0.0.exe" -Algorithm SHA256 | Format-List
           Get-FileHash "release-output\Emergency-Simulator-Setup-2.0.0.exe" -Algorithm SHA256 | Format-List
       - name: Upload release outputs
         uses: actions/upload-artifact@v7
         with:
-          name: Emergency-Simulator-v2-windows
+          name: Emergency-Simulator-v1-windows
           path: release-output
           if-no-files-found: error
           retention-days: 30
@@ -117,9 +115,14 @@ jobs:
     if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     steps:
+      - name: Remove obsolete v2.0.0 release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete v2.0.0 --cleanup-tag --yes || true
       - uses: actions/download-artifact@v8
         with:
-          name: Emergency-Simulator-v2-windows
+          name: Emergency-Simulator-v1-windows
           path: release-assets
       - name: Publish v2.0.0
         uses: softprops/action-gh-release@v3
@@ -128,5 +131,5 @@ jobs:
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: |
-            release-assets/Emergency-Simulator-v2.0.0.exe
+            release-assets/Emergency-Simulator-v1.0.0.exe
             release-assets/Emergency-Simulator-Setup-2.0.0.exe
