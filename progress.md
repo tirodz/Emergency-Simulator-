@@ -5,6 +5,20 @@
 
 ## Current status
 
+**Mission 3 remains blocked on physical A35 evidence.** The existing A35-RO-001 batch is still the
+next device action; no phone-side command has been executed by this session.
+
+**Controlled-path hardening just completed on branch `fix/controlled-oem-path-and-capability-ui`.**
+The Android injector no longer hardcodes Google's CellBroadcast package. The Rust controller discovers
+the receiver package and passes it into the injector, with package validation on the Android side.
+CI now rebuilds the injector from current source before packaging, so the Windows artifact cannot
+silently contain an outdated injector binary.
+
+The desktop gate now labels a non-root target **ROOT REQUIRED** and exposes the blocking reason on
+the SEND button tooltip. This is a UX clarification, not a security bypass.
+
+## Current status
+
 **Mission 3 — the stock-device question — STARTED. The evidence batch is served and waiting on the
 operator.**
 
