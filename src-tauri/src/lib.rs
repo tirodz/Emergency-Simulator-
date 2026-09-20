@@ -471,7 +471,7 @@ fn query_device_specs(app: &tauri::AppHandle, serial: &str, model: &str) -> Devi
     };
 
     DeviceSpecs {
-        cpu,
+        cpu: (!cpu.is_empty()).then_some(cpu),
         ram_gb,
         storage_gb,
         battery_percent,
