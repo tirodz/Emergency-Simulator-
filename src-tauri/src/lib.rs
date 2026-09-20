@@ -444,14 +444,13 @@ fn query_device_specs(app: &tauri::AppHandle, serial: &str, model: &str) -> Devi
     let mut cpu = getprop(app, serial, "ro.soc.model");
     if cpu.is_empty() { cpu = getprop(app, serial, "ro.board.platform"); }
 
-    let (announced, dimensions, weight_g, cpu) = if a35 {
+    let (announced, dimensions, weight_g) = if a35 {
         (
             Some("March 11, 2024".to_string()),
             Some("161.7 × 78.0 × 8.2 mm".to_string()),
             Some(209),
-            Some("Samsung Exynos 1380".to_string()),
         )
-    } else { (None, None, None, cpu) };
+    } else { (None, None, None) };
 
     DeviceSpecs { cpu, ram_gb, storage_gb, battery_percent, screen_resolution, density, announced, dimensions, weight_g }
 }
