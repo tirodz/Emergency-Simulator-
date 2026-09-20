@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Verify
+      - name: Verify source contract
         shell: bash
         run: |
           set -e
@@ -34,6 +34,31 @@ jobs:
           grep -q "adb_diagnostics" src/index.html
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
+      - name: Validate embedded JavaScript syntax
+        shell: bash
+        run: |
+          set -e
+          python - <<'PY'
+          from pathlib import Path
+          text = Path("src/index.html").read_text(encoding="utf-8")
+          scripts = []
+          marker = "<script>"
+          end = "</script>"
+          pos = 0
+          while True:
+              start = text.find(marker, pos)
+              if start < 0:
+                  break
+              finish = text.find(end, start + len(marker))
+              if finish < 0:
+                  raise SystemExit("Unclosed script tag")
+              scripts.append(text[start + len(marker):finish])
+              pos = finish + len(end)
+          if not scripts:
+              raise SystemExit("No inline script found")
+          Path("frontend-check.js").write_text(scripts[-1], encoding="utf-8")
+          PY
+          node --check frontend-check.js
 
   build:
     name: Build Windows app and installer
@@ -51,13 +76,19 @@ jobs:
       - name: Install frontend dependencies
         shell: pwsh
         run: npm install
-      - name: Generate application icon set
+      - name: Generate Windows icon set from SVG
         shell: pwsh
         run: npx tauri icon src-tauri/icons/icon.svg
       - name: Validate generated icons
         shell: pwsh
         run: |
-          foreach ($p in @("src-tauri/icons/icon.ico","src-tauri/icons/icon.png","src-tauri/icons/32x32.png","src-tauri/icons/128x128.png","src-tauri/icons/128x128@2x.png")) {
+          foreach ($p in @(
+            "src-tauri/icons/icon.ico",
+            "src-tauri/icons/icon.png",
+            "src-tauri/icons/32x32.png",
+            "src-tauri/icons/128x128.png",
+            "src-tauri/icons/128x128@2x.png"
+          )) {
             if (-not (Test-Path $p)) { throw "Missing generated icon: $p" }
           }
       - name: Stage Android Platform Tools

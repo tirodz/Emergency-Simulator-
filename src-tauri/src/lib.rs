@@ -39,6 +39,19 @@ pub enum SupportLevel {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct DeviceSpecs {
+    pub cpu: Option<String>,
+    pub ram_gb: Option<f32>,
+    pub storage_gb: Option<f32>,
+    pub battery_percent: Option<u8>,
+    pub screen_resolution: Option<String>,
+    pub density: Option<u32>,
+    pub announced: Option<String>,
+    pub dimensions: Option<String>,
+    pub weight_g: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Device {
     pub serial: String,
     pub model: Option<String>,
@@ -52,6 +65,7 @@ pub struct Device {
     pub cellbroadcast_package: Option<String>,
     pub state: DeviceState,
     pub support_level: SupportLevel,
+    pub specs: DeviceSpecs,
     pub notes: Vec<String>,
 }
 
