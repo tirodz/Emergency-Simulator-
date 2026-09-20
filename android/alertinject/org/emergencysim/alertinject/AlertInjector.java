@@ -36,8 +36,6 @@ import java.lang.reflect.Method;
  */
 public final class AlertInjector {
 
-    private static final String TARGET_PACKAGE = "com.google.android.cellbroadcastreceiver";
-
     /** Note: "provider.action", not "provider.Telephony". A wrong string is a silent no-op. */
     private static final String ACTION_EMERGENCY =
             "android.provider.action.SMS_EMERGENCY_CB_RECEIVED";
@@ -58,13 +56,20 @@ public final class AlertInjector {
     }
 
     public static void main(String[] args) {
-        if (args.length < 1) {
-            System.err.println("usage: AlertInjector <serviceCategory> [body]");
+        if (args.length < 2) {
+            System.err.println("usage: AlertInjector <serviceCategory> <cellBroadcastPackage> [body]");
             System.err.println("  the body must begin with TEST (this is enforced)");
             System.exit(2);
         }
 
         int serviceCategory;
+        String targetPackage = args[1];
+        if (!isAllowedTargetPackage(targetPackage)) {
+            System.err.println("FATAL: refusing invalid CellBroadcast target package: " + targetPackage);
+            System.exit(4);
+            return;
+        }
+
         try {
             serviceCategory = Integer.parseInt(args[0]);
         } catch (NumberFormatException e) {
@@ -73,8 +78,8 @@ public final class AlertInjector {
             return;
         }
 
-        String body = args.length > 1
-                ? args[1]
+        String body = args.length > 2
+                ? args[2]
                 : "TEST ALERT - SIMULATION. Emergency Simulator development harness.";
 
         if (!body.startsWith("TEST")) {
@@ -91,6 +96,7 @@ public final class AlertInjector {
             System.out.println("  serviceCategory = " + serviceCategory);
             System.out.println("  warningType     = " + ETWS_WARNING_TYPE_TEST_MESSAGE
                     + " (ETWS TEST MESSAGE)");
+            System.out.println("  targetPackage   = " + targetPackage);
             System.out.println("  subId           = " + subId);
             System.out.println("  body            = " + body);
 
@@ -100,11 +106,11 @@ public final class AlertInjector {
             System.out.println("  context         = " + context);
 
             Intent intent = new Intent(ACTION_EMERGENCY);
-            intent.setPackage(TARGET_PACKAGE);
+            intent.setPackage(targetPackage);
             intent.putExtra(EXTRA_MESSAGE, (android.os.Parcelable) message);
 
             context.sendBroadcast(intent);
-            System.out.println("AlertInjector: broadcast sent to " + TARGET_PACKAGE);
+            System.out.println("AlertInjector: broadcast sent to " + targetPackage);
 
             // Give the receiver a moment to log before this process exits.
             Thread.sleep(3000L);
@@ -115,6 +121,19 @@ public final class AlertInjector {
             t.printStackTrace(System.err);
             System.exit(1);
         }
+    }
+
+    private static boolean isAllowedTargetPackage(String packageName) {
+        if (packageName == null || packageName.isEmpty() || packageName.length() > 128) {
+            return false;
+        }
+        for (int i = 0; i < packageName.length(); i++) {
+            char c = packageName.charAt(i);
+            if (!(Character.isLetterOrDigit(c) || c == '.' || c == '_')) {
+                return false;
+            }
+        }
+        return packageName.toLowerCase(java.util.Locale.ROOT).contains("cellbroadcast");
     }
 
     /**
