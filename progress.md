@@ -680,4 +680,4 @@ The previous v1.1.0 GitHub release is no longer present.
 
 ## Final v1.0.0 finish
 
-The production branch now uses a dedicated Devices workspace rather than scrolling the Overview when Devices is clicked. The workspace is populated from the Rust/ADB backend and includes a local Samsung PNG hardware reference plus live read-only device metrics. The Windows build generates its icon set from the simple SVG source using Tauri's supported icon pipeline. The release workflow removes the obsolete v2.0.0 release/tag before publishing v1.0.0.
+The production desktop path is Tauri 2 + Rust + HTML/CSS/JavaScript. The Devices workspace is a dedicated device screen backed by the Rust/ADB layer and displays live read-only hardware information plus a local Samsung device PNG. Stock Galaxy A35 firmware is treated as diagnostic-only; production user builds are never restarted as root. The release workflow validates JavaScript, builds Windows + NSIS, then deletes the obsolete v2.0.0 release before publishing v1.0.0.
