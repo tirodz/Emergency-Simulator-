@@ -54,7 +54,7 @@ pub struct DeviceSpecs {
     pub storage_options: Option<String>,
     pub display_profile: Option<String>,
     pub battery_capacity_mah: Option<u32>,
-
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Device {
@@ -289,7 +289,9 @@ fn adb_path(app: &tauri::AppHandle) -> (PathBuf, String) {
     if let Some(path) = resource_candidate(
         app,
         &[
+            "adb/adb.exe",
             "adb.exe",
+            "_up_/packaging/platform-tools/adb.exe",
             "platform-tools/adb.exe",
             "packaging/platform-tools/adb.exe",
         ],
@@ -791,7 +793,9 @@ fn injector_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     resource_candidate(
         app,
         &[
+            "android/alertinject.jar",
             "alertinject.jar",
+            "_up_/android/alertinject/out/alertinject.jar",
             "android/alertinject/out/alertinject.jar",
             "alertinject/alertinject.jar",
         ],

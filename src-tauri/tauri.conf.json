@@ -24,12 +24,12 @@
     "active":true,
     "targets":["nsis"],
     "icon":["icons/icon.ico","icons/icon.png"],
-    "resources":[
-      "../android/alertinject/out/alertinject.jar",
-      "../packaging/platform-tools/adb.exe",
-      "../packaging/platform-tools/AdbWinApi.dll",
-      "../packaging/platform-tools/AdbWinUsbApi.dll"
-    ],
+    "resources":{
+      "../android/alertinject/out/alertinject.jar":"android/alertinject.jar",
+      "../packaging/platform-tools/adb.exe":"adb/adb.exe",
+      "../packaging/platform-tools/AdbWinApi.dll":"adb/AdbWinApi.dll",
+      "../packaging/platform-tools/AdbWinUsbApi.dll":"adb/AdbWinUsbApi.dll"
+    },
     "windows":{"nsis":{"installMode":"currentUser","displayLanguageSelector":false}}
   }
 }
