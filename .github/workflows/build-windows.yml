@@ -29,7 +29,7 @@ jobs:
         uses: android-actions/setup-android@v3
       - name: Install Android build tools
         shell: bash
-        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
       - name: Build injector from source
         shell: bash
         env:
@@ -66,6 +66,9 @@ jobs:
           grep -q "adb_diagnostics" src/index.html
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
+          grep -q "send_test_alert" src-tauri/src/lib.rs
+          grep -q "&package," src-tauri/src/lib.rs
+          grep -q "targetPackage" android/alertinject/org/emergencysim/alertinject/AlertInjector.java
       - name: Validate embedded JavaScript syntax
         shell: bash
         run: |
