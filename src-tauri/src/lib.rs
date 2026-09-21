@@ -519,6 +519,90 @@ fn query_device_specs(app: &tauri::AppHandle, serial: &str, model: &str) -> Devi
     }
 }
 
+fn local_simulator_installed(app: &tauri::AppHandle, serial: &str) -> bool {
+    shell(app, serial, &["pm", "path", LOCAL_SIMULATOR_PACKAGE])
+        .map(|text| text.lines().any(|line| line.trim_start().starts_with("package:")))
+        .unwrap_or(false)
+}
+
+fn local_simulator_apk_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    resource_candidate(
+        app,
+        &[
+            "android/local-simulator.apk",
+            "local-simulator.apk",
+            "_up_/android/local-simulator/app/build/outputs/apk/debug/app-debug.apk",
+            "android/local-simulator/app/build/outputs/apk/debug/app-debug.apk",
+        ],
+    )
+}
+
+fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<String, String> {
+    let apk = local_simulator_apk_path(app)
+        .ok_or_else(|| "The bundled local Android simulator APK is missing from this build.".to_string())?;
+    adb_call(app, &["-s", serial, "install", "-r", "-d", &apk.to_string_lossy()])?;
+    let _ = shell(app, serial, &["pm", "grant", LOCAL_SIMULATOR_PACKAGE, "android.permission.POST_NOTIFICATIONS"]);
+    let _ = shell(app, serial, &["appops", "set", LOCAL_SIMULATOR_PACKAGE, "USE_FULL_SCREEN_INTENT", "allow"]);
+    if !local_simulator_installed(app, serial) {
+        return Err("ADB reported a successful install, but the local simulator package is not present.".to_string());
+    }
+    Ok("Local Android alert simulator installed.".to_string())
+}
+
+fn local_simulator_command_script(title: &str, body: &str, severity: &str, category: u32) -> String {
+    format!(
+        "am broadcast --receiver-foreground -a {action} -n {component} --es title {title} --es message {body} --es severity {severity} --es category {category}",
+        action = sh_quote("com.tirodz.emergencysimulator.TRIGGER_ALERT"),
+        component = sh_quote("com.tirodz.emergencysimulator/.AlertReceiver"),
+        title = sh_quote(title),
+        body = sh_quote(body),
+        severity = sh_quote(severity),
+        category = sh_quote(&category.to_string()),
+    )
+}
+
+fn collect_local_simulator_evidence(
+    app: &tauri::AppHandle,
+    serial: &str,
+    cancel: &CancelStore,
+    result: &mut SendResult,
+    tx: &TxStore,
+) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if cancel_requested(cancel, serial) {
+            result.state = "CANCELLED".to_string();
+            result.failure = Some("USER_CANCELLED".to_string());
+            result.message = "Stop requested while waiting for local simulator evidence.".to_string();
+            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(750));
+        let dump = shell(app, serial, &["logcat", "-d", "-t", "1500"]).unwrap_or_default();
+        for (needle, label) in [
+            ("AlertReceiver.onReceive", "AlertReceiver.onReceive"),
+            ("AlertNotificationHelper.notify", "AlertNotificationHelper.notify"),
+            ("EmergencyActivity.onCreate/onNewIntent", "EmergencyActivity.onCreate/onNewIntent"),
+            ("Alert audio/vibration started", "Alert audio/vibration started"),
+        ] {
+            if dump.contains(needle) && !result.evidence.iter().any(|e| e == label) {
+                result.evidence.push(label.to_string());
+            }
+        }
+        if dump.contains("AlertReceiver.onReceive") && dump.contains("AlertNotificationHelper.notify") {
+            result.state = "ALERT_DISPLAYED".to_string();
+            result.message = "Local Emergency Simulator alert UI was accepted by the companion receiver and notification pipeline.".to_string();
+            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Delivered);
+            return Ok(());
+        }
+    }
+    result.state = "RECEIVED_BY_LOCAL_SIMULATOR".to_string();
+    result.failure = Some("LOCAL_UI_EVIDENCE_TIMEOUT".to_string());
+    result.message = "The local simulator receiver was not observed through logcat before timeout. Check notification/full-screen access on the phone.".to_string();
+    tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
+    Ok(())
+}
+
 fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
     let _ = adb_call(app, &["start-server"]);
     let mut text = adb_call(app, &["devices", "-l"])?;
