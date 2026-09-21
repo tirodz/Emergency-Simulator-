@@ -180,7 +180,9 @@ visual system. The next milestones, in order:
 ## Last known working state
 
 * **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `c69bdaa` at the start of
-  this session; the work below is on a new branch.
+  this session.
+* **Active branch:** `fix/verified-local-simulator-pipeline`, pushed, **PR #6**, CI green (4/4,
+  including `cargo test --lib` on the real Windows runner: 15/15 pass).
 * **Build:** `npx tauri build --ci`; CI `.github/workflows/build-windows.yml` builds on
   `windows-latest` and produces the app, the NSIS installer and the release artifacts.
 * **Tests:** `cargo test --manifest-path src-tauri/Cargo.toml --lib --locked` (**15 tests**, no
