@@ -18,11 +18,13 @@ const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
 const INJECTOR_CLASS: &str = "org.emergencysim.alertinject.AlertInjector";
 const INJECTOR_REMOTE: &str = "/data/local/tmp/alertinject.jar";
 const EVIDENCE_TIMEOUT_SECS: u64 = 45;
+const LOCAL_SIMULATOR_PACKAGE: &str = "com.tirodz.emergencysimulator";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeviceState {
     Ready,
+    SimulatorReady,
     Unauthorized,
     Offline,
     NoRoot,
@@ -34,6 +36,7 @@ pub enum DeviceState {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SupportLevel {
     Supported,
+    LocalSimulator,
     RootRequired,
     Untested,
     Unsupported,
@@ -69,6 +72,7 @@ pub struct Device {
     pub root: bool,
     pub cellbroadcast_package: Option<String>,
     pub cellbroadcast_candidates: Vec<String>,
+    pub local_simulator: bool,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -553,6 +557,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -577,6 +582,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -598,6 +604,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -617,6 +624,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let root = is_root(app, &serial, &build_type);
         let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
         let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
+        let local_simulator = local_simulator_installed(app, &serial);
 
         let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356")
             || model.to_ascii_lowercase().contains("galaxy a35");
@@ -631,21 +639,24 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         }
 
         let specs = query_device_specs(app, &serial, &model);
-        let (state, support_level) = if cellbroadcast_package.is_none() {
-            notes.push("No CellBroadcast receiver package was detected.".to_string());
-            (DeviceState::Unsupported, SupportLevel::Unsupported)
-        } else if !root {
-            notes.push(
-                "Stock/non-root device. The protected CellBroadcast injection path is not demonstrated on this production build."
-                    .to_string(),
-            );
-            (DeviceState::NoRoot, SupportLevel::RootRequired)
-        } else {
+        let (state, support_level) = if local_simulator {
+            notes.push("Root-free local simulator is installed. Send uses our explicit test receiver and notification/full-screen pipeline.".to_string());
+            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
+        } else if root && cellbroadcast_package.is_some() {
             notes.push(
                 "Rooted/userdebug controlled target. The genuine Android CellBroadcast test path is available."
                     .to_string(),
             );
             (DeviceState::Ready, SupportLevel::Supported)
+        } else if cellbroadcast_package.is_none() {
+            notes.push("No CellBroadcast receiver package was detected. Install the local simulator to test alert UI on a stock device.".to_string());
+            (DeviceState::Unsupported, SupportLevel::Unsupported)
+        } else {
+            notes.push(
+                "Stock/non-root device. Install the bundled local simulator to test alert UI without root."
+                    .to_string(),
+            );
+            (DeviceState::NoRoot, SupportLevel::RootRequired)
         };
 
         devices.push(Device {
@@ -660,6 +671,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             root,
             cellbroadcast_package,
             cellbroadcast_candidates,
+            local_simulator,
             state,
             support_level,
             specs,
