@@ -62,7 +62,11 @@ that produced each number recorded next to it.
 The local simulator path is **CONFIRMED** on a `userdebug` emulator: a root-free app produces a real
 full-screen Android alert UI with sound and vibration. It is still **not** a CellBroadcast path — it
 never touches `SMS_CB_RECEIVED` and no radio is involved. The stock-device claim remains exactly as
-bounded as before, and `README.md` needs no change.
+bounded as before.
+
+`README.md` did not mention the simulator at all, which is what let the boundary stay ambiguous to a
+reader. It now documents it plainly: what it is, what it is not, and the two Android 14+ behaviours
+that decide what the operator sees. The stock-device claim itself was not weakened or strengthened.
 
 Two limits found on the emulator image and recorded rather than worked around: it ships **no ringtone
 media at all** (`/system/media/audio/` is absent, `alarm_alert` and `notification_sound` are both
