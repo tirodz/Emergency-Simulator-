@@ -53,7 +53,7 @@ locations with `ANDROID_HOME` and `JAVA_HOME`. Produces `out/alertinject.jar`.
 
 ```bash
 ./run.sh                              # ETWS test channel, default body
-./run.sh 4355 "TEST ALERT - SIMULATION"
+./run.sh 4355 com.google.android.cellbroadcastreceiver "TEST ALERT - SIMULATION"
 ```
 
 Or by hand:
@@ -61,8 +61,9 @@ Or by hand:
 ```bash
 adb root
 adb push out/alertinject.jar /data/local/tmp/
+CB_PACKAGE="$(adb shell pm list packages | sed -n 's/^package://p' | grep -i cellbroadcast | grep -i receiver | head -n 1 | tr -d '\r')"
 adb shell "CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin \
-    org.emergencysim.alertinject.AlertInjector 4355 'TEST ALERT - SIMULATION'"
+    org.emergencysim.alertinject.AlertInjector 4355 '$CB_PACKAGE' 'TEST ALERT - SIMULATION'"
 ```
 
 Watch what the system does with it:

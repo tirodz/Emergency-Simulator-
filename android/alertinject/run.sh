@@ -23,10 +23,20 @@ REMOTE=/data/local/tmp/alertinject.jar
 
 # ETWS test channel 0x1103 == 4355. It is the only channel alertinject is meant to be used with.
 CATEGORY="${1:-4355}"
-BODY="${2:-TEST ALERT - SIMULATION}"
+TARGET_PACKAGE="${2:-}"
+BODY="${3:-TEST ALERT - SIMULATION}"
 
 if [ ! -f "$JAR" ]; then
   echo "error: $JAR not found; run build.sh first" >&2
+  exit 1
+fi
+
+if [ -z "$TARGET_PACKAGE" ]; then
+  TARGET_PACKAGE="$(adb shell pm list packages | sed -n 's/^package://p' | grep -i cellbroadcast | grep -i receiver | head -n 1 | tr -d '\r')"
+fi
+
+if [ -z "$TARGET_PACKAGE" ]; then
+  echo "error: no CellBroadcast receiver package was detected" >&2
   exit 1
 fi
 
@@ -43,7 +53,8 @@ echo "==> pushing $JAR"
 adb push "$JAR" "$REMOTE" >/dev/null
 
 echo "==> injecting category=$CATEGORY"
+echo "    target: $TARGET_PACKAGE"
 echo "    body: $BODY"
 echo
 adb shell "CLASSPATH=$REMOTE app_process /system/bin \
-    org.emergencysim.alertinject.AlertInjector '$CATEGORY' '$BODY'"
+    org.emergencysim.alertinject.AlertInjector '$CATEGORY' '$TARGET_PACKAGE' '$BODY'"

@@ -366,11 +366,25 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 fn find_cellbroadcast(app: &tauri::AppHandle, serial: &str) -> Option<String> {
     let text = shell(app, serial, &["pm", "list", "packages"]).ok()?;
 
-    text.lines()
+    let mut packages = text.lines()
         .map(str::trim)
         .filter_map(|line| line.strip_prefix("package:"))
-        .find(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
+        .filter(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
         .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    packages.sort_by_key(|package| {
+        let lower = package.to_ascii_lowercase();
+        if lower.contains("cellbroadcastreceiver") {
+            0
+        } else if lower.contains("cellbroadcast") {
+            1
+        } else {
+            2
+        }
+    });
+
+    packages.into_iter().next()
 }
 
 fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
@@ -954,7 +968,7 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let (_, source) = adb_path(&app);
 
     Ok(AppInfo {
-        version: "2.0.0".to_string(),
+        version: "1.0.0".to_string(),
         adb_source: source,
         injector: injector_path(&app).is_some(),
     })
@@ -1272,6 +1286,7 @@ async fn send_test_alert(
                 "/system/bin",
                 INJECTOR_CLASS,
                 &category,
+                &package,
                 &normalized_body,
             ],
         )?;

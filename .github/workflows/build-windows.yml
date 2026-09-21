@@ -15,6 +15,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-injector:
+    name: Build Android test injector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0"
+      - name: Build injector from source
+        shell: bash
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          JAVA_HOME: ${{ env.JAVA_HOME }}
+        run: bash android/alertinject/build.sh
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Emergency-Simulator-alertinject
+          path: android/alertinject/out/alertinject.jar
+          if-no-files-found: error
+          retention-days: 7
+
   verify:
     name: Verify desktop contract
     runs-on: ubuntu-latest
@@ -38,6 +65,9 @@ jobs:
           grep -q "adb_diagnostics" src/index.html
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
+          grep -q "send_test_alert" src-tauri/src/lib.rs
+          grep -q "&package," src-tauri/src/lib.rs
+          grep -q "targetPackage" android/alertinject/org/emergencysim/alertinject/AlertInjector.java
       - name: Validate embedded JavaScript syntax
         shell: bash
         run: |
@@ -57,7 +87,7 @@ jobs:
     name: Build Windows app and installer
     runs-on: windows-latest
     timeout-minutes: 20
-    needs: verify
+    needs: [verify, build-injector]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
@@ -98,6 +128,11 @@ jobs:
           Copy-Item "$env:TEMP\pt\platform-tools\AdbWinUsbApi.dll" -Destination "$stage\AdbWinUsbApi.dll" -Force
           & "$stage\adb.exe" start-server
           & "$stage\adb.exe" devices -l
+      - name: Download Android injector
+        uses: actions/download-artifact@v8
+        with:
+          name: Emergency-Simulator-alertinject
+          path: android/alertinject/out
       - name: Verify Android injector
         shell: pwsh
         run: |
@@ -130,11 +165,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     steps:
-      - name: Remove obsolete v2.0.0 release and tag
+      - name: Replace obsolete releases and tags
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete v2.0.0 --cleanup-tag --yes || true
+        run: |
+          gh release delete v2.0.0 --cleanup-tag --yes || true
+          gh release delete v1.0.0 --cleanup-tag --yes || true
       - uses: actions/download-artifact@v8
         with:
           name: Emergency-Simulator-v1-windows
