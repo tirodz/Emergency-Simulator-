@@ -15,6 +15,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  build-local-simulator:
+    name: Build root-free local Android simulator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+      - name: Build Android local simulator
+        working-directory: android/local-simulator
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Emergency-Simulator-local-simulator-apk
+          path: android/local-simulator/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
+
   build-injector:
     name: Build Android test injector
     runs-on: ubuntu-latest
@@ -89,7 +117,7 @@ jobs:
     name: Build Windows app and installer
     runs-on: windows-latest
     timeout-minutes: 20
-    needs: [verify, build-injector]
+    needs: [verify, build-injector, build-local-simulator]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
@@ -135,10 +163,16 @@ jobs:
         with:
           name: Emergency-Simulator-alertinject
           path: android/alertinject/out
-      - name: Verify Android injector
+      - name: Download local simulator APK
+        uses: actions/download-artifact@v8
+        with:
+          name: Emergency-Simulator-local-simulator-apk
+          path: android/local-simulator/app/build/outputs/apk/debug
+      - name: Verify packaged Android test components
         shell: pwsh
         run: |
           if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing Android injector JAR." }
+          if (-not (Test-Path "android/local-simulator/app/build/outputs/apk/debug/app-debug.apk")) { throw "Missing root-free local simulator APK." }
       - name: Run desktop controller unit tests
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked

@@ -18,11 +18,13 @@ const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
 const INJECTOR_CLASS: &str = "org.emergencysim.alertinject.AlertInjector";
 const INJECTOR_REMOTE: &str = "/data/local/tmp/alertinject.jar";
 const EVIDENCE_TIMEOUT_SECS: u64 = 45;
+const LOCAL_SIMULATOR_PACKAGE: &str = "com.tirodz.emergencysimulator";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DeviceState {
     Ready,
+    SimulatorReady,
     Unauthorized,
     Offline,
     NoRoot,
@@ -34,6 +36,7 @@ pub enum DeviceState {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SupportLevel {
     Supported,
+    LocalSimulator,
     RootRequired,
     Untested,
     Unsupported,
@@ -69,6 +72,7 @@ pub struct Device {
     pub root: bool,
     pub cellbroadcast_package: Option<String>,
     pub cellbroadcast_candidates: Vec<String>,
+    pub local_simulator: bool,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -515,6 +519,95 @@ fn query_device_specs(app: &tauri::AppHandle, serial: &str, model: &str) -> Devi
     }
 }
 
+fn local_simulator_installed(app: &tauri::AppHandle, serial: &str) -> bool {
+    shell(app, serial, &["pm", "path", LOCAL_SIMULATOR_PACKAGE])
+        .map(|text| text.lines().any(|line| line.trim_start().starts_with("package:")))
+        .unwrap_or(false)
+}
+
+fn local_simulator_apk_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    resource_candidate(
+        app,
+        &[
+            "android/local-simulator.apk",
+            "local-simulator.apk",
+            "_up_/android/local-simulator/app/build/outputs/apk/debug/app-debug.apk",
+            "android/local-simulator/app/build/outputs/apk/debug/app-debug.apk",
+        ],
+    )
+}
+
+fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<String, String> {
+    let apk = local_simulator_apk_path(app)
+        .ok_or_else(|| "The bundled local Android simulator APK is missing from this build.".to_string())?;
+    adb_call(app, &["-s", serial, "install", "-r", "-d", &apk.to_string_lossy()])?;
+    let _ = shell(app, serial, &["pm", "grant", LOCAL_SIMULATOR_PACKAGE, "android.permission.POST_NOTIFICATIONS"]);
+    let _ = shell(app, serial, &["appops", "set", LOCAL_SIMULATOR_PACKAGE, "USE_FULL_SCREEN_INTENT", "allow"]);
+    if !local_simulator_installed(app, serial) {
+        return Err("ADB reported a successful install, but the local simulator package is not present.".to_string());
+    }
+    Ok("Local Android alert simulator installed.".to_string())
+}
+
+fn local_simulator_command_script(title: &str, body: &str, severity: &str, category: u32) -> String {
+    format!(
+        "am broadcast --receiver-foreground -a {action} -n {component} --es title {title} --es message {body} --es severity {severity} --es category {category}",
+        action = sh_quote("com.tirodz.emergencysimulator.TRIGGER_ALERT"),
+        component = sh_quote("com.tirodz.emergencysimulator/.AlertReceiver"),
+        title = sh_quote(title),
+        body = sh_quote(body),
+        severity = sh_quote(severity),
+        category = sh_quote(&category.to_string()),
+    )
+}
+
+fn collect_local_simulator_evidence(
+    app: &tauri::AppHandle,
+    serial: &str,
+    cancel: &CancelStore,
+    result: &mut SendResult,
+    tx: &TxStore,
+) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(8) {
+        if cancel_requested(cancel, serial) {
+            result.state = "CANCELLED".to_string();
+            result.failure = Some("USER_CANCELLED".to_string());
+            result.message = "Stop requested while waiting for local simulator evidence.".to_string();
+            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(750));
+        let dump = shell(app, serial, &["logcat", "-d", "-t", "1500"]).unwrap_or_default();
+        for (needle, label) in [
+            ("AlertReceiver.onReceive", "AlertReceiver.onReceive"),
+            ("AlertNotificationHelper.notify", "AlertNotificationHelper.notify"),
+            ("EmergencyActivity.onCreate/onNewIntent", "EmergencyActivity.onCreate/onNewIntent"),
+            ("Alert audio/vibration started", "Alert audio/vibration started"),
+        ] {
+            if dump.contains(needle) && !result.evidence.iter().any(|e| e == label) {
+                result.evidence.push(label.to_string());
+            }
+        }
+        if dump.contains("AlertReceiver.onReceive") && dump.contains("AlertNotificationHelper.notify") {
+            if dump.contains("EmergencyActivity.onCreate/onNewIntent") {
+                result.state = "ALERT_DISPLAYED".to_string();
+                result.message = "Local alert notification and full-screen activity were observed on the device.".to_string();
+            } else {
+                result.state = "NOTIFICATION_POSTED".to_string();
+                result.message = "Local alert notification was posted. Full-screen activity will be used when Android grants full-screen intent access; the notification itself is tappable.".to_string();
+            }
+            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Delivered);
+            return Ok(());
+        }
+    }
+    result.state = "RECEIVED_BY_LOCAL_SIMULATOR".to_string();
+    result.failure = Some("LOCAL_UI_EVIDENCE_TIMEOUT".to_string());
+    result.message = "The local simulator receiver was not observed through logcat before timeout. Check notification/full-screen access on the phone.".to_string();
+    tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
+    Ok(())
+}
+
 fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
     let _ = adb_call(app, &["start-server"]);
     let mut text = adb_call(app, &["devices", "-l"])?;
@@ -553,6 +646,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -577,6 +671,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -598,6 +693,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 root: false,
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
+                local_simulator: false,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -617,6 +713,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let root = is_root(app, &serial, &build_type);
         let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
         let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
+        let local_simulator = local_simulator_installed(app, &serial);
 
         let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356")
             || model.to_ascii_lowercase().contains("galaxy a35");
@@ -631,21 +728,24 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         }
 
         let specs = query_device_specs(app, &serial, &model);
-        let (state, support_level) = if cellbroadcast_package.is_none() {
-            notes.push("No CellBroadcast receiver package was detected.".to_string());
-            (DeviceState::Unsupported, SupportLevel::Unsupported)
-        } else if !root {
-            notes.push(
-                "Stock/non-root device. The protected CellBroadcast injection path is not demonstrated on this production build."
-                    .to_string(),
-            );
-            (DeviceState::NoRoot, SupportLevel::RootRequired)
-        } else {
+        let (state, support_level) = if local_simulator {
+            notes.push("Root-free local simulator is installed. Send uses our explicit test receiver and notification/full-screen pipeline.".to_string());
+            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
+        } else if root && cellbroadcast_package.is_some() {
             notes.push(
                 "Rooted/userdebug controlled target. The genuine Android CellBroadcast test path is available."
                     .to_string(),
             );
             (DeviceState::Ready, SupportLevel::Supported)
+        } else if cellbroadcast_package.is_none() {
+            notes.push("No CellBroadcast receiver package was detected. Install the local simulator to test alert UI on a stock device.".to_string());
+            (DeviceState::Unsupported, SupportLevel::Unsupported)
+        } else {
+            notes.push(
+                "Stock/non-root device. Install the bundled local simulator to test alert UI without root."
+                    .to_string(),
+            );
+            (DeviceState::NoRoot, SupportLevel::RootRequired)
         };
 
         devices.push(Device {
@@ -660,6 +760,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             root,
             cellbroadcast_package,
             cellbroadcast_candidates,
+            local_simulator,
             state,
             support_level,
             specs,
@@ -1118,6 +1219,11 @@ fn list_devices(app: tauri::AppHandle) -> Result<Vec<Device>, String> {
 }
 
 #[tauri::command]
+fn install_local_simulator_command(app: tauri::AppHandle, serial: String) -> Result<String, String> {
+    install_local_simulator(&app, &serial)
+}
+
+#[tauri::command]
 fn open_android_settings(
     app: tauri::AppHandle,
     serial: String,
@@ -1206,7 +1312,7 @@ async fn send_test_alert(
 
         emit_log(&app, format!("Inspecting target {serial}"), "info");
 
-        let device = parse_devices(&app)?
+        let mut device = parse_devices(&app)?
             .into_iter()
             .find(|device| device.serial == serial)
             .ok_or_else(|| "The selected device is no longer attached.".to_string())?;
@@ -1232,6 +1338,9 @@ async fn send_test_alert(
                 DeviceState::Ready => {
                     "Controlled target is ready. Dry run made no device changes.".to_string()
                 }
+                DeviceState::SimulatorReady => {
+                    "Root-free local simulator is installed. Dry run made no device changes.".to_string()
+                }
             };
 
             emit_log(
@@ -1239,6 +1348,72 @@ async fn send_test_alert(
                 format!("Dry run complete for {serial}; no device changes"),
                 "ok",
             );
+            return Ok(result);
+        }
+
+        if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
+            emit_log(&app, "Stock device detected: installing bundled local alert simulator before send", "info");
+            match install_local_simulator(&app, &serial) {
+                Ok(message) => {
+                    emit_log(&app, message, "ok");
+                    device.local_simulator = true;
+                    device.state = DeviceState::SimulatorReady;
+                    device.support_level = SupportLevel::LocalSimulator;
+                }
+                Err(error) => {
+                    let _ = set_tx(&app, &tx_store, &serial, None);
+                    result.failure = Some("LOCAL_SIMULATOR_INSTALL_FAILED".to_string());
+                    result.message = error.clone();
+                    emit_log(&app, format!("Local simulator install failed: {error}"), "error");
+                    return Ok(result);
+                }
+            }
+        }
+
+        if matches!(device.state, DeviceState::SimulatorReady) {
+            let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
+            emit_log(&app, "Using root-free local Android simulator receiver", "ok");
+
+            let script = local_simulator_command_script(
+                "EMERGENCY SIMULATOR TEST",
+                &normalized_body,
+                "TEST",
+                SERVICE_CATEGORY,
+            );
+            emit_log(&app, "Dispatching explicit local AlertReceiver broadcast", "info");
+
+            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
+                Ok(output) => output,
+                Err(error) => {
+                    let _ = set_tx(&app, &tx_store, &serial, None);
+                    result.failure = Some("ADB_TRANSPORT".to_string());
+                    result.message = error.clone();
+                    emit_log(&app, error, "error");
+                    return Ok(result);
+                }
+            };
+
+            result.injector_exit_code = output.status.code();
+            let output_text_value = output_text(&output);
+            emit_log(&app, format!("Local broadcast: {}", output_text_value.trim()), if output.status.success() { "info" } else { "error" });
+
+            if !output.status.success() {
+                let _ = set_tx(&app, &tx_store, &serial, None);
+                result.failure = Some("LOCAL_BROADCAST_FAILED".to_string());
+                result.message = output_text_value.trim().to_string();
+                return Ok(result);
+            }
+
+            collect_local_simulator_evidence(
+                &app,
+                &serial,
+                &cancel_store,
+                &mut result,
+                &tx_store,
+            )?;
+            clear_cancel(&cancel_store, &serial);
+            let _ = persist_transactions(&app, &tx_store);
+            emit_log(&app, format!("Local simulator result: {}", result.state), if result.state == "ALERT_DISPLAYED" { "ok" } else { "warn" });
             return Ok(result);
         }
 
@@ -1251,6 +1426,7 @@ async fn send_test_alert(
                     DeviceState::Unsupported => "CELLBROADCAST_MISSING",
                     DeviceState::Unknown => "DEVICE_UNKNOWN",
                     DeviceState::Ready => "UNKNOWN",
+                    DeviceState::SimulatorReady => "LOCAL_SIMULATOR",
                 }
                 .to_string(),
             );
@@ -1274,6 +1450,7 @@ async fn send_test_alert(
                     "The device is not in a known ADB-ready state.".to_string()
                 }
                 DeviceState::Ready => "Device is ready.".to_string(),
+                DeviceState::SimulatorReady => "Local Android simulator is ready.".to_string(),
             };
 
             return Ok(result);
@@ -1653,6 +1830,7 @@ pub fn run() {
             adb_connect,
             restart_adb_server,
             list_devices,
+            install_local_simulator_command,
             open_android_settings,
             send_test_alert,
             acknowledge,
