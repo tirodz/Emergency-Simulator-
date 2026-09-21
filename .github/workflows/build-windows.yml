@@ -165,11 +165,13 @@ jobs:
     if: github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     steps:
-      - name: Remove obsolete v2.0.0 release and tag
+      - name: Replace obsolete releases and tags
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release delete v2.0.0 --cleanup-tag --yes || true
+        run: |
+          gh release delete v2.0.0 --cleanup-tag --yes || true
+          gh release delete v1.0.0 --cleanup-tag --yes || true
       - uses: actions/download-artifact@v8
         with:
           name: Emergency-Simulator-v1-windows
