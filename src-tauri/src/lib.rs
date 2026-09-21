@@ -1214,6 +1214,11 @@ fn list_devices(app: tauri::AppHandle) -> Result<Vec<Device>, String> {
 }
 
 #[tauri::command]
+fn install_local_simulator_command(app: tauri::AppHandle, serial: String) -> Result<String, String> {
+    install_local_simulator(&app, &serial)
+}
+
+#[tauri::command]
 fn open_android_settings(
     app: tauri::AppHandle,
     serial: String,
