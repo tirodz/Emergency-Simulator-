@@ -66,7 +66,9 @@ jobs:
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
           grep -q "send_test_alert" src-tauri/src/lib.rs
-          grep -q "&package," src-tauri/src/lib.rs
+          grep -q "injector_command_script" src-tauri/src/lib.rs
+          grep -q "cellbroadcast_candidates" src-tauri/src/lib.rs
+          grep -q "sh_quote" src-tauri/src/lib.rs
           grep -q "targetPackage" android/alertinject/org/emergencysim/alertinject/AlertInjector.java
       - name: Validate embedded JavaScript syntax
         shell: bash
@@ -137,6 +139,9 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing Android injector JAR." }
+      - name: Run desktop controller unit tests
+        shell: pwsh
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
       - name: Build Tauri bundle
         shell: pwsh
         run: npx tauri build --ci

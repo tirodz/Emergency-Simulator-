@@ -33,6 +33,21 @@ import java.lang.reflect.Method;
  *   adb shell CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin \
  *       org.emergencysim.alertinject.AlertInjector 4355 com.google.android.cellbroadcastreceiver "TEST ALERT - SIMULATION"
  * </pre>
+ *
+ * <p><b>Why this needs a system identity and cannot work as an ordinary app or as the ADB shell
+ * user.</b> The target action is a {@code <protected-broadcast>} in the platform manifest, so
+ * {@code ActivityManagerService} requires the <em>sending</em> UID to be one of the accepted system
+ * UIDs (root, system, phone, bluetooth, nfc, se, network_stack) or a persistent app. That check runs
+ * before any permission is consulted, so no permission an app can hold changes the outcome. The ADB
+ * shell runs as {@code uid=2000(shell)}, which is not on that list; {@code app_process} started by
+ * {@code adb shell} without a root or system identity therefore fails with a {@code SecurityException}
+ * at {@code sendBroadcast}, which this class reports rather than swallowing. Shizuku runs its
+ * binder callbacks as the {@code shell} UID, so it does not change this either -- a Shizuku-bound
+ * injector is still {@code uid=2000}. Reaching this pipeline without root requires a component that
+ * is already running as an accepted system UID; the project deliberately does not manufacture one.
+ *
+ * <p>The {@code uid} this process is actually running as is printed in the summary below, so a
+ * failed attempt states its own reason instead of leaving the operator to infer it.
  */
 public final class AlertInjector {
 
@@ -93,6 +108,7 @@ public final class AlertInjector {
             int subId = 0;
 
             System.out.println("AlertInjector: building SmsCbMessage");
+            System.out.println("  uid             = " + currentUid());
             System.out.println("  serviceCategory = " + serviceCategory);
             System.out.println("  warningType     = " + ETWS_WARNING_TYPE_TEST_MESSAGE
                     + " (ETWS TEST MESSAGE)");
@@ -120,6 +136,20 @@ public final class AlertInjector {
             System.err.println("FATAL: " + t);
             t.printStackTrace(System.err);
             System.exit(1);
+        }
+    }
+
+    /**
+     * The UID this process is running as. Printed so a refusal states its own cause: this pipeline
+     * requires one of the platform's accepted system UIDs, and the ADB shell UID (2000) is not one.
+     */
+    private static String currentUid() {
+        try {
+            Class<?> processClass = Class.forName("android.os.Process");
+            Method myUid = processClass.getMethod("myUid");
+            return String.valueOf(myUid.invoke(null));
+        } catch (Throwable ignored) {
+            return "unknown";
         }
     }
 
