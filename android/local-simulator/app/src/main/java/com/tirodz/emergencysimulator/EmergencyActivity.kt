@@ -19,6 +19,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.graphics.Color
 import android.graphics.Typeface
+import android.util.Log
 
 class EmergencyActivity : Activity() {
     private var mediaPlayer: MediaPlayer? = null
