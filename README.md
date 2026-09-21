@@ -59,6 +59,17 @@ A normal retail, unrooted Android phone is not claimed supported. The Android pr
 
 A home Wi-Fi router can transport controller traffic, but it cannot become a Cell Broadcast Centre or make cellular towers transmit.
 
+### What the local simulator does, and does not, do
+
+For a device where the protected path is unavailable, the controller can install a small bundled Android app (`android/local-simulator/`) and trigger it. That app posts a real notification with a real full-screen intent, so the operator sees Android's own alert UI with sound and vibration. It is installed and granted through ADB, so it needs no root.
+
+This is **not** a Cell Broadcast path. The simulator never touches `SMS_CB_RECEIVED`, never claims to be CellBroadcast, and involves no radio or cellular transmission. It exercises the notification and full-screen-alert UI that a real alert would use, which is what makes it useful for testing the alert presentation itself. It does not demonstrate that a retail phone can receive a genuine cell broadcast, and nothing in this project claims otherwise.
+
+Two Android 14+ behaviours are worth knowing before reading a result:
+
+- The full-screen intent is only presented when the screen is off or dozing. With the screen on, Android shows a heads-up notification and does not take over the screen. The controller reports these as two distinct outcomes.
+- `USE_FULL_SCREEN_INTENT` is a special app op that defaults to denied for apps that are not calling or alarm apps. The controller sets it explicitly during install, because otherwise the notification posts successfully and the screen is never taken over.
+
 ## Windows build
 
 ~~~powershell
@@ -74,6 +85,7 @@ The released desktop bundle is self-contained for ADB and the development inject
 src/                       Tauri frontend
 src-tauri/                 Rust/Tauri backend
 android/alertinject/       controlled Android test injector
+android/local-simulator/   root-free local alert simulator (Android app)
 packaging/                 Windows packaging notes
 docs/                      research + design notes
 tools/                     historical/research utilities
