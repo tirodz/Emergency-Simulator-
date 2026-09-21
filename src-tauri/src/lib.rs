@@ -1333,6 +1333,9 @@ async fn send_test_alert(
                 DeviceState::Ready => {
                     "Controlled target is ready. Dry run made no device changes.".to_string()
                 }
+                DeviceState::SimulatorReady => {
+                    "Root-free local simulator is installed. Dry run made no device changes.".to_string()
+                }
             };
 
             emit_log(
