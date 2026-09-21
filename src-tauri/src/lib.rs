@@ -569,7 +569,7 @@ fn collect_local_simulator_evidence(
     tx: &TxStore,
 ) -> Result<(), String> {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(20) {
+    while start.elapsed() < Duration::from_secs(8) {
         if cancel_requested(cancel, serial) {
             result.state = "CANCELLED".to_string();
             result.failure = Some("USER_CANCELLED".to_string());
@@ -590,8 +590,13 @@ fn collect_local_simulator_evidence(
             }
         }
         if dump.contains("AlertReceiver.onReceive") && dump.contains("AlertNotificationHelper.notify") {
-            result.state = "ALERT_DISPLAYED".to_string();
-            result.message = "Local Emergency Simulator alert UI was accepted by the companion receiver and notification pipeline.".to_string();
+            if dump.contains("EmergencyActivity.onCreate/onNewIntent") {
+                result.state = "ALERT_DISPLAYED".to_string();
+                result.message = "Local alert notification and full-screen activity were observed on the device.".to_string();
+            } else {
+                result.state = "NOTIFICATION_POSTED".to_string();
+                result.message = "Local alert notification was posted. Full-screen activity will be used when Android grants full-screen intent access; the notification itself is tappable.".to_string();
+            }
             tx.map.lock().unwrap().insert(serial.to_string(), TxState::Delivered);
             return Ok(());
         }
