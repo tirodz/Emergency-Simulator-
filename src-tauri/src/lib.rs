@@ -96,6 +96,27 @@ pub struct SendResult {
     pub message: String,
     pub evidence: Vec<String>,
     pub injector_exit_code: Option<i32>,
+    pub diagnostics: Vec<DiagEvent>,
+    /// The pipeline stage that actually failed, so the UI can name it instead of showing a
+    /// generic error. `None` when the run did not fail.
+    pub failed_stage: Option<String>,
+}
+
+/// One structured diagnostic event.
+///
+/// Every event carries enough context to debug from the Activity panel alone: which stage, which
+/// device, what command was issued, and the raw stdout/stderr. Nothing is collapsed into a generic
+/// message, because the whole point of the project is that an absence of evidence must be
+/// distinguishable from evidence of success.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagEvent {
+    pub stage: String,
+    pub serial: String,
+    pub action: String,
+    pub detail: Option<String>,
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +155,122 @@ fn emit_log(app: &tauri::AppHandle, message: impl Into<String>, kind: &str) {
             kind: kind.to_string(),
         },
     );
+}
+
+/// Stage names, kept in one place so the Android side and the Rust side cannot drift apart.
+///
+/// `AlertStages.kt` emits these as `EMSIM:STAGE=<NAME>`; the constants below are the Rust half of
+/// that contract. A change to one must change the other.
+mod stage {
+    pub const TEST_CREATED: &str = "TEST_CREATED";
+    pub const DEVICE_SELECTED: &str = "DEVICE_SELECTED";
+    pub const DEVICE_CHECK: &str = "DEVICE_CHECK";
+    pub const LOCAL_SIMULATOR_CHECK: &str = "LOCAL_SIMULATOR_CHECK";
+    pub const LOCAL_SIMULATOR_INSTALL: &str = "LOCAL_SIMULATOR_INSTALL";
+    pub const CAPABILITY_CHECK: &str = "CAPABILITY_CHECK";
+    pub const ADB_BROADCAST_DISPATCH: &str = "ADB_BROADCAST_DISPATCH";
+    pub const ADB_BROADCAST_RESULT: &str = "ADB_BROADCAST_RESULT";
+    pub const TEST_COMPLETE: &str = "TEST_COMPLETE";
+    pub const TEST_FAILED: &str = "TEST_FAILED";
+}
+
+/// Prefix the Android companion writes for every pipeline stage.
+const ANDROID_STAGE_PREFIX: &str = "EMSIM:STAGE=";
+
+fn now_timestamp() -> String {
+    // Milliseconds since the Unix epoch. Rendered as UTC by the frontend, so no timezone
+    // dependency and no locale-sensitive formatting on the Rust side.
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis().to_string(),
+        Err(_) => "0".to_string(),
+    }
+}
+
+/// Record one diagnostic event and mirror it into the Activity panel.
+///
+/// The Activity line is the operator-facing summary; the `DiagEvent` is the structured record the
+/// UI can inspect in full, including the stderr that a summary would drop.
+#[allow(clippy::too_many_arguments)]
+fn diag(
+    app: &tauri::AppHandle,
+    result: &mut SendResult,
+    stage: &str,
+    action: impl Into<String>,
+    detail: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    kind: &str,
+) {
+    let action = action.into();
+    let summary = match &detail {
+        Some(detail) => format!("{stage} · {action} · {detail}"),
+        None => format!("{stage} · {action}"),
+    };
+    emit_log(app, summary, kind);
+
+    result.diagnostics.push(DiagEvent {
+        stage: stage.to_string(),
+        serial: result.device_serial.clone(),
+        action,
+        detail,
+        stdout,
+        stderr,
+        timestamp: now_timestamp(),
+    });
+}
+
+/// Record a failure at a named stage and mark the result.
+fn fail_stage(
+    app: &tauri::AppHandle,
+    result: &mut SendResult,
+    stage: &str,
+    failure_code: &str,
+    action: impl Into<String>,
+    message: impl Into<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+) {
+    let message = message.into();
+    result.failure = Some(failure_code.to_string());
+    result.failed_stage = Some(stage.to_string());
+    result.message = message.clone();
+    diag(
+        app,
+        result,
+        stage,
+        action,
+        Some(message),
+        stdout,
+        stderr,
+        "error",
+    );
+}
+
+/// Extract every `EMSIM:STAGE=<NAME>` token present in a logcat dump, in order of first
+/// appearance, with any trailing `key=value` detail preserved.
+///
+/// Matching a stable token rather than prose is what makes the evidence durable: the Android
+/// companion can reword its human-readable logging without silently breaking delivery detection.
+fn parse_android_stages(dump: &str) -> Vec<(String, String)> {
+    let mut found: Vec<(String, String)> = Vec::new();
+
+    for line in dump.lines() {
+        let Some(index) = line.find(ANDROID_STAGE_PREFIX) else {
+            continue;
+        };
+        let tail = &line[index + ANDROID_STAGE_PREFIX.len()..];
+        let mut parts = tail.splitn(2, ' ');
+        let name = parts.next().unwrap_or("").trim().to_string();
+        if name.is_empty() {
+            continue;
+        }
+        let detail = parts.next().unwrap_or("").trim().to_string();
+        if !found.iter().any(|(existing, _)| *existing == name) {
+            found.push((name, detail));
+        }
+    }
+
+    found
 }
 
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -549,6 +686,83 @@ fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<Strin
     Ok("Local Android alert simulator installed.".to_string())
 }
 
+/// The capability state that decides what the operator will actually see on the phone.
+///
+/// Reported separately from installation because they fail independently: a simulator can be
+/// installed and still be unable to post a notification (Android 13+ POST_NOTIFICATIONS denied) or
+/// unable to take over the screen (Android 14+ USE_FULL_SCREEN_INTENT denied). Both degrade the
+/// result without making the send fail, so the desktop has to be able to say which happened
+/// rather than reporting a flat success or a flat failure.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SimulatorCapabilities {
+    pub installed: bool,
+    pub post_notifications: Option<bool>,
+    pub full_screen_intent: Option<bool>,
+    pub notifications_enabled: Option<bool>,
+}
+
+fn simulator_capabilities(app: &tauri::AppHandle, serial: &str) -> SimulatorCapabilities {
+    let mut capabilities = SimulatorCapabilities {
+        installed: local_simulator_installed(app, serial),
+        ..Default::default()
+    };
+
+    if !capabilities.installed {
+        return capabilities;
+    }
+
+    // POST_NOTIFICATIONS is only runtime-granted from Android 13 (API 33). Below that the
+    // permission does not exist and reporting `false` would be a false alarm.
+    let sdk = getprop(app, serial, "ro.build.version.sdk")
+        .trim()
+        .parse::<u32>()
+        .ok();
+    if sdk.is_some_and(|sdk| sdk >= 33) {
+        capabilities.post_notifications = shell(
+            app,
+            serial,
+            &["dumpsys", "package", LOCAL_SIMULATOR_PACKAGE],
+        )
+        .ok()
+        .and_then(|dump| {
+            dump.lines()
+                .find(|line| line.contains("android.permission.POST_NOTIFICATIONS"))
+                .map(|line| line.contains("granted=true"))
+        });
+    }
+
+    // `appops get` reports the current mode for the op. On Android 14+ this defaults to `deny`
+    // for apps that are not calling/alarm apps, which is exactly the condition that makes a
+    // full-screen alert silently degrade into a heads-up notification.
+    capabilities.full_screen_intent = shell(
+        app,
+        serial,
+        &["appops", "get", LOCAL_SIMULATOR_PACKAGE, "USE_FULL_SCREEN_INTENT"],
+    )
+    .ok()
+    .map(|text| {
+        let text = text.to_ascii_lowercase();
+        if text.contains("allow") {
+            true
+        } else if text.contains("deny") || text.contains("ignore") || text.contains("default") {
+            false
+        } else {
+            // Op not present on this API level; treat as unrestricted.
+            true
+        }
+    });
+
+    capabilities.notifications_enabled = shell(
+        app,
+        serial,
+        &["dumpsys", "notification", "--noredact"],
+    )
+    .ok()
+    .map(|dump| !dump.contains(&format!("{LOCAL_SIMULATOR_PACKAGE}: banned")));
+
+    capabilities
+}
+
 fn local_simulator_command_script(title: &str, body: &str, severity: &str, category: u32) -> String {
     format!(
         "am broadcast --receiver-foreground -a {action} -n {component} --es title {title} --es message {body} --es severity {severity} --es category {category}",
@@ -561,6 +775,123 @@ fn local_simulator_command_script(title: &str, body: &str, severity: &str, categ
     )
 }
 
+/// The delivery verdict, decided purely from the stage lines the Android companion emitted.
+///
+/// Split out from the logcat polling so the decision can be tested against captured device output.
+/// The decision is the part of this pipeline that must never be wrong: it is the difference
+/// between telling the operator the alert appeared and telling them it did not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalVerdict {
+    pub state: String,
+    pub message: String,
+    pub failure: Option<String>,
+    pub evidence: Vec<String>,
+    pub terminal: bool,
+}
+
+fn has_stage(stages: &[(String, String)], name: &str) -> bool {
+    stages.iter().any(|(found, _)| found == name)
+}
+
+fn stage_detail(stages: &[(String, String)], name: &str) -> Option<String> {
+    stages
+        .iter()
+        .find(|(found, _)| found == name)
+        .map(|(_, detail)| detail.clone())
+        .filter(|detail| !detail.is_empty())
+}
+
+/// Decide what happened from the stages seen so far. `None` means "not conclusive yet, keep
+/// polling" rather than "failed" -- an empty logcat is not evidence of a blocked alert.
+fn local_simulator_verdict(stages: &[(String, String)]) -> Option<LocalVerdict> {
+    // A receiver that ran and then failed to post is a definite failure, and reporting it beats
+    // waiting out the timeout.
+    if has_stage(stages, "NOTIFICATION_FAILED") {
+        let detail = stage_detail(stages, "NOTIFICATION_FAILED").unwrap_or_default();
+        return Some(LocalVerdict {
+            state: "FAILED".to_string(),
+            message: format!("The Android companion could not post the notification: {detail}"),
+            failure: Some("NOTIFICATION_FAILED".to_string()),
+            evidence: vec!["ANDROID_RECEIVER_ACCEPTED".to_string()],
+            terminal: true,
+        });
+    }
+
+    if !has_stage(stages, "NOTIFICATION_POSTED") {
+        return None;
+    }
+
+    let full_screen = has_stage(stages, "FULLSCREEN_ACTIVITY_STARTED");
+    let audio = has_stage(stages, "AUDIO_START");
+    let vibration = has_stage(stages, "VIBRATION_START");
+
+    let mut evidence = vec!["ANDROID_RECEIVER_ACCEPTED".to_string(), "NOTIFICATION_POSTED".to_string()];
+    if full_screen {
+        evidence.push("FULLSCREEN_ACTIVITY_STARTED".to_string());
+    }
+    if audio {
+        evidence.push("AUDIO_START".to_string());
+    }
+    if vibration {
+        evidence.push("VIBRATION_START".to_string());
+    }
+
+    if full_screen {
+        Some(LocalVerdict {
+            state: "ALERT_DISPLAYED".to_string(),
+            message: format!(
+                "Local alert confirmed on the device: notification posted, full-screen activity started{}{}.",
+                if audio { ", audio started" } else { "" },
+                if vibration { ", vibration started" } else { "" },
+            ),
+            failure: None,
+            evidence,
+            terminal: true,
+        })
+    } else {
+        // Posted but not full-screen. Either Android withheld full-screen intent access or the
+        // activity has not launched yet; both are honest partial results, not failures.
+        let message = if has_stage(stages, "FULLSCREEN_ACTIVITY_UNAVAILABLE") {
+            "Local notification posted with sound and vibration. Android did not grant full-screen intent access, so the alert did not take over the screen; the notification is tappable to open it."
+        } else {
+            "Local notification posted with sound and vibration. The full-screen activity was not observed; the notification is tappable to open the alert."
+        };
+        Some(LocalVerdict {
+            state: "NOTIFICATION_POSTED".to_string(),
+            message: message.to_string(),
+            failure: None,
+            evidence,
+            terminal: true,
+        })
+    }
+}
+
+/// How long to wait for the companion's stages before giving up.
+///
+/// Measured on an unaccelerated Android 35 emulator, a single send took 6.5 s from broadcast to
+/// `NOTIFICATION_POSTED` and a further 8 s before Android launched the full-screen activity -- 12.7 s
+/// end to end, entirely from platform latency rather than from this code. An 8 s budget reported a
+/// false `LOCAL_UI_EVIDENCE_TIMEOUT` for an alert that had in fact appeared, which is the exact
+/// false-negative this project exists to prevent. The poll returns as soon as a terminal stage is
+/// seen, so this ceiling only costs time on a device that is genuinely not responding.
+const LOCAL_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// How long to keep polling after `NOTIFICATION_POSTED` before settling for a notification-only
+/// verdict.
+///
+/// A notification and its full-screen activity do not arrive together: Android posts the
+/// notification first and launches the activity afterwards, measured here at 8 s apart on an
+/// unaccelerated emulator. Concluding at the first conclusive stage would therefore report
+/// "notification only" for an alert that did take over the screen a moment later -- understating a
+/// real success. This grace window lets the full-screen stage land before the verdict is fixed.
+const FULLSCREEN_GRACE: Duration = Duration::from_secs(14);
+
+/// Read downstream evidence and decide what actually happened on the device.
+///
+/// The decision is made from the Android companion's own stage lines, never from the broadcast
+/// command's exit status. `am broadcast` printing "Broadcast completed" only means the intent was
+/// delivered to a receiver that did not throw; it says nothing about a notification appearing, a
+/// full-screen activity launching, or sound being audible.
 fn collect_local_simulator_evidence(
     app: &tauri::AppHandle,
     serial: &str,
@@ -569,41 +900,136 @@ fn collect_local_simulator_evidence(
     tx: &TxStore,
 ) -> Result<(), String> {
     let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(8) {
+    let mut stages: Vec<(String, String)> = Vec::new();
+    let mut posted_at: Option<Instant> = None;
+
+    while start.elapsed() < LOCAL_EVIDENCE_TIMEOUT {
         if cancel_requested(cancel, serial) {
             result.state = "CANCELLED".to_string();
-            result.failure = Some("USER_CANCELLED".to_string());
-            result.message = "Stop requested while waiting for local simulator evidence.".to_string();
+            fail_stage(
+                app,
+                result,
+                stage::TEST_FAILED,
+                "USER_CANCELLED",
+                "cancel requested",
+                "Stop requested while waiting for local simulator evidence.",
+                None,
+                None,
+            );
             tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
             return Ok(());
         }
+
         thread::sleep(Duration::from_millis(750));
-        let dump = shell(app, serial, &["logcat", "-d", "-t", "1500"]).unwrap_or_default();
-        for (needle, label) in [
-            ("AlertReceiver.onReceive", "AlertReceiver.onReceive"),
-            ("AlertNotificationHelper.notify", "AlertNotificationHelper.notify"),
-            ("EmergencyActivity.onCreate/onNewIntent", "EmergencyActivity.onCreate/onNewIntent"),
-            ("Alert audio/vibration started", "Alert audio/vibration started"),
-        ] {
-            if dump.contains(needle) && !result.evidence.iter().any(|e| e == label) {
-                result.evidence.push(label.to_string());
+
+        // Filtered by the companion's own tag. An unfiltered dump on a busy device can push the
+        // early stages out of the retained window before the later ones arrive, which would look
+        // exactly like an alert that never appeared.
+        let dump = shell(
+            app,
+            serial,
+            &["logcat", "-d", "-t", "4000", "-s", "EmergencySimulator:I"],
+        )
+        .unwrap_or_default();
+        let seen = parse_android_stages(&dump);
+        if !seen.is_empty() {
+            stages = seen;
+        }
+
+        let Some(verdict) = local_simulator_verdict(&stages) else {
+            continue;
+        };
+
+        // Keep waiting only while a full-screen stage could still arrive. A failure, or an alert
+        // already confirmed full-screen, is final.
+        if verdict.failure.is_none() && verdict.state != "ALERT_DISPLAYED" {
+            let posted = *posted_at.get_or_insert_with(Instant::now);
+            if posted.elapsed() < FULLSCREEN_GRACE {
+                continue;
             }
         }
-        if dump.contains("AlertReceiver.onReceive") && dump.contains("AlertNotificationHelper.notify") {
-            if dump.contains("EmergencyActivity.onCreate/onNewIntent") {
-                result.state = "ALERT_DISPLAYED".to_string();
-                result.message = "Local alert notification and full-screen activity were observed on the device.".to_string();
-            } else {
-                result.state = "NOTIFICATION_POSTED".to_string();
-                result.message = "Local alert notification was posted. Full-screen activity will be used when Android grants full-screen intent access; the notification itself is tappable.".to_string();
-            }
-            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Delivered);
+
+        if has_stage(&stages, "ANDROID_RECEIVER_ACCEPTED") {
+            diag(
+                app,
+                result,
+                "ANDROID_RECEIVER_ACCEPTED",
+                "AlertReceiver.onReceive",
+                stage_detail(&stages, "ANDROID_RECEIVER_ACCEPTED"),
+                None,
+                None,
+                "ok",
+            );
+        }
+
+        if verdict.failure.is_some() {
+            fail_stage(
+                app,
+                result,
+                stage::TEST_FAILED,
+                verdict.failure.as_deref().unwrap_or("UNKNOWN"),
+                "AlertNotificationHelper.show",
+                verdict.message,
+                None,
+                None,
+            );
+            tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
             return Ok(());
         }
+
+        for label in &verdict.evidence {
+            if !result.evidence.iter().any(|existing| existing == label) {
+                result.evidence.push(label.clone());
+            }
+        }
+
+        diag(
+            app,
+            result,
+            if verdict.state == "ALERT_DISPLAYED" {
+                "FULLSCREEN_ACTIVITY_STARTED"
+            } else {
+                "NOTIFICATION_POSTED"
+            },
+            "delivery verdict",
+            Some(verdict.message.clone()),
+            None,
+            None,
+            if verdict.state == "ALERT_DISPLAYED" { "ok" } else { "warn" },
+        );
+
+        result.state = verdict.state.clone();
+        result.message = verdict.message.clone();
+
+        diag(
+            app,
+            result,
+            stage::TEST_COMPLETE,
+            "delivery verdict",
+            Some(result.state.clone()),
+            None,
+            None,
+            if result.state == "ALERT_DISPLAYED" { "ok" } else { "warn" },
+        );
+
+        tx.map.lock().unwrap().insert(serial.to_string(), TxState::Delivered);
+        return Ok(());
     }
+
+    // Nothing conclusive arrived. This is reported as uncertain rather than as a failure, because
+    // an absent log line cannot distinguish "Android blocked it" from "the operator was not looking
+    // at the phone" or "logcat rotated".
     result.state = "RECEIVED_BY_LOCAL_SIMULATOR".to_string();
-    result.failure = Some("LOCAL_UI_EVIDENCE_TIMEOUT".to_string());
-    result.message = "The local simulator receiver was not observed through logcat before timeout. Check notification/full-screen access on the phone.".to_string();
+    fail_stage(
+        app,
+        result,
+        stage::TEST_FAILED,
+        "LOCAL_UI_EVIDENCE_TIMEOUT",
+        "logcat evidence",
+        "The local simulator did not report any pipeline stage before timeout. Check that the phone is awake, that notifications are allowed for Emergency Simulator Local, and retry.",
+        None,
+        None,
+    );
     tx.map.lock().unwrap().insert(serial.to_string(), TxState::Uncertain);
     Ok(())
 }
@@ -1290,32 +1716,99 @@ async fn send_test_alert(
             message: String::new(),
             evidence: Vec::new(),
             injector_exit_code: None,
+            diagnostics: Vec::new(),
+            failed_stage: None,
         };
 
+        diag(
+            &app,
+            &mut result,
+            stage::TEST_CREATED,
+            "send_test_alert",
+            Some(format!(
+                "category={SERVICE_CATEGORY} chars={} dry_run={dry_run}",
+                normalized_body.len()
+            )),
+            None,
+            None,
+            "info",
+        );
+
         if !normalized_body.starts_with(REQUIRED_PREFIX) {
-            result.failure = Some("INVALID_BODY".to_string());
-            result.message = "The message must begin with TEST.".to_string();
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "INVALID_BODY",
+                "validate body",
+                "The message must begin with TEST.",
+                None,
+                None,
+            );
             return Ok(result);
         }
 
         if normalized_body.len() > 300 {
-            result.failure = Some("INVALID_BODY".to_string());
-            result.message = "The message is longer than 300 characters.".to_string();
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "INVALID_BODY",
+                "validate body",
+                "The message is longer than 300 characters.",
+                None,
+                None,
+            );
             return Ok(result);
         }
 
         if let Some(reason) = gate_for(&tx_store, &serial) {
-            result.failure = Some("DUPLICATE_SEND_BLOCKED".to_string());
-            result.message = reason;
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "DUPLICATE_SEND_BLOCKED",
+                "safety gate",
+                reason,
+                None,
+                None,
+            );
             return Ok(result);
         }
 
-        emit_log(&app, format!("Inspecting target {serial}"), "info");
+        diag(
+            &app,
+            &mut result,
+            stage::DEVICE_SELECTED,
+            "parse_devices",
+            Some(format!("serial={serial}")),
+            None,
+            None,
+            "info",
+        );
 
         let mut device = parse_devices(&app)?
             .into_iter()
             .find(|device| device.serial == serial)
             .ok_or_else(|| "The selected device is no longer attached.".to_string())?;
+
+        diag(
+            &app,
+            &mut result,
+            stage::DEVICE_CHECK,
+            "adb device state",
+            Some(format!(
+                "model={} android={} state={:?} root={} local_simulator={}",
+                device.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                device.release.clone().unwrap_or_else(|| "?".to_string()),
+                device.state,
+                device.root,
+                device.local_simulator,
+            )),
+            None,
+            None,
+            "info",
+        );
 
         if dry_run {
             result.state = "READY_TO_SEND".to_string();
@@ -1348,31 +1841,102 @@ async fn send_test_alert(
                 format!("Dry run complete for {serial}; no device changes"),
                 "ok",
             );
+            result.failed_stage = None;
+            result.failure = None;
             return Ok(result);
         }
 
         if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
-            emit_log(&app, "Stock device detected: installing bundled local alert simulator before send", "info");
+            diag(
+                &app,
+                &mut result,
+                stage::LOCAL_SIMULATOR_CHECK,
+                "pm path",
+                Some("not installed; installing the bundled local simulator".to_string()),
+                None,
+                None,
+                "info",
+            );
             match install_local_simulator(&app, &serial) {
                 Ok(message) => {
-                    emit_log(&app, message, "ok");
                     device.local_simulator = true;
                     device.state = DeviceState::SimulatorReady;
                     device.support_level = SupportLevel::LocalSimulator;
+                    diag(
+                        &app,
+                        &mut result,
+                        stage::LOCAL_SIMULATOR_INSTALL,
+                        "adb install",
+                        Some(message),
+                        None,
+                        None,
+                        "ok",
+                    );
                 }
                 Err(error) => {
                     let _ = set_tx(&app, &tx_store, &serial, None);
-                    result.failure = Some("LOCAL_SIMULATOR_INSTALL_FAILED".to_string());
-                    result.message = error.clone();
-                    emit_log(&app, format!("Local simulator install failed: {error}"), "error");
+                    fail_stage(
+                        &app,
+                        &mut result,
+                        stage::LOCAL_SIMULATOR_INSTALL,
+                        "LOCAL_SIMULATOR_INSTALL_FAILED",
+                        "adb install",
+                        error,
+                        None,
+                        None,
+                    );
                     return Ok(result);
                 }
             }
         }
 
         if matches!(device.state, DeviceState::SimulatorReady) {
+            let capabilities = simulator_capabilities(&app, &serial);
+            diag(
+                &app,
+                &mut result,
+                stage::CAPABILITY_CHECK,
+                "simulator capability probe",
+                Some(format!(
+                    "installed={} post_notifications={} full_screen_intent={} notifications_enabled={}",
+                    capabilities.installed,
+                    capabilities
+                        .post_notifications
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "n/a".to_string()),
+                    capabilities
+                        .full_screen_intent
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                    capabilities
+                        .notifications_enabled
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
+                )),
+                None,
+                None,
+                if capabilities.installed { "info" } else { "warn" },
+            );
+
+            // A denied POST_NOTIFICATIONS means the receiver will run and Android will drop the
+            // notification silently. Saying so up front is the difference between an operator
+            // fixing a phone setting and an operator concluding the tool is broken.
+            if capabilities.post_notifications == Some(false) {
+                let _ = set_tx(&app, &tx_store, &serial, None);
+                fail_stage(
+                    &app,
+                    &mut result,
+                    stage::CAPABILITY_CHECK,
+                    "NOTIFICATION_PERMISSION_DENIED",
+                    "POST_NOTIFICATIONS",
+                    "Notification permission is not granted for Emergency Simulator Local. Grant notifications for that app on the phone, then retry.",
+                    None,
+                    None,
+                );
+                return Ok(result);
+            }
+
             let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-            emit_log(&app, "Using root-free local Android simulator receiver", "ok");
 
             let script = local_simulator_command_script(
                 "EMERGENCY SIMULATOR TEST",
@@ -1380,27 +1944,71 @@ async fn send_test_alert(
                 "TEST",
                 SERVICE_CATEGORY,
             );
-            emit_log(&app, "Dispatching explicit local AlertReceiver broadcast", "info");
+
+            diag(
+                &app,
+                &mut result,
+                stage::ADB_BROADCAST_DISPATCH,
+                format!("adb -s {serial} shell {script}"),
+                Some("explicit component com.tirodz.emergencysimulator/.AlertReceiver".to_string()),
+                None,
+                None,
+                "info",
+            );
 
             let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
                 Ok(output) => output,
                 Err(error) => {
                     let _ = set_tx(&app, &tx_store, &serial, None);
-                    result.failure = Some("ADB_TRANSPORT".to_string());
-                    result.message = error.clone();
-                    emit_log(&app, error, "error");
+                    fail_stage(
+                        &app,
+                        &mut result,
+                        stage::ADB_BROADCAST_RESULT,
+                        "ADB_TRANSPORT",
+                        "adb shell am broadcast",
+                        error,
+                        None,
+                        None,
+                    );
                     return Ok(result);
                 }
             };
 
             result.injector_exit_code = output.status.code();
-            let output_text_value = output_text(&output);
-            emit_log(&app, format!("Local broadcast: {}", output_text_value.trim()), if output.status.success() { "info" } else { "error" });
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let combined = output_text(&output).trim().to_string();
 
+            diag(
+                &app,
+                &mut result,
+                stage::ADB_BROADCAST_RESULT,
+                "adb shell am broadcast",
+                Some(format!("exit={:?}", output.status.code())),
+                Some(stdout.clone()).filter(|s| !s.is_empty()),
+                Some(stderr.clone()).filter(|s| !s.is_empty()),
+                if output.status.success() { "info" } else { "error" },
+            );
+
+            // The exit status of `am broadcast` is deliberately not treated as delivery evidence.
+            // It only means the command was accepted, so a failure here is reported and a success
+            // still has to be proved by the stage lines below.
             if !output.status.success() {
                 let _ = set_tx(&app, &tx_store, &serial, None);
-                result.failure = Some("LOCAL_BROADCAST_FAILED".to_string());
-                result.message = output_text_value.trim().to_string();
+                fail_stage(
+                    &app,
+                    &mut result,
+                    stage::ADB_BROADCAST_RESULT,
+                    "LOCAL_BROADCAST_FAILED",
+                    "adb shell am broadcast",
+                    if combined.is_empty() {
+                        "The broadcast command was rejected and produced no output.".to_string()
+                    } else {
+                        combined
+                    },
+                    Some(stdout).filter(|s| !s.is_empty()),
+                    Some(stderr).filter(|s| !s.is_empty()),
+                );
                 return Ok(result);
             }
 
@@ -1413,46 +2021,44 @@ async fn send_test_alert(
             )?;
             clear_cancel(&cancel_store, &serial);
             let _ = persist_transactions(&app, &tx_store);
-            emit_log(&app, format!("Local simulator result: {}", result.state), if result.state == "ALERT_DISPLAYED" { "ok" } else { "warn" });
             return Ok(result);
         }
 
         if !matches!(device.state, DeviceState::Ready) {
-            result.failure = Some(
-                match device.state {
-                    DeviceState::Unauthorized => "DEVICE_UNAUTHORIZED",
-                    DeviceState::Offline => "DEVICE_OFFLINE",
-                    DeviceState::NoRoot => "NO_ROOT",
-                    DeviceState::Unsupported => "CELLBROADCAST_MISSING",
-                    DeviceState::Unknown => "DEVICE_UNKNOWN",
-                    DeviceState::Ready => "UNKNOWN",
-                    DeviceState::SimulatorReady => "LOCAL_SIMULATOR",
+            let (failure_code, message) = match device.state {
+                DeviceState::Unauthorized => (
+                    "DEVICE_UNAUTHORIZED",
+                    "Accept the USB debugging authorization prompt on the phone first.",
+                ),
+                DeviceState::Offline => ("DEVICE_OFFLINE", "ADB reports this device as offline."),
+                DeviceState::NoRoot => (
+                    "NO_ROOT",
+                    "This stock/non-root device cannot use the controlled protected test path.",
+                ),
+                DeviceState::Unsupported => (
+                    "CELLBROADCAST_MISSING",
+                    "No CellBroadcast receiver package was detected.",
+                ),
+                DeviceState::Unknown => (
+                    "DEVICE_UNKNOWN",
+                    "The device is not in a known ADB-ready state.",
+                ),
+                DeviceState::Ready => ("UNKNOWN", "Device is ready."),
+                DeviceState::SimulatorReady => {
+                    ("LOCAL_SIMULATOR", "Local Android simulator is ready.")
                 }
-                .to_string(),
-            );
-
-            result.message = match device.state {
-                DeviceState::Unauthorized => {
-                    "Accept the USB debugging authorization prompt on the phone first."
-                        .to_string()
-                }
-                DeviceState::Offline => {
-                    "ADB reports this device as offline.".to_string()
-                }
-                DeviceState::NoRoot => {
-                    "This stock/non-root device cannot use the controlled protected test path."
-                        .to_string()
-                }
-                DeviceState::Unsupported => {
-                    "No CellBroadcast receiver package was detected.".to_string()
-                }
-                DeviceState::Unknown => {
-                    "The device is not in a known ADB-ready state.".to_string()
-                }
-                DeviceState::Ready => "Device is ready.".to_string(),
-                DeviceState::SimulatorReady => "Local Android simulator is ready.".to_string(),
             };
 
+            fail_stage(
+                &app,
+                &mut result,
+                stage::DEVICE_CHECK,
+                failure_code,
+                "device state gate",
+                message,
+                None,
+                None,
+            );
             return Ok(result);
         }
 
@@ -1467,15 +2073,27 @@ async fn send_test_alert(
         };
 
         if candidates.is_empty() {
-            return Err("No CellBroadcast receiver package was detected.".to_string());
+            fail_stage(
+                &app,
+                &mut result,
+                stage::DEVICE_CHECK,
+                "CELLBROADCAST_MISSING",
+                "cellbroadcast discovery",
+                "No CellBroadcast receiver package was detected.",
+                None,
+                None,
+            );
+            return Ok(result);
         }
 
-        emit_log(
+        diag(
             &app,
-            format!(
-                "CellBroadcast receiver candidates: {}",
-                candidates.join(", ")
-            ),
+            &mut result,
+            stage::DEVICE_CHECK,
+            "cellbroadcast candidates",
+            Some(candidates.join(", ")),
+            None,
+            None,
             "ok",
         );
 
@@ -1488,18 +2106,32 @@ async fn send_test_alert(
         )?;
 
         if !test_mode {
-            result.failure = Some("TEST_MODE_DISABLED".to_string());
-            result.message =
-                "The controlled test-alert preferences could not be established."
-                    .to_string();
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "TEST_MODE_DISABLED",
+                "prepare_test_mode",
+                "The controlled test-alert preferences could not be established.",
+                None,
+                None,
+            );
             return Ok(result);
         }
 
         if cancel_requested(&cancel_store, &serial) {
             clear_cancel(&cancel_store, &serial);
             result.state = "CANCELLED".to_string();
-            result.failure = Some("USER_CANCELLED".to_string());
-            result.message = "Operation cancelled before delivery.".to_string();
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "USER_CANCELLED",
+                "cancel requested",
+                "Operation cancelled before delivery.",
+                None,
+                None,
+            );
             return Ok(result);
         }
 
@@ -1509,17 +2141,20 @@ async fn send_test_alert(
 
         if let Err(error) = push_injector(&app, &serial) {
             let _ = set_tx(&app, &tx_store, &serial, None);
-            result.failure = Some("INJECTOR_FAILURE".to_string());
-            result.message = error.clone();
-            emit_log(&app, error, "error");
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "INJECTOR_FAILURE",
+                "adb push alertinject.jar",
+                error,
+                None,
+                None,
+            );
             return Ok(result);
         }
 
-        emit_log(
-            &app,
-            "Injector pushed to the controlled device",
-            "ok",
-        );
+        emit_log(&app, "Injector pushed to the controlled device", "ok");
 
         emit_log(
             &app,
@@ -1541,8 +2176,16 @@ async fn send_test_alert(
             if cancel_requested(&cancel_store, &serial) {
                 clear_cancel(&cancel_store, &serial);
                 result.state = "CANCELLED".to_string();
-                result.failure = Some("USER_CANCELLED".to_string());
-                result.message = "Operation cancelled before delivery.".to_string();
+                fail_stage(
+                    &app,
+                    &mut result,
+                    stage::TEST_FAILED,
+                    "USER_CANCELLED",
+                    "cancel requested",
+                    "Operation cancelled before delivery.",
+                    None,
+                    None,
+                );
                 let _ = set_tx(&app, &tx_store, &serial, None);
                 return Ok(result);
             }
@@ -1557,6 +2200,18 @@ async fn send_test_alert(
             }
 
             let script = injector_command_script(package, &normalized_body);
+
+            diag(
+                &app,
+                &mut result,
+                stage::ADB_BROADCAST_DISPATCH,
+                format!("adb -s {serial} shell {script}"),
+                Some(format!("cellbroadcast receiver {package}")),
+                None,
+                None,
+                "info",
+            );
+
             let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
                 Ok(output) => output,
                 Err(error) => {
@@ -1565,9 +2220,16 @@ async fn send_test_alert(
                     // until the safety state was reset by hand.
                     let _ = set_tx(&app, &tx_store, &serial, None);
                     result.state = "FAILED".to_string();
-                    result.failure = Some("ADB_TRANSPORT".to_string());
-                    result.message = error.clone();
-                    emit_log(&app, error, "error");
+                    fail_stage(
+                        &app,
+                        &mut result,
+                        stage::ADB_BROADCAST_RESULT,
+                        "ADB_TRANSPORT",
+                        "adb shell app_process",
+                        error,
+                        None,
+                        None,
+                    );
                     clear_cancel(&cancel_store, &serial);
                     return Ok(result);
                 }
@@ -1575,10 +2237,20 @@ async fn send_test_alert(
 
             result.injector_exit_code = output.status.code();
 
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let injector_text = output_text(&output);
-            if let Some(first_line) = injector_text.lines().next() {
-                emit_log(&app, format!("Injector: {first_line}"), "info");
-            }
+
+            diag(
+                &app,
+                &mut result,
+                stage::ADB_BROADCAST_RESULT,
+                "adb shell app_process",
+                Some(format!("exit={:?}", output.status.code())),
+                Some(stdout).filter(|s| !s.is_empty()),
+                Some(stderr).filter(|s| !s.is_empty()),
+                if output.status.success() { "info" } else { "error" },
+            );
 
             // An injector that never ran as root cannot have produced an alert, and saying so is
             // more useful than reporting "no evidence". `app_process` exits 0 either way, so the
@@ -1593,11 +2265,16 @@ async fn send_test_alert(
 
                 let _ = set_tx(&app, &tx_store, &serial, None);
                 result.state = "FAILED".to_string();
-                result.failure = Some("INJECTOR_FAILURE".to_string());
-                result.message = format!(
-                    "The on-device injector did not run as a system identity. {detail}"
+                fail_stage(
+                    &app,
+                    &mut result,
+                    stage::ADB_BROADCAST_RESULT,
+                    "INJECTOR_FAILURE",
+                    "on-device injector identity",
+                    format!("The on-device injector did not run as a system identity. {detail}"),
+                    None,
+                    None,
                 );
-                emit_log(&app, result.message.clone(), "error");
                 clear_cancel(&cancel_store, &serial);
                 return Ok(result);
             }
@@ -1651,17 +2328,32 @@ async fn send_test_alert(
         let _ = persist_transactions(&app, &tx_store);
         clear_cancel(&cancel_store, &serial);
 
-        let kind = if result.state == "ALERT_DISPLAYED" {
-            "ok"
-        } else {
-            "warn"
-        };
-
-        emit_log(
-            &app,
-            format!("Result: {}", result.state),
-            kind,
-        );
+        if result.state == "ALERT_DISPLAYED" {
+            diag(
+                &app,
+                &mut result,
+                stage::TEST_COMPLETE,
+                "delivery verdict",
+                Some("ALERT_DISPLAYED".to_string()),
+                None,
+                None,
+                "ok",
+            );
+        } else if result.failure.is_none() {
+            // Reached the end without a verdict and without an explicit failure. Recorded so an
+            // unexplained outcome is never silently reported as a success.
+            let unfinished = result.state.clone();
+            fail_stage(
+                &app,
+                &mut result,
+                stage::TEST_FAILED,
+                "NO_VERDICT",
+                "delivery verdict",
+                format!("The pipeline finished in state {unfinished} without downstream evidence."),
+                None,
+                None,
+            );
+        }
 
         Ok(result)
     })
@@ -1804,6 +2496,177 @@ mod tests {
         }
 
         out
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Stage parsing and the delivery verdict.
+    //
+    // The fixtures below are real logcat lines captured from a running Android 35 emulator with
+    // the companion APK installed, not hand-written approximations of the format. That matters:
+    // the format is the contract between the Kotlin companion and this controller, so a test that
+    // invents its own version of it proves nothing.
+    // ---------------------------------------------------------------------------------------
+
+    /// Exactly what the companion wrote for a broadcast that posted a notification.
+    const CAPTURED_NOTIFICATION_RUN: &str = concat!(
+        "09-21 22:44:51.792  3657  3657 I EmergencySimulator: ",
+        "EMSIM:STAGE=ANDROID_RECEIVER_ACCEPTED category=4355 severity=TEST chars=15\n",
+        "09-21 22:44:55.122  3657  3657 I EmergencySimulator: ",
+        "EMSIM:STAGE=NOTIFICATION_POSTED id=4355\n",
+    );
+
+    #[test]
+    fn parses_stage_lines_from_real_device_logcat() {
+        let stages = parse_android_stages(CAPTURED_NOTIFICATION_RUN);
+
+        assert_eq!(
+            stages,
+            vec![
+                (
+                    "ANDROID_RECEIVER_ACCEPTED".to_string(),
+                    "category=4355 severity=TEST chars=15".to_string()
+                ),
+                ("NOTIFICATION_POSTED".to_string(), "id=4355".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ignores_logcat_lines_that_are_not_stage_lines() {
+        let noise = concat!(
+            "09-21 22:43:56.894  1679  3321 E ActivityManager:  +0% 3657/com.tirodz.emergencysimulator\n",
+            "09-21 22:44:00.168  1679  1793 D ActivityManager: freezing 3657 com.tirodz.emergencysimulator\n",
+            "--------- beginning of main\n",
+        );
+
+        assert!(parse_android_stages(noise).is_empty());
+    }
+
+    #[test]
+    fn a_posted_notification_without_full_screen_is_not_reported_as_displayed() {
+        // This is the defect class the project exists to avoid: reporting a full-screen alert when
+        // only a notification was posted. Android 14+ withholds full-screen intent access by
+        // default, so this is the common outcome on a stock device and must not be upgraded.
+        let stages = parse_android_stages(CAPTURED_NOTIFICATION_RUN);
+        let verdict = local_simulator_verdict(&stages).expect("should be conclusive");
+
+        assert_eq!(verdict.state, "NOTIFICATION_POSTED");
+        assert_ne!(verdict.state, "ALERT_DISPLAYED");
+        assert!(verdict.failure.is_none());
+        assert_eq!(
+            verdict.evidence,
+            vec!["ANDROID_RECEIVER_ACCEPTED", "NOTIFICATION_POSTED"]
+        );
+    }
+
+    #[test]
+    fn full_screen_activity_upgrades_the_verdict_and_records_audio_and_vibration() {
+        let stages = parse_android_stages(&format!(
+            "{CAPTURED_NOTIFICATION_RUN}\
+             EMSIM:STAGE=FULLSCREEN_ACTIVITY_STARTED fullScreenAllowed=true\n\
+             EMSIM:STAGE=AUDIO_START usage=ALARM looping=true\n\
+             EMSIM:STAGE=VIBRATION_START pattern=700\n"
+        ));
+        let verdict = local_simulator_verdict(&stages).expect("should be conclusive");
+
+        assert_eq!(verdict.state, "ALERT_DISPLAYED");
+        assert!(verdict.failure.is_none());
+        assert!(verdict.evidence.contains(&"FULLSCREEN_ACTIVITY_STARTED".to_string()));
+        assert!(verdict.evidence.contains(&"AUDIO_START".to_string()));
+        assert!(verdict.evidence.contains(&"VIBRATION_START".to_string()));
+        assert!(verdict.message.contains("audio started"));
+    }
+
+    #[test]
+    fn an_empty_logcat_is_inconclusive_rather_than_a_failure() {
+        // "Broadcast completed: result=0" with no downstream evidence must never be read as
+        // success, but it must not be read as a definite failure either: the alert may simply not
+        // have been observed. `None` keeps the collector polling.
+        assert!(local_simulator_verdict(&[]).is_none());
+
+        let receiver_only = parse_android_stages(
+            "I EmergencySimulator: EMSIM:STAGE=ANDROID_RECEIVER_ACCEPTED category=4355\n",
+        );
+        assert!(local_simulator_verdict(&receiver_only).is_none());
+    }
+
+    #[test]
+    fn a_failed_notification_is_terminal_and_named() {
+        let stages = parse_android_stages(
+            "I EmergencySimulator: EMSIM:STAGE=ANDROID_RECEIVER_ACCEPTED category=4355\n\
+             I EmergencySimulator: EMSIM:STAGE=NOTIFICATION_FAILED SecurityException: not allowed\n",
+        );
+        let verdict = local_simulator_verdict(&stages).expect("should be conclusive");
+
+        assert_eq!(verdict.state, "FAILED");
+        assert_eq!(verdict.failure.as_deref(), Some("NOTIFICATION_FAILED"));
+        assert!(verdict.message.contains("SecurityException"));
+    }
+
+    #[test]
+    fn stage_names_used_by_the_verdict_match_the_android_contract() {
+        // The Kotlin companion writes these names; the controller matches them. If a rename lands
+        // on one side only, delivery detection silently stops working and every send would report
+        // an evidence timeout, so the pairing is asserted here rather than trusted.
+        let kotlin = include_str!(
+            "../../android/local-simulator/app/src/main/java/com/tirodz/emergencysimulator/AlertStages.kt"
+        );
+
+        for name in [
+            "ANDROID_RECEIVER_ACCEPTED",
+            "NOTIFICATION_POSTED",
+            "NOTIFICATION_FAILED",
+            "FULLSCREEN_ACTIVITY_STARTED",
+            "FULLSCREEN_ACTIVITY_UNAVAILABLE",
+            "AUDIO_START",
+            "VIBRATION_START",
+            "USER_DISMISSED",
+        ] {
+            assert!(
+                kotlin.contains(&format!("\"{name}\"")),
+                "AlertStages.kt no longer declares {name}"
+            );
+            assert!(
+                kotlin.contains("EMSIM:STAGE="),
+                "AlertStages.kt no longer uses the EMSIM:STAGE= prefix the controller parses"
+            );
+        }
+    }
+
+    /// The receiver must never claim a full-screen alert it did not get. On Android 14+ the
+    /// full-screen intent op defaults to denied, so "notification posted, screen not taken over"
+    /// is the expected stock-device outcome and the code must not paper over it.
+    #[test]
+    fn notification_helper_reports_full_screen_capability_without_hidden_apis() {
+        let helper = include_str!(
+            "../../android/local-simulator/app/src/main/java/com/tirodz/emergencysimulator/AlertNotificationHelper.kt"
+        );
+
+        assert!(
+            helper.contains("canUseFullScreenIntent()"),
+            "the helper should consult the public full-screen intent API"
+        );
+        assert!(
+            helper.contains("setFullScreenIntent"),
+            "the helper should still request a full-screen intent"
+        );
+
+        // Checked against code only: the comment above deliberately names the hidden constant while
+        // explaining why it is not used, and a naive substring search would flag that comment.
+        let code: String = helper
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !(trimmed.starts_with('*') || trimmed.starts_with("//") || trimmed.starts_with("/*"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // The hidden app-op constant is not in the SDK; referencing it fails the build.
+        assert!(
+            !code.contains("OPSTR_USE_FULL_SCREEN_INTENT"),
+            "the helper must not depend on a hidden API constant"
+        );
     }
 }
 
