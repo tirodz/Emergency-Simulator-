@@ -2,6 +2,12 @@
 build/
 dist/
 
+# Gradle's per-project cache and the machine-specific SDK path written by the Android build.
+# `build/` above already covers the APK output tree; these two are the other generated artefacts
+# that must never be committed.
+.gradle/
+local.properties
+
 # Rust/Tauri build tree. `src-tauri/Cargo.lock` IS committed: this is an application, and pinning
 # the dependency graph is what stops a fresh CI run from silently resolving a dependency whose
 # minimum Rust version is newer than the pinned toolchain.
