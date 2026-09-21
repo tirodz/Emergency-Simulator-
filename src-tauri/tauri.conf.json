@@ -26,6 +26,7 @@
     "icon":["icons/icon.ico","icons/icon.png"],
     "resources":{
       "../android/alertinject/out/alertinject.jar":"android/alertinject.jar",
+      "../android/local-simulator/app/build/outputs/apk/debug/app-debug.apk":"android/local-simulator.apk",
       "../packaging/platform-tools/adb.exe":"adb/adb.exe",
       "../packaging/platform-tools/AdbWinApi.dll":"adb/AdbWinApi.dll",
       "../packaging/platform-tools/AdbWinUsbApi.dll":"adb/AdbWinUsbApi.dll"
