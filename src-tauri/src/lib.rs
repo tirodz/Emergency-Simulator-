@@ -1312,7 +1312,7 @@ async fn send_test_alert(
 
         emit_log(&app, format!("Inspecting target {serial}"), "info");
 
-        let device = parse_devices(&app)?
+        let mut device = parse_devices(&app)?
             .into_iter()
             .find(|device| device.serial == serial)
             .ok_or_else(|| "The selected device is no longer attached.".to_string())?;
@@ -1349,6 +1349,25 @@ async fn send_test_alert(
                 "ok",
             );
             return Ok(result);
+        }
+
+        if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
+            emit_log(&app, "Stock device detected: installing bundled local alert simulator before send", "info");
+            match install_local_simulator(&app, &serial) {
+                Ok(message) => {
+                    emit_log(&app, message, "ok");
+                    device.local_simulator = true;
+                    device.state = DeviceState::SimulatorReady;
+                    device.support_level = SupportLevel::LocalSimulator;
+                }
+                Err(error) => {
+                    let _ = set_tx(&app, &tx_store, &serial, None);
+                    result.failure = Some("LOCAL_SIMULATOR_INSTALL_FAILED".to_string());
+                    result.message = error.clone();
+                    emit_log(&app, format!("Local simulator install failed: {error}"), "error");
+                    return Ok(result);
+                }
+            }
         }
 
         if matches!(device.state, DeviceState::SimulatorReady) {
