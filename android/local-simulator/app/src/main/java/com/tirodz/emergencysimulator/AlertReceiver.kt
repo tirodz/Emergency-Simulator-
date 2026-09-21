@@ -21,7 +21,7 @@ class AlertReceiver : BroadcastReceiver() {
         val category = intent.getStringExtra("category")?.takeIf { it.isNotBlank() }
             ?: "ETWS-TEST"
 
-        Log.i(TAG, "AlertReceiver.onReceive title=$title category=$category")
+        Log.i(TAG, "AlertReceiver.onReceive title=$title category=$category fullScreen="+AlertNotificationHelper.canUseFullScreenIntent(context))
         AlertNotificationHelper.show(context, title, message, severity, category)
         Log.i(TAG, "AlertNotificationHelper.notify posted notification")
     }
