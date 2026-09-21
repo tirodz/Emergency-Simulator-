@@ -295,3 +295,39 @@ These are recorded as unknowns rather than guesses, and each has a corresponding
   `--user`/`--receiver-permission` combination. -> Experiment 8
 * Whether an OEM (Samsung/Xiaomi) restricts the receiver's declared intent filters or replaces the
   receiver entirely. -> Experiments 10–12
+
+## 6. Root-free execution paths, answered directly
+
+The controller had to be able to answer "can this be done without root?" honestly, because that is
+the question the product exists to answer. The following are the available non-root execution
+identities and what each can actually do.
+
+| Path | Effective identity | Passes Gate 1? | Why |
+| --- | --- | --- | --- |
+| Ordinary app | its own app UID | **No** | not an accepted system UID |
+| `adb shell` command | `shell` (UID 2000) | **No** | `2000` is not in the `isCallerSystem` list |
+| `adb shell ... am broadcast` | `shell` (UID 2000) | **No** | the UID check runs before the extras are read |
+| `app_process` launched from `adb shell` | `shell` (UID 2000) | **No** | same identity as its parent |
+| **Shizuku**-bound helper | `shell` (UID 2000) | **No** | Shizuku's binder callbacks run as the `shell` UID, so a Shizuku-bound injector is still `2000` |
+| `adb root` + `app_process` | root (UID 0) | **Yes** | `ROOT_UID` is in the list |
+| Persistent/system component | its system UID | **Yes**, by identity | this is what CBS already is |
+
+**Conclusion (CONFIRMED for the UID rule; the Shizuku row is INFERRED from that rule).** Shizuku is a
+way to obtain shell-level binder access without a persistent connection — it does not change the UID
+the code runs as. Since Gate 1 is a UID check and `2000` is not accepted, a Shizuku-based injector
+fails at exactly the same place an `adb shell` injector does. Shizuku is therefore **not** a
+root-free route into this pipeline, and the project does not claim it is.
+
+This also means BUG-015's fix is necessary but not sufficient for the non-root goal: correct quoting
+makes the *transport* reliable, while Gate 1 is what makes the *operation* root-only. The two are
+independent, and conflating them is the error this project exists to avoid.
+
+### What would be a legitimate root-free path
+
+Only one shape qualifies, and it is not an exploit: a component that is **already running as an
+accepted system UID** and exposes an interface a non-privileged caller may use. The AOSP test
+application is the canonical example — it shares `android.uid.phone`, so it *is* a system identity,
+and its own activity is exported. If an OEM ships such a component, using it is legitimate and the
+project will use it with explicit operator approval (see `docs/stock-device/security-boundary.md`,
+Mission 3 decision rule). If none exists on the target, that absence is the answer, and the project
+records `BLOCKED` rather than manufacturing an identity.

@@ -47,6 +47,12 @@ So: no silent patches.
 | [BUG-008](BUG-008-default-log-dir-namerror.md) | `default_log_dir()` referenced a removed constant | MEDIUM | FIXED |
 | [BUG-009](BUG-009-safety-strip-overwritten.md) | A result banner could overwrite the permanent safety statement | HIGH | FIXED |
 | [BUG-010](BUG-010-selftest-race.md) | The self-test verification read its report before the executable wrote it | MEDIUM | FIXED |
+| [BUG-011](BUG-011-ui-accent-token-missing.md) | Polished UI referenced an undefined accent token | HIGH | FIXED |
+| [BUG-012](BUG-012-ui-devicestate-import-missing.md) | Polished device renderer referenced an undefined DeviceState | HIGH | FIXED |
+| [BUG-013](BUG-013-ui-tests-hardcoded-theme-colors.md) | UI regression tests kept stale hardcoded palette values after theme refresh | MEDIUM | FIXED |
+| [BUG-014](BUG-014-installer-artifact-path-mismatch.md) | Installer job looked for the executable at the wrong artifact path | HIGH | FIXED |
+| [BUG-015](BUG-015-rust-shell-argument-flattening.md) | The Rust controller passed the alert body as a separate `adb shell` argument | HIGH | FIXED |
+| [BUG-016](BUG-016-single-cellbroadcast-candidate.md) | The controller assumed exactly one CellBroadcast package and never retried another | MEDIUM | FIXED |
 
 ## Severity scale
 
@@ -56,7 +62,4 @@ So: no silent patches.
 | HIGH | Produces a wrong result, a false success, or blocks a supported device entirely |
 | MEDIUM | Degrades reliability or diagnostics; workaround exists |
 | LOW | Cosmetic or documentation |
-| [BUG-011](BUG-011-ui-accent-token-missing.md) | Polished UI referenced an undefined accent token | HIGH | FIXED |
-| [BUG-012](BUG-012-ui-devicestate-import-missing.md) | Polished device renderer referenced an undefined DeviceState | HIGH | FIXED |
-| [BUG-013](BUG-013-ui-tests-hardcoded-theme-colors.md) | UI regression tests kept stale hardcoded palette values after theme refresh | MEDIUM | FIXED |
-| [BUG-014](BUG-014-installer-artifact-path-mismatch.md) | Installer job looked for the executable at the wrong artifact path | HIGH | FIXED |
+
