@@ -1343,6 +1343,53 @@ async fn send_test_alert(
             return Ok(result);
         }
 
+        if matches!(device.state, DeviceState::SimulatorReady) {
+            let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
+            emit_log(&app, "Using root-free local Android simulator receiver", "ok");
+
+            let script = local_simulator_command_script(
+                "EMERGENCY SIMULATOR TEST",
+                &normalized_body,
+                "TEST",
+                SERVICE_CATEGORY,
+            );
+            emit_log(&app, "Dispatching explicit local AlertReceiver broadcast", "info");
+
+            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
+                Ok(output) => output,
+                Err(error) => {
+                    let _ = set_tx(&app, &tx_store, &serial, None);
+                    result.failure = Some("ADB_TRANSPORT".to_string());
+                    result.message = error.clone();
+                    emit_log(&app, error, "error");
+                    return Ok(result);
+                }
+            };
+
+            result.injector_exit_code = output.status.code();
+            let output_text_value = output_text(&output);
+            emit_log(&app, format!("Local broadcast: {}", output_text_value.trim()), if output.status.success() { "info" } else { "error" });
+
+            if !output.status.success() {
+                let _ = set_tx(&app, &tx_store, &serial, None);
+                result.failure = Some("LOCAL_BROADCAST_FAILED".to_string());
+                result.message = output_text_value.trim().to_string();
+                return Ok(result);
+            }
+
+            collect_local_simulator_evidence(
+                &app,
+                &serial,
+                &cancel_store,
+                &mut result,
+                &tx_store,
+            )?;
+            clear_cancel(&cancel_store, &serial);
+            let _ = persist_transactions(&app, &tx_store);
+            emit_log(&app, format!("Local simulator result: {}", result.state), if result.state == "ALERT_DISPLAYED" { "ok" } else { "warn" });
+            return Ok(result);
+        }
+
         if !matches!(device.state, DeviceState::Ready) {
             result.failure = Some(
                 match device.state {
@@ -1352,6 +1399,7 @@ async fn send_test_alert(
                     DeviceState::Unsupported => "CELLBROADCAST_MISSING",
                     DeviceState::Unknown => "DEVICE_UNKNOWN",
                     DeviceState::Ready => "UNKNOWN",
+                    DeviceState::SimulatorReady => "LOCAL_SIMULATOR",
                 }
                 .to_string(),
             );
@@ -1375,6 +1423,7 @@ async fn send_test_alert(
                     "The device is not in a known ADB-ready state.".to_string()
                 }
                 DeviceState::Ready => "Device is ready.".to_string(),
+                DeviceState::SimulatorReady => "Local Android simulator is ready.".to_string(),
             };
 
             return Ok(result);
