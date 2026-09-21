@@ -68,6 +68,7 @@ pub struct Device {
     pub debuggable: Option<String>,
     pub root: bool,
     pub cellbroadcast_package: Option<String>,
+    pub cellbroadcast_candidates: Vec<String>,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -363,8 +364,17 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
         .to_string()
 }
 
-fn find_cellbroadcast(app: &tauri::AppHandle, serial: &str) -> Option<String> {
-    let text = shell(app, serial, &["pm", "list", "packages"]).ok()?;
+/// Every package on the device that looks like a Cell Broadcast receiver, most likely first.
+///
+/// An OEM distribution may ship more than one: a Google/Mainline module (updated through the
+/// store) alongside a vendor build (a Galaxy A35 could carry both). Which one is actually
+/// handling alerts is not decidable from the package list, so the controller carries them in
+/// preference order and lets the device decide.
+fn cellbroadcast_candidates(app: &tauri::AppHandle, serial: &str) -> Vec<String> {
+    let text = match shell(app, serial, &["pm", "list", "packages"]) {
+        Ok(text) => text,
+        Err(_) => return Vec::new(),
+    };
 
     let mut packages = text.lines()
         .map(str::trim)
@@ -373,18 +383,22 @@ fn find_cellbroadcast(app: &tauri::AppHandle, serial: &str) -> Option<String> {
         .map(str::to_string)
         .collect::<Vec<_>>();
 
+    // Rank by how specifically the name identifies a receiver module, then alphabetically so the
+    // order is stable across runs rather than dependent on `pm list` output order.
     packages.sort_by_key(|package| {
         let lower = package.to_ascii_lowercase();
-        if lower.contains("cellbroadcastreceiver") {
+        let rank = if lower.contains("cellbroadcastreceiver") {
             0
         } else if lower.contains("cellbroadcast") {
             1
         } else {
             2
-        }
+        };
+        (rank, lower)
     });
+    packages.dedup();
 
-    packages.into_iter().next()
+    packages
 }
 
 fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
@@ -538,6 +552,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 debuggable: None,
                 root: false,
                 cellbroadcast_package: None,
+                cellbroadcast_candidates: Vec::new(),
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -561,6 +576,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 debuggable: None,
                 root: false,
                 cellbroadcast_package: None,
+                cellbroadcast_candidates: Vec::new(),
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -581,6 +597,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 debuggable: None,
                 root: false,
                 cellbroadcast_package: None,
+                cellbroadcast_candidates: Vec::new(),
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -598,7 +615,8 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let debuggable = getprop(app, &serial, "ro.debuggable");
 
         let root = is_root(app, &serial, &build_type);
-        let cellbroadcast_package = find_cellbroadcast(app, &serial);
+        let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
+        let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
 
         let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356")
             || model.to_ascii_lowercase().contains("galaxy a35");
@@ -641,6 +659,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             debuggable: (!debuggable.is_empty()).then_some(debuggable),
             root,
             cellbroadcast_package,
+            cellbroadcast_candidates,
             state,
             support_level,
             specs,
@@ -755,11 +774,15 @@ fn push_text_file(
     let _ = fs::remove_file(&local);
     pushed?;
 
-    let command = format!(
-        "cat /data/local/tmp/emergency-sim-prefs.xml > '{remote}'; rm -f /data/local/tmp/emergency-sim-prefs.xml"
+    // Array-based: no intermediate shell string is constructed, so nothing in the path can be
+    // reinterpreted. Quoting the remote path additionally tolerates a package name that somehow
+    // reached this point with a metacharacter in it.
+    let script = format!(
+        "cat /data/local/tmp/emergency-sim-prefs.xml > {remote}; rm -f /data/local/tmp/emergency-sim-prefs.xml",
+        remote = sh_quote(remote),
     );
 
-    shell(app, serial, &["sh", "-c", &command]).map(|_| ())
+    shell(app, serial, &["sh", "-c", &script]).map(|_| ())
 }
 
 fn prepare_test_mode(
@@ -816,6 +839,45 @@ fn injector_path(app: &tauri::AppHandle) -> Option<PathBuf> {
     )
 }
 
+/// Quote one argument for the POSIX shell that runs on the device.
+///
+/// `adb shell` does not preserve an argument vector: it concatenates argv into a single string
+/// that `/system/bin/sh` on the device re-parses. An argument containing a space, a quote, `$`,
+/// `;`, `|`, `&`, `(`, `)`, `<`, `>` or a backtick therefore either splits into several words or
+/// is interpreted by that shell. The single canonical defence is to wrap the value in single
+/// quotes and encode any embedded single quote as `'\''`, which the quoting here does, in Rust
+/// rather than on the device.
+///
+/// The `'` sequence is the only one no shell can misinterpret: inside single quotes every other
+/// metacharacter is a literal, so once the embedded quotes are broken out there is nothing left
+/// for the device shell to act on.
+fn sh_quote(value: &str) -> String {
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('\'');
+    for character in value.chars() {
+        if character == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// The complete `app_process` invocation, quoted so the device shell receives exactly the three
+/// arguments the injector expects regardless of what the operator typed into the body.
+fn injector_command_script(package: &str, body: &str) -> String {
+    format!(
+        "CLASSPATH={class} app_process /system/bin {main} {category} {package} {body}",
+        class = INJECTOR_REMOTE,
+        main = sh_quote(INJECTOR_CLASS),
+        category = sh_quote(&SERVICE_CATEGORY.to_string()),
+        package = sh_quote(package),
+        body = sh_quote(body),
+    )
+}
+
 fn push_injector(
     app: &tauri::AppHandle,
     serial: &str,
@@ -864,8 +926,9 @@ fn collect_evidence(
             return Ok(());
         }
 
-        thread::sleep(Duration::from_secs(2));
-
+        // The rejection and filtering signals are read *before* the sleep as well as after it.
+        // Reading only after the sleep would add two seconds to every candidate fallback, and the
+        // rejection is already present in the buffer the moment the broadcast is refused.
         let dump = shell(app, serial, &["logcat", "-d", "-t", "3000"])
             .unwrap_or_default();
 
@@ -926,6 +989,8 @@ fn collect_evidence(
                 .insert(serial.to_string(), TxState::Delivered);
             return Ok(());
         }
+
+        thread::sleep(Duration::from_secs(2));
     }
 
     if service_seen {
@@ -1214,21 +1279,33 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        let package = device
-            .cellbroadcast_package
-            .clone()
-            .ok_or_else(|| "No CellBroadcast receiver package was detected.".to_string())?;
+        let candidates = if device.cellbroadcast_candidates.is_empty() {
+            device
+                .cellbroadcast_package
+                .clone()
+                .into_iter()
+                .collect::<Vec<_>>()
+        } else {
+            device.cellbroadcast_candidates.clone()
+        };
+
+        if candidates.is_empty() {
+            return Err("No CellBroadcast receiver package was detected.".to_string());
+        }
 
         emit_log(
             &app,
-            format!("CellBroadcast receiver found: {package}"),
+            format!(
+                "CellBroadcast receiver candidates: {}",
+                candidates.join(", ")
+            ),
             "ok",
         );
 
         let test_mode = prepare_test_mode(
             &app,
             &serial,
-            &package,
+            &candidates[0],
             false,
             &|message| emit_log(&app, message, "info"),
         )?;
@@ -1273,47 +1350,125 @@ async fn send_test_alert(
             "info",
         );
 
-        let category = SERVICE_CATEGORY.to_string();
+        // One pre-quoted string, passed as a single `adb shell` argument. Handing adb separate
+        // argv elements would let it join them unquoted and let the device shell re-split the
+        // body on whitespace and act on metacharacters.
+        //
+        // Each candidate is tried in the same, already-prepared test-mode context. The next
+        // candidate is attempted *only* when the platform explicitly rejected the broadcast for
+        // the one just tried -- never on a timeout or a plain absence of evidence, because that
+        // would risk stacking a second alert on a device that may already be showing the first.
+        let mut last_detail: Option<String> = None;
 
-        let output = command_output(
-            &app,
-            &[
-                "-s",
-                &serial,
-                "shell",
-                "CLASSPATH=/data/local/tmp/alertinject.jar",
-                "app_process",
-                "/system/bin",
-                INJECTOR_CLASS,
-                &category,
-                &package,
-                &normalized_body,
-            ],
-        )?;
+        for (index, package) in candidates.iter().enumerate() {
+            if cancel_requested(&cancel_store, &serial) {
+                clear_cancel(&cancel_store, &serial);
+                result.state = "CANCELLED".to_string();
+                result.failure = Some("USER_CANCELLED".to_string());
+                result.message = "Operation cancelled before delivery.".to_string();
+                let _ = set_tx(&app, &tx_store, &serial, None);
+                return Ok(result);
+            }
 
-        result.injector_exit_code = output.status.code();
+            if index > 0 {
+                emit_log(
+                    &app,
+                    format!("Retrying with alternate receiver: {package}"),
+                    "warn",
+                );
+                let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
+            }
 
-        let injector_text = output_text(&output);
-        if let Some(first_line) = injector_text.lines().next() {
-            emit_log(
+            let script = injector_command_script(package, &normalized_body);
+            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
+                Ok(output) => output,
+                Err(error) => {
+                    // adb could not be started at all, so no broadcast was sent. Clearing the
+                    // gate lets the operator retry; leaving it Busy would lock the device out
+                    // until the safety state was reset by hand.
+                    let _ = set_tx(&app, &tx_store, &serial, None);
+                    result.state = "FAILED".to_string();
+                    result.failure = Some("ADB_TRANSPORT".to_string());
+                    result.message = error.clone();
+                    emit_log(&app, error, "error");
+                    clear_cancel(&cancel_store, &serial);
+                    return Ok(result);
+                }
+            };
+
+            result.injector_exit_code = output.status.code();
+
+            let injector_text = output_text(&output);
+            if let Some(first_line) = injector_text.lines().next() {
+                emit_log(&app, format!("Injector: {first_line}"), "info");
+            }
+
+            // An injector that never ran as root cannot have produced an alert, and saying so is
+            // more useful than reporting "no evidence". `app_process` exits 0 either way, so the
+            // exit code alone cannot distinguish this; only the injector's own refusal text can.
+            if !output.status.success() || injector_text.contains("Permission Denial") {
+                let detail = injector_text
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("the injector produced no output")
+                    .trim()
+                    .to_string();
+
+                let _ = set_tx(&app, &tx_store, &serial, None);
+                result.state = "FAILED".to_string();
+                result.failure = Some("INJECTOR_FAILURE".to_string());
+                result.message = format!(
+                    "The on-device injector did not run as a system identity. {detail}"
+                );
+                emit_log(&app, result.message.clone(), "error");
+                clear_cancel(&cancel_store, &serial);
+                return Ok(result);
+            }
+
+            collect_evidence(
                 &app,
-                format!("Injector: {first_line}"),
-                "info",
-            );
+                &serial,
+                &cancel_store,
+                &mut result,
+                &tx_store,
+            )?;
+
+            if result.state == "CANCELLED" {
+                clear_cancel(&cancel_store, &serial);
+                return Ok(result);
+            }
+
+            let rejected = result.state == "FAILED"
+                && result.failure.as_deref() == Some("BROADCAST_REJECTED");
+
+            if !rejected {
+                break;
+            }
+
+            last_detail = Some(format!(
+                "Android rejected the protected broadcast for {package}."
+            ));
+            let _ = set_tx(&app, &tx_store, &serial, None);
+
+            // A rejection produced no downstream evidence, so nothing is on screen and trying the
+            // next candidate cannot stack an alert.
+            if index + 1 >= candidates.len() {
+                break;
+            }
+
+            result.evidence.clear();
+            result.state = "FAILED".to_string();
+            result.failure = Some("BROADCAST_REJECTED".to_string());
         }
 
-        collect_evidence(
-            &app,
-            &serial,
-            &cancel_store,
-            &mut result,
-            &tx_store,
-        )?;
-
-        if result.state == "FAILED"
-            && result.failure.as_deref() == Some("BROADCAST_REJECTED")
-        {
-            let _ = set_tx(&app, &tx_store, &serial, None);
+        if result.state == "FAILED" && result.failure.as_deref() == Some("BROADCAST_REJECTED") {
+            if let Some(detail) = last_detail {
+                result.message = if candidates.len() > 1 {
+                    format!("{detail} No alternate CellBroadcast receiver on this device accepted it.")
+                } else {
+                    detail
+                };
+            }
         }
 
         let _ = persist_transactions(&app, &tx_store);
@@ -1367,10 +1522,118 @@ fn reset_safety_state(
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The defect this guards is the one BUG-001 recorded in the retired Python controller: a
+    /// multi-word body arriving at the injector as several shell words, so only the first was
+    /// bound to `argv[2]`. The alert still displayed and every exit code was 0, which is why the
+    /// project treats exit codes as evidence of nothing.
+    #[test]
+    fn injector_command_survives_a_multi_word_body() {
+        let script = injector_command_script(
+            "com.google.android.cellbroadcastreceiver",
+            "TEST ALERT - SIMULATION",
+        );
+
+        assert!(script.contains("'TEST ALERT - SIMULATION'"));
+        assert!(!script.contains("TEST ALERT - SIMULATION "));
+    }
+
+    #[test]
+    fn injector_command_quotes_every_injector_argument() {
+        let script = injector_command_script(
+            "com.samsung.android.cellbroadcastreceiver",
+            "TEST ALERT - SIMULATION",
+        );
+
+        assert!(script.contains(&format!("'{}'", INJECTOR_CLASS)));
+        assert!(script.contains(&format!("'{}'", SERVICE_CATEGORY)));
+        assert!(script.contains("'com.samsung.android.cellbroadcastreceiver'"));
+        assert!(script.starts_with("CLASSPATH=/data/local/tmp/alertinject.jar app_process /system/bin"));
+    }
+
+    #[test]
+    fn sh_quote_neutralises_shell_metacharacters() {
+        // If any of these reached the device shell unquoted, the command would be split or the
+        // tail would be executed as a separate command.
+        let hostile = "TEST; rm -rf /data/local/tmp | cat $(id) `whoami` & echo > /sdcard/x";
+        let quoted = sh_quote(hostile);
+
+        assert_eq!(quoted, format!("'{}'", hostile));
+        assert_eq!(quoted.matches('\'').count(), 2);
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+    }
+
+    #[test]
+    fn sh_quote_escapes_an_embedded_single_quote() {
+        let quoted = sh_quote("TEST it's here");
+        assert_eq!(quoted, "'TEST it'\\''s here'");
+
+        // Reading the quoting back the way a POSIX shell would must reproduce the input exactly.
+        assert_eq!(unquote_posix(&quoted), "TEST it's here");
+    }
+
+    #[test]
+    fn sh_quote_round_trips_every_printable_ascii_body() {
+        // Every byte the operator can type must come back unchanged, so no body can be silently
+        // mangled into a different alert.
+        for byte in 0x20u8..=0x7e {
+            let original = format!("TEST {}", byte as char);
+            let quoted = sh_quote(&original);
+            assert_eq!(unquote_posix(&quoted), original, "failed for {byte:#04x}");
+        }
+    }
+
+    #[test]
+    fn sh_quote_round_trips_quotes_backslashes_and_newlines() {
+        for original in [
+            "TEST 'quoted'",
+            "TEST \\ backslash \\\\",
+            "TEST\nsecond line",
+            "TEST \"double\" and 'single'",
+            "TEST $HOME ${PATH} $(id)",
+            "TEST 日本語 🚨",
+        ] {
+            assert_eq!(unquote_posix(&sh_quote(original)), original, "failed for {original:?}");
+        }
+    }
+
+    #[test]
+    fn sh_quote_leaves_an_already_safe_body_readable() {
+        assert_eq!(sh_quote("TEST ALERT"), "'TEST ALERT'");
+        assert_eq!(sh_quote(""), "''");
+    }
+
+    /// A minimal POSIX single-quote reader, used only to prove the quoting is lossless. It
+    /// implements the one rule `sh_quote` relies on: `'\''` closes, emits a literal quote, and
+    /// reopens.
+    fn unquote_posix(quoted: &str) -> String {
+        let mut out = String::new();
+        let mut chars = quoted.chars().peekable();
+        let mut in_quotes = false;
+
+        while let Some(character) = chars.next() {
+            match character {
+                '\'' => in_quotes = !in_quotes,
+                '\\' if !in_quotes => {
+                    if let Some(next) = chars.next() {
+                        out.push(next);
+                    }
+                }
+                other => out.push(other),
+            }
+        }
+
+        out
+    }
+}
+
+
 pub fn run() {
     let transactions: SharedTx = Arc::new(TxStore::default());
     let cancellations: SharedCancel = Arc::new(CancelStore::default());
-
     tauri::Builder::default()
         .manage(transactions.clone())
         .manage(cancellations)
