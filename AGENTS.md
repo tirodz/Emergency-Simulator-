@@ -29,6 +29,33 @@ evidence. When that evidence is absent, report `UNKNOWN` or `UNCERTAIN`.
 "ADB is transport, not privilege escalation." The command being accepted is not Android authorising
 it, and that gap is the investigation rather than a detail.
 
+## `adb shell` does not preserve an argument vector
+
+`adb shell` joins its arguments into a single string that the **device's** `/system/bin/sh` then
+re-parses. Quoting is the caller's job, not adb's, and getting it wrong is silent: the command runs,
+the exit code is 0, and only the first word of the body reaches the injector. This is BUG-001, and it
+recurred in the Rust rewrite as BUG-015 — a fix in a component that is later replaced is not a
+property of the system.
+
+So: build the entire remote command yourself and pass it as **one** `adb shell` argument, with every
+remote argument POSIX-quoted (`sh_quote` in `src-tauri/src/lib.rs`). Do not hand adb separate argv
+elements and rely on its escaping. Any new transport (Wi-Fi, a new wrapper) crosses the same boundary
+and must apply the same rule.
+
+## Where the code actually is
+
+The briefs that arrive from outside this repository describe a Python ADB bridge in `tools/bridge.py`
+and a Python controller in `app/`. That describes the **retired** design. Check before patching:
+
+* `tools/bridge.py` — the analysis-environment HTTP bridge. Serves task batches, stores posted
+  evidence, and never touches a phone. It is not on the product path.
+* `src-tauri/src/lib.rs` — the real ADB command layer for the shipped Windows application.
+* `android/alertinject/` — the real injector.
+* `app/`, `tools/test_controller.py`, `tools/test_alert.py` — retired with the Tkinter shell; do not
+  treat their bug records as coverage of the current code.
+
+A defect recorded against a retired component has to be re-checked against the current one.
+
 ## Hard constraints
 
 * The operator's phones are private property. No rooting, bootloader unlock, flashing, custom

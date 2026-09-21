@@ -5,8 +5,128 @@
 
 ## Current status
 
-**Mission 3 remains blocked on physical A35 evidence.** The existing A35-RO-001 batch is still the
-next device action; no phone-side command has been executed by this session.
+**Repository audit completed; two latent defects in the shipped Rust controller were found and
+fixed, and the root-free question was answered explicitly rather than left implicit.**
+
+The audit began from a brief that assumed the ADB command layer lived in `tools/bridge.py`. It does
+not. `tools/bridge.py` is the analysis-environment HTTP bridge — it serves task batches and stores
+posted evidence, and it deliberately never touches a phone. The real command layer for the product
+is `src-tauri/src/lib.rs` (Rust/Tauri), and the injector is
+`android/alertinject/org/emergencysim/alertinject/AlertInjector.java`. The brief's BUG-001 was fixed
+in the **retired Python controller** and was not carried into the Rust rewrite. Any work done against
+the brief's stated premise would have patched a file that is not on the product path; the audit
+redirected to the code that actually ships.
+
+### What was fixed this session
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-015](docs/bugs/BUG-015-rust-shell-argument-flattening.md) | The Rust controller passed the alert body as a separate `adb shell` argument, so it relied on adb's own escaping instead of quoting it | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-016](docs/bugs/BUG-016-single-cellbroadcast-candidate.md) | Discovery assumed exactly one CellBroadcast package and never tried another | `src-tauri/src/lib.rs` | FIXED |
+
+`adb shell` does not preserve an argument vector: it joins its arguments into one string that the
+*device's* shell re-parses. The controller handed it separate argv elements with no quoting, which is
+the BUG-001 defect class reintroduced. The controller now builds the entire remote command itself and
+passes it as a single argument, with every injector argument POSIX-quoted by `sh_quote` in Rust. The
+transport no longer depends on adb's escaping behaviour at all.
+
+The same treatment was applied to the preference-file push, which had interpolated the remote path
+into an `sh -c` string by hand.
+
+### Secondary hardening in the same pass
+
+* An adb transport failure after the safety gate moved to `Busy` used to return early through `?` and
+  leave the gate stuck, locking the device out until the operator reset the safety state by hand. It
+  now clears the gate and reports `ADB_TRANSPORT`.
+* An injector that did not run as a system identity now reports `INJECTOR_FAILURE` with the
+  injector's own first line, instead of falling through to "no evidence". `app_process` exits 0
+  whether or not the broadcast was permitted, so the exit code alone cannot distinguish the two.
+* The evidence collector now reads the rejection signal before its poll sleep as well as after it, so
+  an OEM candidate fallback costs no extra delay.
+* `AlertInjector` now prints the UID it is running as, so a refused attempt states its own reason.
+
+### The root-free question, answered
+
+The brief asked for an elevated execution path using "ADB (`uid=2000`) or Shizuku". Neither works,
+and the reason is now recorded with its source in [`docs/privilege-model.md`](docs/privilege-model.md)
+§6. The emergency action is a `<protected-broadcast>`, so `ActivityManagerService` requires the
+*sending* UID to be an accepted system UID; that check runs before any permission. `shell` is UID
+2000 and is not on the list, and **Shizuku's binder callbacks also run as the `shell` UID**, so a
+Shizuku-bound injector fails at exactly the same place. Shizuku is not a root-free route into this
+pipeline. This is the boundary the project exists to preserve, so it is stated rather than routed
+around.
+
+BUG-015's fix is necessary but not sufficient for the non-root goal: correct quoting makes the
+*transport* reliable, while the UID gate is what makes the *operation* root-only.
+
+### Verification performed
+
+* `cargo`-independent extraction of the real `sh_quote`, `injector_command_script` and the test
+  module: **7/7 unit tests pass** against the actual source.
+* The exact command `injector_command_script` produces was executed through a real `/bin/sh` with a
+  stub `app_process` reporting its argv: **21 hostile bodies** (`;`, `|`, `$(id)`, backticks, `&`,
+  redirects, quotes, backslashes, globs, newlines, tabs, emoji) all arrive byte-identical.
+* `javac -source 8 -target 8` on `AlertInjector.java` against minimal Android stubs: compiles clean.
+* Whole-file syntax check of `lib.rs`: brace/paren balance intact, and the only two non-dependency
+  errors are present identically in the committed version and are cascades of the missing `tauri`
+  crate, not regressions.
+* `tools/check_paste_ps1.py`: OK.
+
+### Carried over — Mission 3 and Mission 4
+
+**Mission 3 remains blocked on physical A35 evidence.** Batch `A35-RO-001` is served and the operator
+has not yet posted it; `evidence/` is empty. A read-only batch is still the next device action.
+
+The A35's stock firmware is diagnostic-only and the documented boundary is unchanged: the controlled
+root/userdebug path remains the only demonstrated alert path, and stock retail devices are not
+claimed supported.
+
+### Immediate next steps
+
+1. Merge the fix branch once CI is green.
+2. Run the Rust unit tests on the real Windows runner (they are now part of the build job).
+3. Continue Mission 3: post and read `A35-RO-001`, then decide from evidence whether any
+   OEM-supported, non-privileged test entry point exists. If none does, record the boundary.
+
+## Current milestone
+
+The desktop product is the Tauri 2 + Rust + HTML/CSS/JavaScript application with the custom glass
+visual system. The next milestones, in order:
+
+1. Get the BUG-015/BUG-016 fixes reviewed and merged.
+2. `EXP-ALERT-002` — lock-screen presentation, vibration and DND override. Still the oldest open
+   item, blocked on a locked device.
+3. Wi-Fi transport — the controller is transport-agnostic; add a network path alongside adb, keeping
+   the same evidence-based result detection. **Any new transport must apply the BUG-015 quoting rule
+   at the boundary it crosses.**
+4. Multi-device fan-out — iterate the existing per-device send; do not build a parallel pipeline.
+
+### Verification plan for the fixes
+
+1. CI runs `cargo test --lib` in the Windows build job.
+2. A controlled root/userdebug target is needed to exercise the OEM fallback branch, which is only
+   reachable when the platform rejects a protected broadcast with two receivers present.
+
+## Last known working state
+
+* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `d1a85d2`.
+* **Active branch:** the BUG-015/BUG-016 fix branch.
+* **Build:** `npx tauri build --ci`; CI `.github/workflows/build-windows.yml` builds on
+  `windows-latest` and produces the app, the NSIS installer and the release artifacts.
+* **Tests:** `cargo test --manifest-path src-tauri/Cargo.toml --lib` (7 tests, no device needed).
+* **Injector build:** `bash android/alertinject/build.sh` (needs JDK + Android SDK).
+* **Paste check:** `python3 tools/check_paste_ps1.py`.
+* **Controlled target recipe:** [`docs/environment-setup.md`](docs/environment-setup.md) §8.
+
+## Git commits
+
+| Commit | Subject |
+| --- | --- |
+| (this branch) | fix: quote the injector command so the alert body cannot be split or reinterpreted |
+| (this branch) | fix: carry every CellBroadcast candidate and retry only on explicit rejection |
+| (this branch) | test: guard the transport quoting with unit tests and a real-shell cross-check |
+| (this branch) | docs: record BUG-015 and BUG-016, and answer the root-free question |
+
 
 **Controlled-path hardening just completed on branch `fix/controlled-oem-path-and-capability-ui`.**
 The Android injector no longer hardcodes Google's CellBroadcast package. The Rust controller discovers
