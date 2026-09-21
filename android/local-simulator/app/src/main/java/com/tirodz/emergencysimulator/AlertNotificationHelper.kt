@@ -47,6 +47,7 @@ object AlertNotificationHelper {
                 .setContentText(message)
                 .setCategory(Notification.CATEGORY_ALARM)
                 .setVisibility(Notification.VISIBILITY_PUBLIC)
+                .setContentIntent(fullScreenPendingIntent)
                 .setOngoing(true)
                 .setAutoCancel(false)
                 .setFullScreenIntent(fullScreenPendingIntent, true)
