@@ -1803,6 +1803,7 @@ pub fn run() {
             adb_connect,
             restart_adb_server,
             list_devices,
+            install_local_simulator_command,
             open_android_settings,
             send_test_alert,
             acknowledge,
