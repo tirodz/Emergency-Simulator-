@@ -27,9 +27,8 @@ jobs:
           java-version: "21"
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-      - name: Install Android build tools
-        shell: bash
-        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+        with:
+          packages: "platforms;android-35 build-tools;35.0.0"
       - name: Build injector from source
         shell: bash
         env:
