@@ -36,6 +36,7 @@ button,input,textarea,select{font:inherit}
 button{border:0}
 .window{width:100%;height:100%;display:grid;grid-template-rows:var(--top) 1fr;position:relative}
 .topbar{
+ -webkit-app-region:drag;
  display:flex;align-items:center;gap:16px;padding:0 14px 0 18px;position:relative;z-index:80;border-bottom:1px solid var(--line);
  background:rgba(5,9,7,.48);backdrop-filter:blur(30px) saturate(1.4);-webkit-backdrop-filter:blur(30px) saturate(1.4)
 }
@@ -53,7 +54,7 @@ html[data-theme="light"] .topbar{background:rgba(244,249,246,.60)}
 }
 .top-pill strong{color:var(--text)}
 .dot{width:7px;height:7px;border-radius:50%;background:var(--muted2)}.dot.green{background:var(--accent);box-shadow:0 0 0 4px var(--accentSoft),0 0 18px var(--accentGlow)}.dot.red{background:var(--danger);box-shadow:0 0 12px rgba(255,109,109,.28)}.dot.amber{background:var(--warning);box-shadow:0 0 12px rgba(255,202,99,.24)}
-.window-controls{display:flex;gap:2px;-webkit-app-region:no-drag}.win-btn{width:34px;height:30px;border-radius:9px;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}.win-btn:hover{background:rgba(255,255,255,.06);color:var(--text)}.win-btn.close:hover{background:#e81123;color:#fff}.win-btn svg{width:14px;height:14px;stroke:currentColor}
+.window-controls{display:flex;gap:2px;-webkit-app-region:no-drag;-webkit-app-region:no-drag}.win-btn{width:34px;height:30px;border-radius:9px;background:transparent;color:var(--muted);display:grid;place-items:center;cursor:pointer}.win-btn:hover{background:rgba(255,255,255,.06);color:var(--text)}.win-btn.close:hover{background:#e81123;color:#fff}.win-btn svg{width:14px;height:14px;stroke:currentColor}
 .body{min-height:0;display:grid;grid-template-columns:var(--sidebar) minmax(0,1fr);position:relative;z-index:1}
 .sidebar{
  min-height:0;padding:18px 14px 15px;display:flex;flex-direction:column;background:rgba(7,12,10,.42);
@@ -75,7 +76,7 @@ html[data-theme="light"] .sidebar{background:rgba(248,252,249,.56)}
 .side-foot{text-align:center;color:var(--muted2);font-size:9px;padding-top:10px;line-height:1.5}
 .main{min-width:0;min-height:0;overflow:auto;padding:26px 30px 24px}.main::-webkit-scrollbar{width:8px}.main::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
 .shell{max-width:1460px;margin:0 auto}.hero{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;margin-bottom:17px}
-.eyebrow{font-size:10px;letter-spacing:1.9px;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}h1{margin:0;font-size:35px;line-height:1.05;letter-spacing:-1.5px} .hero-sub{margin-top:8px;font-size:12px;color:var(--muted)}.hero-sub b{color:var(--text)}
+.eyebrow{font-size:10px;letter-spacing:1.9px;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}h1{margin:0;font-size:30px;line-height:1.05;letter-spacing:-1.5px} .hero-sub{margin-top:8px;font-size:12px;color:var(--muted)}.hero-sub b{color:var(--text)}
 .hero-actions{display:flex;gap:8px}.icon-btn{width:40px;height:40px;border-radius:13px;border:1px solid var(--line);background:rgba(255,255,255,.035);color:var(--muted);display:grid;place-items:center;cursor:pointer;backdrop-filter:blur(18px);transition:.2s var(--ease)}.icon-btn:hover{background:rgba(255,255,255,.06);color:var(--text);border-color:var(--line2);transform:translateY(-1px)}.icon-btn svg{width:18px;height:18px;stroke:currentColor}
 .glass{
  position:relative;overflow:hidden;background:var(--glass);border:1px solid var(--line);border-radius:var(--r);backdrop-filter:blur(var(--blur)) saturate(1.24);-webkit-backdrop-filter:blur(var(--blur)) saturate(1.24);box-shadow:var(--shadowSoft),inset 0 1px rgba(255,255,255,.055)
@@ -213,6 +214,20 @@ function setTheme(v){state.theme=v;document.documentElement.dataset.theme=v;loca
 function setAccent(v){state.accent=v;document.documentElement.dataset.accent=v;localStorage.setItem("es-accent",v);document.querySelectorAll(".accent-btn").forEach(b=>b.style.outline=b.dataset.accent===v?"2px solid rgba(255,255,255,.78)":"")}
 function syncSettings(){$("glowToggle").classList.toggle("on",state.glow);$("motionToggle").classList.toggle("on",state.reduced);document.documentElement.classList.toggle("reduced-motion",state.reduced)}
 function settings(open){$("settingsPanel").classList.toggle("show",open);$("backdrop").classList.toggle("show",open)}
+let uiAudioCtx=null;
+function uiClick(ok=true){
+ try{
+  uiAudioCtx=uiAudioCtx||new (window.AudioContext||window.webkitAudioContext)();
+  if(uiAudioCtx.state==="suspended")uiAudioCtx.resume();
+  const o=uiAudioCtx.createOscillator(),g=uiAudioCtx.createGain();
+  o.type="sine";o.frequency.setValueAtTime(ok?760:180,uiAudioCtx.currentTime);
+  o.frequency.exponentialRampToValueAtTime(ok?520:120,uiAudioCtx.currentTime+0.055);
+  g.gain.setValueAtTime(0.0001,uiAudioCtx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.035,uiAudioCtx.currentTime+0.006);
+  g.gain.exponentialRampToValueAtTime(0.0001,uiAudioCtx.currentTime+0.065);
+  o.connect(g).connect(uiAudioCtx.destination);o.start();o.stop(uiAudioCtx.currentTime+0.07);
+ }catch(_){}
+}
 function selected(){return state.devices.find(d=>d.serial===state.selected)||null}
 function visual(d){if(!d)return{label:"WAITING",kind:"warn",dot:"amber"};if(d.state==="READY")return{label:"READY",kind:"ok",dot:"green"};if(d.state==="UNAUTHORIZED")return{label:"UNAUTHORIZED",kind:"bad",dot:"red"};if(d.state==="NO_ROOT")return{label:"ROOT REQUIRED",kind:"warn",dot:"amber"};if(d.state==="UNSUPPORTED")return{label:"UNSUPPORTED",kind:"bad",dot:"red"};if(d.state==="OFFLINE")return{label:"OFFLINE",kind:"bad",dot:"red"};return{label:d.state||"UNKNOWN",kind:"warn",dot:"amber"}}
 function deviceLabel(d){return (d?.model||d?.product||"Android device")+" · "+d.serial}
@@ -263,7 +278,7 @@ function selectedDevice(){return state.devices.find(d=>d.serial===state.selected
   }catch(e){
     const m=String(e?.message||e);
     log("ADB scan failed - "+m,"error");
-    toast(m,"error");
+    uiClick(false);toast(m,"error");
     $("adbStatus").textContent="ERROR";
     $("adbDot").className="dot red";
   }finally{
@@ -274,13 +289,14 @@ function validate(){const b=$("message").value.trim().replace(/\s+/g," ");const 
 function openConfirm(){const d=selected();if(!d||d.state!=="READY")return;$("confirmText").textContent="Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
 function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
 async function runSend(dry){if(!validate())return;const d=selected();if(!d)return;if(!dry&&d.state!=="READY"){toast("This target is not ready for the controlled test path.","error");return}
- state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing controlled test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:dry});showResult(r)}catch(e){const m=String(e?.message||e);toast(m,"error");log("Controller error · "+m,"error")}finally{state.sending=false;$("cancelBtn").disabled=true;renderDevices();update(selected())}}
+ state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing controlled test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:dry});showResult(r)}catch(e){const m=String(e?.message||e);toast(m,"error");uiClick(false);log("Controller error · "+m,"error")}finally{state.sending=false;$("cancelBtn").disabled=true;renderDevices();update(selected())}}
 function showResult(r){const c=$("resultCard");c.style.display="flex";const ok=r&&r.state==="ALERT_DISPLAYED";$("resultOrb").style.color=ok?"var(--accent)":"var(--danger)";$("resultOrb").style.background=ok?"var(--accentSoft)":"rgba(255,109,109,.10)";$("resultTitle").textContent=ok?"Alert displayed":"Test blocked / uncertain";$("resultText").textContent=(r&&r.message)||r?.failure||"No result returned.";$("ackBtn").disabled=!state.selected;if(ok){toast("Genuine Android alert UI confirmed.","ok");log("Android system alert UI displayed · downstream evidence confirmed","ok");$("statusDot").className="dot green";$("statusTitle").textContent="Alert displayed by Android.";$("statusText").textContent=" Dismiss it on the phone, then acknowledge it here."}else toast((r&&r.message)||"The operation did not complete.","error")}
 async function cancel(){const d=selected();if(!d||!state.sending)return;try{await invoke("request_cancel",{serial:d.serial});log("Stop requested · waiting for a safe checkpoint","warn");toast("Stop requested.")}catch(e){toast(String(e?.message||e),"error")}}
 async function ack(){if(!state.selected)return;try{await invoke("acknowledge",{serial:state.selected});$("resultCard").style.display="none";log("Acknowledged target safety state · "+state.selected,"ok");toast("Device transaction gate cleared.","ok");await refresh()}catch(e){toast(String(e?.message||e),"error")}}
 async function resetState(){try{await invoke("reset_safety_state");$("resultCard").style.display="none";log("Local safety gate reset after operator confirmation","warn");toast("Local safety gate reset.","ok");await refresh()}catch(e){toast(String(e?.message||e),"error")}}
 async function init(){
  setTheme(state.theme);syncSettings();renderLog();
+ document.querySelectorAll("button:not(:disabled)").forEach(b=>b.addEventListener("click",()=>uiClick(true),{passive:true}));
  document.querySelectorAll(".glass").forEach(el=>el.addEventListener("pointermove",e=>{const r=el.getBoundingClientRect();el.style.setProperty("--mx",((e.clientX-r.left)/r.width*100)+"%");el.style.setProperty("--my",((e.clientY-r.top)/r.height*100)+"%")}));
  document.addEventListener("pointermove",e=>{if(state.glow){document.documentElement.style.setProperty("--gx",e.clientX+"px");document.documentElement.style.setProperty("--gy",e.clientY+"px")}});
  document.querySelectorAll("[data-nav]").forEach(b=>b.onclick=()=>{document.querySelectorAll("[data-nav]").forEach(x=>x.classList.remove("active"));b.classList.add("active");const n=b.dataset.nav;document.body.classList.remove("view-overview","view-activity");if(n==="devices"){renderStudio();showStudio(true)}else if(n==="activity"){document.body.classList.add("view-activity");$("activityLog").scrollIntoView({behavior:"smooth",block:"start"})}else{document.body.classList.add("view-overview");document.querySelector(".main")?.scrollTo?.({top:0,behavior:"smooth"})}});
@@ -290,7 +306,7 @@ async function init(){
  $("refreshBtn").onclick=refresh;$("studioRefresh").onclick=refresh;$("studioClose").onclick=()=>showStudio(false);$("studioDiag").onclick=async()=>{try{const r=await invoke("adb_diagnostics");log("ADB "+r.source);log((r.devices_raw||"").replace(/\n/g," | "));toast("ADB diagnostics added to Activity")}catch(e){toast(String(e?.message||e))}};$("studioDiag2").onclick=async()=>{try{const r=await invoke("adb_diagnostics");log("ADB "+r.source);log((r.devices_raw||"").replace(/\n/g," | "));toast("ADB diagnostics added to Activity")}catch(e){toast(String(e?.message||e))}};$("studioRestart").onclick=async()=>{try{const m=await invoke("restart_adb_server");log("ADB server restarted · "+String(m||"ready"),"ok");toast("ADB server restarted");await refresh()}catch(e){log("ADB restart failed · "+String(e?.message||e),"error");toast(String(e?.message||e),"error")}};$("studioDry").onclick=()=>{const d=selectedDevice();if(d)runSend(true)};$("studioDev").onclick=async()=>{const d=selectedDevice();if(d)try{await invoke("open_android_settings",{serial:d.serial})}catch(e){toast(String(e?.message||e))}};$("studioWifi").onclick=()=>{$("wifiPanel").classList.add("show")};$("wifiClose").onclick=()=>{$("wifiPanel").classList.remove("show")};$("wifiPair").onclick=async()=>{try{const r=await invoke("adb_pair",{address:$("wifiPairAddress").value.trim(),pairing_code:$("wifiPairCode").value.trim()});log("Wi-Fi ADB pairing · "+r,"ok");toast("Pairing succeeded");}catch(e){log("Wi-Fi ADB pairing failed · "+String(e?.message||e),"error");toast(String(e?.message||e),"error")}};$("wifiConnect").onclick=async()=>{try{const r=await invoke("adb_connect",{address:$("wifiDeviceAddress").value.trim()});log("Wi-Fi ADB connect · "+r,"ok");toast("Device connect requested");await refresh()}catch(e){log("Wi-Fi ADB connect failed · "+String(e?.message||e),"error");toast(String(e?.message||e),"error")}};
 
  $("settingsDeviceBtn").onclick=async()=>{const d=selected();if(!d)return;try{await invoke("open_android_settings",{serial:d.serial});log("Opened Android Settings on "+deviceLabel(d));toast("Android Settings opened on the phone.","ok")}catch(e){toast(String(e?.message||e),"error")}};
- $("targetSelect").onchange=e=>{state.selected=e.target.value;renderDevices()};$("message").oninput=validate;$("sendBtn").onclick=openConfirm;$("dryBtn").onclick=()=>runSend(true);$("cancelBtn").onclick=cancel;$("ackBtn").onclick=ack;$("clearBtn").onclick=()=>{state.log=[];renderLog()};$("resetStateBtn").onclick=resetState;
+ $("targetSelect").onchange=e=>{state.selected=e.target.value;renderDevices()};$("message").oninput=validate;$("sendBtn").onclick=()=>{uiClick(true);openConfirm()};$("dryBtn").onclick=()=>{uiClick(true);runSend(true)};$("cancelBtn").onclick=cancel;$("ackBtn").onclick=ack;$("clearBtn").onclick=()=>{state.log=[];renderLog()};$("resetStateBtn").onclick=resetState;
  $("minBtn").onclick=()=>invoke("window_minimize");$("maxBtn").onclick=()=>invoke("window_toggle_maximize");$("closeBtn").onclick=()=>invoke("window_close");
  if(window.__TAURI__&&window.__TAURI__.event&&window.__TAURI__.event.listen){await window.__TAURI__.event.listen("activity",e=>{const p=e?.payload;if(p?.message)log(p.message,p.kind||"info")})}
  try{const info=await invoke("app_info");$("adbStatus").textContent=info?.adb_source||"BUNDLED";log("Tauri desktop runtime ready · Rust controller online","ok")}catch(e){$("fatalText").textContent=String(e?.message||e);$("fatal").classList.add("show");return}
