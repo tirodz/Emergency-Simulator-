@@ -229,7 +229,7 @@ function uiClick(ok=true){
  }catch(_){}
 }
 function selected(){return state.devices.find(d=>d.serial===state.selected)||null}
-function visual(d){if(!d)return{label:"WAITING",kind:"warn",dot:"amber"};if(d.state==="READY")return{label:"READY",kind:"ok",dot:"green"};if(d.state==="UNAUTHORIZED")return{label:"UNAUTHORIZED",kind:"bad",dot:"red"};if(d.state==="NO_ROOT")return{label:"ROOT REQUIRED",kind:"warn",dot:"amber"};if(d.state==="UNSUPPORTED")return{label:"UNSUPPORTED",kind:"bad",dot:"red"};if(d.state==="OFFLINE")return{label:"OFFLINE",kind:"bad",dot:"red"};return{label:d.state||"UNKNOWN",kind:"warn",dot:"amber"}}
+function visual(d){if(!d)return{label:"WAITING",kind:"warn",dot:"amber"};if(d.state==="SIMULATOR_READY")return{label:"LOCAL READY",kind:"ok",dot:"green"};if(d.state==="READY")return{label:"READY",kind:"ok",dot:"green"};if(d.state==="UNAUTHORIZED")return{label:"UNAUTHORIZED",kind:"bad",dot:"red"};if(d.state==="NO_ROOT")return{label:"ROOT REQUIRED",kind:"warn",dot:"amber"};if(d.state==="UNSUPPORTED")return{label:"UNSUPPORTED",kind:"bad",dot:"red"};if(d.state==="OFFLINE")return{label:"OFFLINE",kind:"bad",dot:"red"};return{label:d.state||"UNKNOWN",kind:"warn",dot:"amber"}}
 function deviceLabel(d){return (d?.model||d?.product||"Android device")+" · "+d.serial}
 function renderPreview(d){
  const e=$("devicePreview"); if(!e) return;
@@ -238,8 +238,10 @@ function renderPreview(d){
  if(!samsung){e.classList.remove("show");return}
  e.classList.add("show");
  $("previewTitle").textContent=d.model||"Samsung Galaxy";
- $("previewCopy").textContent=d.state==="NO_ROOT"
-   ?"Samsung device detected. The stock retail build is available for read-only diagnostics; the controlled protected alert injector requires a development target."
+ $("previewCopy").textContent=d.state==="SIMULATOR_READY"
+   ?"Samsung device detected. Root-free local alert simulator is installed and ready."
+   :d.state==="NO_ROOT"
+   ?"Samsung device detected. Install the bundled local simulator to test the alert UI without root."
    :"Samsung hardware reference render. Device identity comes from ADB inspection.";
 }
 function cbTarget(d){
