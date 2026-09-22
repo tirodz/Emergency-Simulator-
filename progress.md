@@ -5,6 +5,55 @@
 
 ## Current status — deep platform investigation session (2026-09-22)
 
+### Continuation — re-verified, and the ADB route closed with citations
+
+This continuation re-derived the above from first principles and then closed the remaining
+alternative route, so that no future session has to retry it.
+
+**The `am broadcast` to `SMS_CB_RECEIVED` idea is now refuted with source, not argument.**
+`docs/stock-device/why-adb-cannot-send-sms-cb-received.md` records three gates, all verified
+against `android14-release`:
+
+1. `<protected-broadcast android:name="android.provider.Telephony.SMS_CB_RECEIVED" />` in
+   `frameworks/base/core/res/AndroidManifest.xml` (lines 749-750).
+2. `ActivityManagerService.broadcastIntentLocked` builds `isCallerSystem` from a uid switch that
+   lists `ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`, `SE_UID`,
+   `NETWORK_STACK_UID` — and not `SHELL_UID`. `SHELL_UID` does appear in the same file for other
+   checks, so its absence here is deliberate. `adb shell` presents uid 2000 and is refused with
+   `SecurityException` before any receiver runs. Root does not change this, because root is not
+   Android and `isCallerSystem` is computed from `callingUid`.
+3. `cellbroadcastreceiver.SHOW_NEW_ALERT` is *not* protected, but its consumer
+   `CellBroadcastAlertService` is `android:exported="false"`, so no external process can start it.
+
+A Shizuku binding does not lift gate 2: the caller still presents the shell uid. Only installing a
+privileged APK or replacing the Samsung CellBroadcast component would change the answer, and both
+are excluded by the project's safety constraints. **Status: BLOCKED, mechanism CONFIRMED.**
+
+**Verified working this session** (toolchains installed in-container, results real):
+
+| Gate | Result |
+|---|---|
+| `cargo test --lib --locked` | 90 passed, 0 failed |
+| `gradle :app:testDebugUnitTest :app:assembleDebug` | 13 passed, 0 failed; 2.6 MB APK built |
+| `gradle :app:lintDebug` | clean |
+| `npm run test:ui` | all layout and honesty assertions passed |
+| `python3 tools/check_read_only.py` | OK, no state-changing ADB commands |
+| `python3 tools/check_paste_ps1.py` | OK, no mechanical defects |
+| `tools/make_tone.py` re-run | byte-identical output (SHA-256 `35dd7716…`), so the tone asset is reproducible |
+
+A reset destroyed the container mid-session and the toolchains had to be reinstalled; the committed
+work survived because it was pushed. The tone generator being reproducible is what makes it safe to
+commit a binary asset.
+
+**Where the local simulator now stands.** The bundled attention tone is packaged and verified
+inside the APK (`res/raw/emergency_tone.wav`, 4.0 s, 22050 Hz, alternating 853/960 Hz), so the
+stock-device path no longer borrows a Samsung/default notification chime. It is still, honestly, a
+local app notification and **not** a Cell Broadcast — which is the whole point of the boundary the
+project maintains. Requests to make it *become* a Cell Broadcast are refused on the evidence above;
+the correct answer to "can a retail A35 show a genuine test alert" is **no**, and that is a result
+rather than an obstacle.
+
+
 Branch `feat/platform-diagnostics`. This session stopped adding layers around the mechanism and
 instead built the instrument needed to find out what the target device actually does.
 

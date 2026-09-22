@@ -59,6 +59,23 @@ A normal retail, unrooted Android phone is not claimed supported. The Android pr
 
 A home Wi-Fi router can transport controller traffic, but it cannot become a Cell Broadcast Centre or make cellular towers transmit.
 
+### Why ADB cannot trigger the real receiver
+
+`adb shell` runs as the shell user (uid 2000), and that user is deliberately not treated as a system caller. Two verified gates stop the attempt on every Android device, rooted or not:
+
+- `android.provider.Telephony.SMS_CB_RECEIVED` is declared a `<protected-broadcast>` in the platform manifest, so only system callers may send it.
+- `ActivityManagerService` computes `isCallerSystem` from a fixed uid list that contains `ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`, `SE_UID` and `NETWORK_STACK_UID` - and not `SHELL_UID`. A non-system sender of a protected broadcast is refused with a `SecurityException` before any receiver is reached.
+
+Commanding `am broadcast` to `com.samsung.android.cellbroadcastreceiver` or
+`com.android.cellbroadcastreceiver` therefore cannot produce an alert on stock firmware, and a
+Shizuku binding does not change it because the caller still presents the shell uid. The source
+quotes and the third gate (`CellBroadcastAlertService` is `exported="false"`) are in
+[`docs/stock-device/why-adb-cannot-send-sms-cb-received.md`](docs/stock-device/why-adb-cannot-send-sms-cb-received.md).
+
+The one path that does reach the genuine alert chain is the **controlled development mode** on a
+rooted or `userdebug` target, where the AOSP test entry point is permitted. That mode is proven end
+to end and is what `android/alertinject/` implements.
+
 ### What the local simulator does, and does not, do
 
 For a device where the protected path is unavailable, the controller can install a small bundled Android app (`android/local-simulator/`) and trigger it. That app posts a real notification with a real full-screen intent, so the operator sees Android's own alert UI with sound and vibration. It is installed and granted through ADB, so it needs no root.

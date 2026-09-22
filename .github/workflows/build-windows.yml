@@ -36,6 +36,18 @@ jobs:
       - name: Build Android local simulator
         working-directory: android/local-simulator
         run: gradle --no-daemon --stacktrace :app:assembleDebug
+      - name: Test the Android input validation and log-injection guard
+        working-directory: android/local-simulator
+        run: gradle --no-daemon --stacktrace :app:testDebugUnitTest
+      - name: Archive Android unit test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: Emergency-Simulator-android-test-results
+          path: android/local-simulator/app/build/test-results/testDebugUnitTest
+          if-no-files-found: warn
+          retention-days: 7
+
       - uses: actions/upload-artifact@v7
         with:
           name: Emergency-Simulator-local-simulator-apk
@@ -213,6 +225,37 @@ jobs:
           Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Force
           Get-FileHash "release-output\Emergency-Simulator-v1.0.0.exe" -Algorithm SHA256 | Format-List
           Get-FileHash "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Algorithm SHA256 | Format-List
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          # A checksum file is shipped next to the binaries so an operator can confirm the installer
+          # they downloaded is the one this build produced. The hashes were previously only printed
+          # into the build log, which nobody downloading a release can read.
+          $lines = foreach ($name in @(
+            "Emergency-Simulator-v1.0.0.exe",
+            "Emergency-Simulator-Setup-1.0.0.exe"
+          )) {
+            $path = "release-output\$name"
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          Set-Content -Path "release-output\SHA256SUMS.txt" -Value $lines -Encoding ascii
+          Get-Content "release-output\SHA256SUMS.txt"
+      - name: Verify the checked-in Android sources still describe themselves honestly
+        shell: pwsh
+        run: |
+          # The stock-device path is a local notification, never a Cell Broadcast. If a future edit
+          # starts claiming otherwise in the Kotlin, this fails rather than letting the overclaim
+          # ship inside a release.
+          $manifest = Get-Content "android/local-simulator/app/src/main/AndroidManifest.xml" -Raw
+          if ($manifest -match "SMS_CB_RECEIVED" -or $manifest -match "SMS_EMERGENCY_CB_RECEIVED") {
+            throw "The local simulator must not claim the protected Cell Broadcast actions."
+          }
+          $readme = Get-Content "README.md" -Raw
+          if ($readme -notmatch "not a Cell Broadcast") {
+            throw "README must state that the local simulator output is not a Cell Broadcast."
+          }
+
       - uses: actions/upload-artifact@v7
         with:
           name: Emergency-Simulator-v1-windows
@@ -243,6 +286,66 @@ jobs:
           tag_name: v1.0.0
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          body: |
+            # Emergency Simulator v1.0.0
+
+            A Windows desktop console for **controlled** Android CellBroadcast alert testing.
+
+            > This application does not transmit cellular signals, inject RF, impersonate a carrier,
+            > or operate a cellular network.
+
+            ## What ships
+
+            | File | Purpose |
+            | --- | --- |
+            | `Emergency-Simulator-Setup-1.0.0.exe` | NSIS installer (current-user, no admin needed) |
+            | `Emergency-Simulator-v1.0.0.exe` | Portable application binary |
+            | `SHA256SUMS.txt` | SHA-256 of both binaries above |
+
+            Verify a download with:
+
+            ~~~powershell
+            Get-FileHash .\Emergency-Simulator-Setup-1.0.0.exe -Algorithm SHA256
+            ~~~
+
+            The bundled Platform Tools (adb), the Android test injector, and the root-free local
+            simulator APK are packaged inside the application, so no JDK, Android SDK, or separate
+            adb install is required.
+
+            ## Two modes, deliberately kept apart
+
+            **Controlled development mode.** The real `CellBroadcastReceiver` ->
+            `CellBroadcastAlertService` -> `CellBroadcastAlertDialog` chain produces a genuine alert.
+            This requires a rooted or `userdebug` target, because the AOSP test entry point is gated
+            on `ro.debuggable=1`.
+
+            **Stock device mode.** An ordinary retail phone with no root. The bundled local
+            simulator posts a high-importance notification with a full-screen intent, a bundled
+            emergency attention tone, and vibration. **It is a local app notification and not a Cell
+            Broadcast**, and it will not appear as an emergency alert. It is not demonstrated to
+            produce a real Cell Broadcast on stock firmware, and nothing in this release claims it
+            does.
+
+            A real Cell Broadcast cannot be triggered over ADB on stock firmware. The action
+            `android.provider.Telephony.SMS_CB_RECEIVED` is a `<protected-broadcast>`, and the ADB
+            shell user (uid 2000) is absent from `ActivityManagerService`'s system-caller exemption
+            list, so the attempt is refused with a `SecurityException` before it reaches any
+            receiver. See `docs/stock-device/why-adb-cannot-send-sms-cb-received.md` for the source
+            citations.
+
+            ## Delivery is judged from device evidence, never from an exit code
+
+            `adb` exiting 0 does not mean an alert appeared. Every verdict is decided from
+            downstream `logcat` stage lines, and an absence of evidence is reported as `UNCERTAIN`
+            rather than as success.
+
+            ## Requirements
+
+            * Windows 10 or 11
+            * An Android device with USB debugging enabled
+            * For controlled mode only: a rooted or `userdebug` target
           files: |
             release-assets/Emergency-Simulator-v1.0.0.exe
             release-assets/Emergency-Simulator-Setup-1.0.0.exe
+            release-assets/SHA256SUMS.txt
+
