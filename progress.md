@@ -3,7 +3,88 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status — overnight lead-engineer session (2026-09-21)
+## Current status — deep platform investigation session (2026-09-22)
+
+Branch `feat/platform-diagnostics`. This session stopped adding layers around the mechanism and
+instead built the instrument needed to find out what the target device actually does.
+
+### The finding that shapes everything
+
+The AOSP test entry point is now **CONFIRMED against primary AOSP source**, fetched this session
+(`docs/stock-device/aosp-test-entrypoint.md`). In `GsmInboundSmsHandler.java`:
+
+```java
+private static final boolean TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1;
+...
+if (TEST_MODE) {
+    mTestBroadcastReceiver = new GsmCbTestBroadcastReceiver();
+    filter.addAction(TEST_ACTION);              // ...gsm.TEST_TRIGGER_CELL_BROADCAST
+    context.registerReceiver(mTestBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
+}
+```
+
+Three things follow, and they are the whole capability story:
+
+1. The receiver is **registered at runtime, not in a manifest**, so it has no component name.
+   `am broadcast -n <package>` cannot reach it, on any device. (BUG-021.)
+2. `RECEIVER_EXPORTED` with no permission means **any UID may target it**, including the ADB shell.
+   The path is genuinely root-free *when it exists*.
+3. `TEST_MODE` is a **build property read once at class init**. On `ro.debuggable=0` the receiver
+   object is never constructed: `am` reports `Broadcast completed` and nothing happens. This is the
+   single property that decides whether the platform path is reachable on a given phone.
+
+Verified identical on `android13-release`, `android14-release` and `main`.
+
+### What this session added
+
+| Deliverable | Where | Status |
+| --- | --- | --- |
+| Structured device diagnostic report (device, packages, permissions, components, carrier config) with every command's exit code/stdout/stderr/interpretation recorded | `src-tauri/src/diagnostics.rs`, `device_diagnostics` command | DONE |
+| Package classification that does not rely on the name containing `cellbroadcast` | `diagnostics::classify_package` | DONE |
+| Permission/component parsing where an unreadable dump is `UNKNOWN`, never `DENIED` | `diagnostics::parse_permission_states`, `parse_receivers` | DONE |
+| Human-readable Markdown report leading with known / unverified / verified | `diagnostics::render_report` | DONE |
+| AOSP test entry point verified from primary source | `docs/stock-device/aosp-test-entrypoint.md` | DONE |
+| Read-only A35 evidence batch widened from 10 to 13 tasks, 76 commands | `bridge-tasks.json` | DONE |
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **74/74 pass** (was 54). The 20 new tests cover package
+  classification, the permission parser (including the exact AOSP dump shape that produced the
+  operator's false denial), receiver parsing, UID parsing, report assembly, and report rendering.
+* The AOSP claim above was checked by fetching `GsmInboundSmsHandler.java` from
+  `android.googlesource.com` on three branches and reading the registration code directly. It is not
+  a paraphrase of a prior note.
+* The evidence bridge was verified reachable **from outside this container** with an external
+  fetcher (`r.jina.ai`), not a self-check that can hairpin.
+
+### Phase 2 of the brief: the false notification diagnostic
+
+The brief lists this first because it proves the diagnostic layer can lie. **It is already fixed**,
+as BUG-020 in the previous session; this session confirmed the fix and re-tested it rather than
+re-fixing it. `platform::parse_post_notifications` is line-oriented, returns `Unknown` for a
+permission mentioned only in a section without a grant state, and only an explicit `granted=false`
+produces `Denied`. The regression test uses the same dump shape that caused the false reading.
+
+### What this session deliberately did not claim
+
+* **STOCK DEVICE MODE remains unproven, and this session did not move it.** The A35's
+  `ro.debuggable` value has not been read. Samsung's package names, receiver manifest and permission
+  protection levels have not been read. Nothing here was validated against a phone: this environment
+  has no adb, no USB, no Bluetooth adapter and no route to the operator's laptop.
+* The diagnostic report states this itself, in its "What we could not verify" section, so a reader
+  cannot mistake the report for a delivery test.
+* Shizuku is still **not** a route into this pipeline and was not implemented as one.
+
+### The one thing needed to finish
+
+**The operator's read-only A35 batch.** The bridge is live and externally reachable; the widened
+batch is served at `/task`. Nothing further can be concluded about the A35 without that output. When
+it arrives: read `ro.debuggable` from `a35-01-identity.txt`. If it is `0`, the AOSP test path is
+closed on that firmware by construction and the conclusion is **PATH D** with the local simulator
+kept as a separately-named UI mode. If it is `1`, the path is open and the next step is a controlled
+attempt with downstream logcat as the only proof of delivery.
+
+## Previous status — overnight lead-engineer session (2026-09-21)
 
 Branch `fix/platform-test-path-and-capability-truth`, based on main after PR #4. This session
 continued capability UI/lifecycle hardening and audited the platform test-injection path.
