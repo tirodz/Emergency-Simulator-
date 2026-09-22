@@ -1,7 +1,15 @@
 {
-  "name":"emergency-simulator-desktop",
-  "private":true,
-  "version":"1.0.0",
-  "scripts":{"tauri":"tauri"},
-  "devDependencies":{"@tauri-apps/cli":"^2.0.0"}
+  "name": "emergency-simulator-desktop",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "test:ui": "node tools/check_ui.mjs",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --lib"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "playwright": "^1.49.0"
+  }
 }
