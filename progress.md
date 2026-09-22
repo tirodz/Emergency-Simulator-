@@ -1176,3 +1176,60 @@ The previous v1.1.0 GitHub release is no longer present.
 ## Final v1.0.0 finish
 
 The production desktop path is Tauri 2 + Rust + HTML/CSS/JavaScript. The Devices workspace is a dedicated device screen backed by the Rust/ADB layer and displays live read-only hardware information plus a local Samsung device PNG. Stock Galaxy A35 firmware is treated as diagnostic-only; production user builds are never restarted as root. The release workflow validates JavaScript, builds Windows + NSIS, then deletes the obsolete v2.0.0 release before publishing v1.0.0.
+
+## Mission 5 — final deep Android platform investigation (2026-09-21)
+
+Status: IN PROGRESS on branch `feat/platform-diagnostics`, PR #8. No device evidence yet: the
+Galaxy A35 has not been attached over ADB this session, so every Android claim below is
+primary-source reasoning and is labelled accordingly.
+
+### What changed, and why
+
+**Defect found in our own scanner (fixed).** `scan_platform_logcat` treated the bare tag
+`CellBroadcastReceiver` as proof the Cell Broadcast app processed a message. That tag is also on the
+app's `onReceive() unexpected action` warning, which it logs for any action it does *not* handle, so
+a stray broadcast to that component could be read as a real delivery. Both positive markers are now
+tied to the specific handled actions and alert-path lines. This is the same false-success pattern as
+BUG-001 and BUG-025, found in the tool that exists to detect it.
+
+**Second test path found (documentation).** There are two software routes into the pipeline, not one.
+Path 1 is the telephony test receiver, gated on `ro.debuggable == 1`. Path 2 is the Cell Broadcast
+app's own testing mode, toggled by the dialer secret code `*#*#2627#*#*`, accepted when
+`ro.debuggable == 1` **or** the app resource `allow_testing_mode_on_user_build` is true (AOSP ships
+it true). Path 2 may be reachable on a retail phone; whether Samsung kept it is unknown and has to be
+read off the device. Labelled INFERRED.
+
+**`phone_id` was pinned to 0 (fixed).** `CbTestBroadcastReceiver` returns early when `phone_id` is
+present and does not match its own phone id. A pinned `0` fails silently on any device whose active
+subscription is not phone 0 - indistinguishable from a build with no test receiver. The extra is now
+omitted, so whichever handler is active accepts it.
+
+**A platform-blocked alert is now reported as blocked.** The verdict gained `SUPPRESSED_BY_PLATFORM`,
+naming the gate and the verbatim device line, instead of leaving the operator with an unexplained
+silence. This is a definite negative result, not `UNKNOWN`, and it tells the operator that re-running
+cannot help.
+
+**Why a normal app throws `SecurityException` (answered).** `SMS_CB_RECEIVED` and
+`SMS_EMERGENCY_CB_RECEIVED` are in the platform protected-broadcast list. The `ActivityManagerService`
+check exempts ROOT, SYSTEM, PHONE, BLUETOOTH, NFC, SE and NETWORK_STACK; `SHELL_UID` (2000) is not
+among them and neither is any app. So it is a protected-broadcast refusal, not a missing permission,
+and `pm grant` cannot reach it. What shell *can* send is the test action, which is not protected.
+
+**Shizuku is not a solution here (documentation).** Shizuku hands an app the same uid 2000 that
+`adb shell` already has, and uid 2000 is not exempt from the protected-broadcast check. It would add
+an install step and gain no reach. Recorded so it stops being re-proposed.
+
+**`State::NOT_APPLICABLE` added.** "This question does not apply here" is now distinct from "looked
+for and absent", and `State::is_definite` separates a device fact from a failed probe.
+
+### Evidence batch extended
+
+`bridge-tasks.json` tasks 14-16 added, 92 read-only commands total. They read the three gates that
+decide whether a component that exists is ever allowed to run: `ro.debuggable`, the OEM
+`config_disable_all_cb_messages` resource, testing-mode/secret-code presence, and the carrier channel
+ranges. The testing-mode secret code is detected, not dialled. No command sends or writes.
+
+### Still owed
+
+Device evidence for A35-RO-001, including the new tasks 14-16, once the Galaxy A35 is attached.
+Nothing about stock mode becomes CONFIRMED without it.
