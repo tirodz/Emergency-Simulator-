@@ -35,6 +35,18 @@ Three things follow, and they are the whole capability story:
 
 Verified identical on `android13-release`, `android14-release` and `main`.
 
+### A safety-boundary violation found and fixed
+
+Device discovery called `adb root` on every refresh — restarting the operator's adbd as root, with
+no approval for that specific command, as a side effect of pressing Refresh. It also enabled nothing,
+because the AOSP test receiver is gated on `ro.debuggable` at class initialisation and root cannot
+change that. Recorded as **BUG-024** with the fix; `tools/check_read_only.py` now fails the build if
+any state-changing ADB invoker returns, and it was confirmed to bite.
+
+The same change corrected the controlled-path gate, which used `root && cellbroadcast_package` and
+therefore reported a **rooted `user` build** as `READY` — a build on which the receiver does not exist
+and delivery is impossible.
+
 ### What this session added
 
 | Deliverable | Where | Status |
@@ -45,11 +57,14 @@ Verified identical on `android13-release`, `android14-release` and `main`.
 | Human-readable Markdown report leading with known / unverified / verified | `diagnostics::render_report` | DONE |
 | AOSP test entry point verified from primary source | `docs/stock-device/aosp-test-entrypoint.md` | DONE |
 | Read-only A35 evidence batch widened from 10 to 13 tasks, 76 commands | `bridge-tasks.json` | DONE |
+| `adb root` removed from discovery; read-only uid probe; controlled path gated on the test entry point | `src-tauri/src/lib.rs`, `docs/bugs/BUG-024-*.md` | FIXED |
+| Read-only enforcement guard, wired into CI | `tools/check_read_only.py`, `.github/workflows/build-windows.yml` | DONE |
+| Explicit `AlertMode` separating local UI simulation from Cell Broadcast, and a single stage function | `src-tauri/src/platform.rs`, `src-tauri/src/lib.rs`, `src/index.html` | DONE |
 
 ### Verification performed this session
 
-* `cargo test --lib --locked`: **74/74 pass** (was 54). The 20 new tests cover package
-  classification, the permission parser (including the exact AOSP dump shape that produced the
+* `cargo test --lib --locked`: **82/82 pass** (was 54). The 28 new tests cover package
+  classification, mode selection, the permission parser (including the exact AOSP dump shape that produced the
   operator's false denial), receiver parsing, UID parsing, report assembly, and report rendering.
 * The AOSP claim above was checked by fetching `GsmInboundSmsHandler.java` from
   `android.googlesource.com` on three branches and reading the registration code directly. It is not
