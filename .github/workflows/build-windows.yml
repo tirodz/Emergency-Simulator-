@@ -267,9 +267,15 @@ jobs:
           if ($manifest -match "SMS_CB_RECEIVED" -or $manifest -match "SMS_EMERGENCY_CB_RECEIVED") {
             throw "The local simulator must not claim the protected Cell Broadcast actions."
           }
-          $readme = Get-Content "README.md" -Raw
+          # Markdown emphasis is stripped first: the README says "**not** a Cell Broadcast", and
+          # matching the raw text would fail on the asterisks rather than on the wording.
+          $readme = (Get-Content "README.md" -Raw) -replace "\*\*", "" -replace "\s+", " "
           if ($readme -notmatch "not a Cell Broadcast") {
             throw "README must state that the local simulator output is not a Cell Broadcast."
+          }
+          if ($readme -match "retail phone can receive a genuine cell broadcast" -and
+              $readme -notmatch "does not demonstrate that a retail phone can receive a genuine cell broadcast") {
+            throw "README must not claim a stock device receives a genuine Cell Broadcast."
           }
 
       - uses: actions/upload-artifact@v7
