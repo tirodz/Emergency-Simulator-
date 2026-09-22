@@ -36,6 +36,9 @@ const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
 /// `Unknown` into `Denied` produces a confident, wrong instruction to the operator ("grant
 /// notifications, then retry") when the real problem is that nothing could be parsed. A
 /// capability probe that lies is worse than one that admits ignorance.
+///
+/// `Default` is `Unknown` on purpose: a capability nobody has checked must never start life
+/// looking like a denial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum State {
@@ -44,6 +47,12 @@ pub enum State {
     NotPresent,
     Unknown,
     Error,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        State::Unknown
+    }
 }
 
 impl State {
