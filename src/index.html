@@ -434,6 +434,10 @@ function showResult(r){
  const suppressed=r&&r.state==="SUPPRESSED_BY_PLATFORM";
  $("resultTitle").textContent=ok?"Alert displayed":suppressed?"Blocked by this phone's settings":uncertain?"Accepted, but no delivery evidence":"Test blocked / uncertain";
  $("resultText").textContent=(r&&r.message)||r?.failure||"No result returned.";
+ /* The wall-clock duration is shown next to the verdict because it separates "the device refused
+    this" from "the device never answered". A failed send that took 60 ms and one that took 25 s
+    read identically in the text, and they mean opposite things to whoever is holding the phone. */
+ if(r&&typeof r.duration_ms==="number"){log("Send completed in "+r.duration_ms+" ms","info")}
  $("ackBtn").disabled=!state.selected;
  if(ok){
   toast(r.state==="NOTIFICATION_POSTED"?"Local alert notification posted.":"Android system alert UI confirmed.","ok");
