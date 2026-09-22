@@ -579,6 +579,36 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
         .to_string()
 }
 
+/// Build the argv for the AOSP platform test-injection broadcast.
+///
+/// Split out from the send so the argument contract can be asserted without a device. Four details
+/// are deliberate and were each wrong before (BUG-021):
+///
+/// * no `-n` — `GsmInboundSmsHandler` registers the test receiver dynamically, so it has no
+///   manifest component name. `-n` also takes `package/class`, and the package names that
+///   `cellbroadcast_candidates()` returns would be rejected as a bad component name.
+/// * `--es pdu_string <hex>` — the key the handler reads.
+/// * `--ei phone_id 0` — the default subscription, matching AOSP's own documented example.
+/// * `--es format 3gpp` is not sent: `pdu_string` is already the encoded PDU and the handler does
+///   not read a `format` key.
+fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
+    vec![
+        "-s",
+        serial,
+        "shell",
+        "am",
+        "broadcast",
+        "-a",
+        platform::TEST_TRIGGER_ACTION,
+        "--es",
+        "pdu_string",
+        pdu_hex,
+        "--ei",
+        "phone_id",
+        "0",
+    ]
+}
+
 /// Every package on the device that looks like a Cell Broadcast receiver, most likely first.
 ///
 /// An OEM distribution may ship more than one: a Google/Mainline module (updated through the
@@ -1919,27 +1949,11 @@ fn send_platform_test_alert(
     diagnostics.push(record);
 
     // 4. Send. Every argument is a separate argv element: no shell string is ever constructed.
-    let target = receiver.clone().unwrap_or_default();
-    let args = vec![
-        "-s",
-        &serial,
-        "shell",
-        "am",
-        "broadcast",
-        "--receiver-foreground",
-        "-a",
-        platform::TEST_TRIGGER_ACTION,
-        "-n",
-        &target,
-        "--es",
-        "pdu_string",
-        &pdu_hex,
-        "--es",
-        "format",
-        "3gpp",
-    ];
-    let (_stdout, record) = run_captured(&app, &args);
-    let accepted = record.exit_code == Some(0);
+    let args = platform_test_alert_args(&serial, &pdu_hex);
+    let (stdout, record) = run_captured(&app, &args);
+    // `am` reports a missing receiver on stdout while still exiting 0 on some builds, so the
+    // wording is checked as well as the exit code.
+    let accepted = record.exit_code == Some(0) && !stdout.contains("Broadcast failed");
     result.evidence.push(format!(
         "am broadcast exit={:?} accepted_by_am={accepted}",
         record.exit_code
@@ -2870,6 +2884,37 @@ fn reset_safety_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-021: the injection command named a bare package with `-n`, included a `format` extra the
+    /// handler does not read, and omitted the `phone_id` selector. `-n` takes `package/class`, so
+    /// `am` rejected the arguments outright and the attempt could never have reached the receiver on
+    /// any device. Asserted as a whole argv: the point is that a stray `-n` or a missing
+    /// `phone_id` must fail the build rather than be read as a device limitation.
+    #[test]
+    fn platform_test_injection_matches_the_aosp_contract() {
+        let args = platform_test_alert_args("R5CXA1B2C3D", "00001100");
+        assert_eq!(
+            args,
+            vec![
+                "-s",
+                "R5CXA1B2C3D",
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST",
+                "--es",
+                "pdu_string",
+                "00001100",
+                "--ei",
+                "phone_id",
+                "0",
+            ]
+        );
+        // The two regressions, stated directly so the reason survives a refactor of the vector.
+        assert!(!args.contains(&"-n"), "the test receiver has no manifest component to target");
+        assert!(!args.windows(2).any(|w| w == ["--es", "format"]));
+    }
 
     /// The defect this guards is the one BUG-001 recorded in the retired Python controller: a
     /// multi-word body arriving at the injector as several shell words, so only the first was
