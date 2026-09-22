@@ -125,6 +125,15 @@ jobs:
           CHROMIUM="$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)"
           if [ -z "$CHROMIUM" ]; then npx playwright install --with-deps chromium; fi
           CHROMIUM_PATH="$CHROMIUM" npm run test:ui
+      - name: Check the controller stays read-only
+        shell: bash
+        run: |
+          set -e
+          # Fails if a state-changing ADB command reappears in the Rust sources. `adb root` was
+          # being called on every refresh; it restarts adbd on the operator's phone as root and
+          # enables nothing, because the AOSP test receiver is gated on ro.debuggable, not on uid.
+          # See docs/bugs/BUG-024.
+          python3 tools/check_read_only.py
 
   build:
     name: Build Windows app and installer

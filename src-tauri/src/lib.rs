@@ -650,31 +650,20 @@ fn cellbroadcast_candidates(app: &tauri::AppHandle, serial: &str) -> Vec<String>
     packages
 }
 
-fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
-    // Never ask production/user Samsung builds to restart adbd as root.
-    if build_type.eq_ignore_ascii_case("user") {
-        return false;
-    }
-
-    let _ = adb_call(app, &["-s", serial, "root"]);
-    thread::sleep(Duration::from_millis(700));
-
-    if shell(app, serial, &["id", "-u"])
-        .map(|text| text.trim() == "0")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if build_type.eq_ignore_ascii_case("eng")
-        || build_type.eq_ignore_ascii_case("userdebug")
-    {
-        return shell(app, serial, &["id"])
-            .map(|text| text.contains("uid=0"))
-            .unwrap_or(false);
-    }
-
-    false
+/// Read whether the device is already running adbd as root, without changing anything.
+///
+/// This used to call `adb root` during device discovery. That is not a query: it restarts the adbd
+/// daemon on the device as root, which is a change to the phone's state, and it ran on every
+/// refresh with no approval for the specific command. It also predates `ro.debuggable` being
+/// understood as the actual gate on the AOSP test entry point, and root does not open that gate —
+/// the receiver is registered at class initialisation from a build property.
+///
+/// The probe is now read-only and its answer only describes the device. A non-zero uid is the
+/// normal answer and it is not a failure.
+fn adbd_uid(app: &tauri::AppHandle, serial: &str) -> Option<u32> {
+    shell(app, serial, &["id", "-u"])
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
 }
 
 fn parse_first_u64(text: &str, key: &str) -> Option<u64> {
@@ -1272,7 +1261,9 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let build_type = getprop(app, &serial, "ro.build.type");
         let debuggable = getprop(app, &serial, "ro.debuggable");
 
-        let root = is_root(app, &serial, &build_type);
+        // Read-only identity probe. `Some(0)` means adbd already runs as root; it is never asked
+        // to become root here.
+        let root = adbd_uid(app, &serial) == Some(0);
         let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
         let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
         let local_simulator = local_simulator_installed(app, &serial);
@@ -1338,9 +1329,13 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 );
             }
             (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
-        } else if root && cellbroadcast_package.is_some() {
+        } else if test_entrypoint.available == PlatformState::Granted {
+            // The controlled path is gated on the build permitting the AOSP test receiver, which is
+            // the thing that actually decides whether the broadcast can be delivered. Root is not
+            // part of this condition: a rooted `user` build still has no test receiver, and a
+            // `userdebug` build does not need adbd to run as root for an exported receiver.
             notes.push(format!(
-                "Rooted/userdebug controlled target. AOSP test entry point: {}.",
+                "Controlled target. AOSP test entry point: {}.",
                 test_entrypoint.available.label()
             ));
             notes.push(test_entrypoint.reason.clone());
