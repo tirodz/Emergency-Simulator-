@@ -1233,3 +1233,24 @@ ranges. The testing-mode secret code is detected, not dialled. No command sends 
 
 Device evidence for A35-RO-001, including the new tasks 14-16, once the Galaxy A35 is attached.
 Nothing about stock mode becomes CONFIRMED without it.
+
+### Marker corrections (2026-09-21, follow-up)
+
+Re-reading every log marker against AOSP found two that could not have matched on any capture and one
+overclaim. `MARKER_RECEIVER` expected `onReceive <action>`, but the receiver logs `"onReceive " +
+intent` (an Intent dump), so the CB receiver stage was unreachable; the corrected marker is the intent
+dump carrying a Cell-Broadcast action. The receiver's receive-side log is gated only by a `DBG` that
+is hardcoded `true` and fires for *every* action including its own "unexpected action" fallback, so
+matching the bare tag would have read a rejected broadcast as processing. `MARKER_ALERT_UI` included
+the class name `CellBroadcastAlertDialog`, which also appears in stack traces and `dumpsys package`
+output. The OEM-disabled gate emits three lines; the `CDMA SCP` variant was missing.
+
+One overclaim removed: `receiver_processed` mapped to `SYSTEM UI REACHED`, but the receiver running
+only proves it re-dispatched the intent. There is now a distinct `CB RECEIVER PROCESSED` stage, and
+`SYSTEM UI REACHED` is claimed only from the alert-presentation call.
+
+Verdict ordering fixed: `onStartCommand` is logged before the testing-mode, channel-range and language
+checks, so a gated message produces both a positive line and a drop line. The verdict now consults
+suppression first, and a test pins that both are visible in one capture.
+
+CI run `35737797879` is green on all four jobs, including the Windows app and installer build.
