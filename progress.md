@@ -3,7 +3,71 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status
+## Current status — overnight lead-engineer session (2026-09-21)
+
+Branch `fix/platform-test-path-and-capability-truth`, based on main after PR #4. This session
+continued capability UI/lifecycle hardening and audited the platform test-injection path.
+
+### What this session changed
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-020](docs/bugs/BUG-020-capability-probe-reports-granted-permission-as-denied.md) | A granted `POST_NOTIFICATIONS` was parsed as denied (the name is mentioned on several lines and `find` took the first, state-less one); an unreadable/unmentioned permission was also collapsed into a denial and then blocked the send | `src-tauri/src/lib.rs`, `src-tauri/src/platform.rs` | FIXED |
+| [BUG-021](docs/bugs/BUG-021-platform-test-injection-could-never-reach-the-receiver.md) | The platform test-injection broadcast passed a bare package name to `am broadcast -n`, which takes `package/class`; the AOSP test receiver is dynamically registered and has no component name, so the command could never have reached it on any device | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-022](docs/bugs/BUG-022-ui-harness-measured-a-hidden-panel.md) | The UI harness measured `#deviceDetail` while the app was in `view-overview`, which hides it behind `display:none !important`, so every overflow assertion was vacuous | `tools/check_ui.mjs` | FIXED |
+| [BUG-023](docs/bugs/BUG-023-studio-device-image-clipped.md) | Fixed-width device renders clipped inside shrinking `overflow:hidden` boxes below ~1180px | `src/index.html` | FIXED |
+
+### The platform test entry point
+
+`platform::assess_test_entrypoint` now decides usability from `ro.debuggable`, and the reason is
+carried through to the UI. This is stated plainly in `platform.rs`:
+
+* `ro.debuggable=1` (`userdebug`/`eng`) — the AOSP test receiver
+  `GsmInboundSmsHandler.GsmCbTestBroadcastReceiver` is registered and the broadcast can reach the
+  telephony pipeline.
+* `ro.debuggable=0` (`user`) — the receiver is never registered. `am` accepts the broadcast and the
+  platform discards it. This is a build property, not a permission, so it **cannot be granted on the
+  device**, with or without adb, and it is not a root question.
+
+Verified against AOSP source: `TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1` in
+`frameworks/opt/telephony/.../GsmInboundSmsHandler.java`, whose doc comment gives the exact
+invocation now matched by the controller:
+`am broadcast -a com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST --es pdu_string <hex>
+--ei phone_id 0`.
+
+### What this session deliberately did not claim
+
+The safety boundary in AGENTS.md is unchanged and this session did not move it:
+
+* **CONTROLLED DEVELOPMENT MODE** remains the only demonstrated end-to-end alert path.
+* **STOCK DEVICE MODE** remains unproven. A retail Samsung A35 with `ro.debuggable=0` is reported
+  `BLOCKED` with the reason above — not as a failure of the tool and not as working.
+* BUG-021 is `INFERRED`, not `CONFIRMED`. The argument contract is checked against AOSP and covered
+  by a regression test, but no `userdebug` target was driven from this environment. It has no adb and
+  no radio.
+* Shizuku is **not** a bypass for either limit and was not implemented as one. It elevates to
+  `shell` (`uid=2000`) via a user-granted Binder proxy; it does not change `ro.debuggable`, does not
+  add privileges to a `user` build telephony process, and cannot make a dynamically registered
+  receiver exist. Using it to reach a `user` build's Cell Broadcast pipeline is not possible by this
+  mechanism.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **54/54 pass** (was 53). The new test asserts the whole injection argv
+  and was confirmed to **fail** when `-n <package>` is reintroduced, so it is not an inert check.
+* `node tools/check_ui.mjs`: all assertions pass at 1000/1180/1360/1600px. The harness asserts the
+  measured panel is visible, checks in-box clipping per element, and self-tests its own overflow
+  detector.
+* The corrected harness reproduced the original `.kv span` clipping (`scroll=442 client=282`) before
+  the CSS fix, confirming the check bites.
+
+### Environment note
+
+This session has no adb, no USB, no Bluetooth adapter and no route to the operator's laptop. Nothing
+here was validated against a phone; all device-facing claims are from source, unit tests and captured
+logcat already in `docs/experiments/`.
+
+## Previous status — Mission 2B
 
 **The root-free local simulator path was exercised end to end on a real Android 35 device for the
 first time, and doing so exposed three defects that only appear under real platform latency.**
