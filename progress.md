@@ -40,6 +40,14 @@ are excluded by the project's safety constraints. **Status: BLOCKED, mechanism C
 | `python3 tools/check_read_only.py` | OK, no state-changing ADB commands |
 | `python3 tools/check_paste_ps1.py` | OK, no mechanical defects |
 | `tools/make_tone.py` re-run | byte-identical output (SHA-256 `35dd7716…`), so the tone asset is reproducible |
+| CI `Build Emergency Simulator Windows` on `1beacd0` | **all five jobs green**, including the new Android unit-test step |
+
+Two CI failures were investigated rather than waved through, and neither was caused by the Android
+work. The Windows icon step failed on the known npm optional-dependency bug (the Tauri CLI's
+`win32-x64-msvc` binding absent from a restored `node_modules`), now retried from a clean tree. The
+release-honesty gate failed on its own first version, which matched the literal string against a
+README that reads `**not** a Cell Broadcast`; markdown emphasis is now stripped before matching. Both
+were real defects in the new CI code, not flakes to rerun.
 
 A reset destroyed the container mid-session and the toolchains had to be reinstalled; the committed
 work survived because it was pushed. The tone generator being reproducible is what makes it safe to
