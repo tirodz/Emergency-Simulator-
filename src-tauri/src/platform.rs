@@ -443,6 +443,151 @@ pub const AOSP_REFERENCE_PDU_HEX: &str = concat!(
     "4463FA308C306B5099304830664E0B30553044FF086C178C615E81FF090000000000000000000000000000",
 );
 
+/// Why the AOSP test entry point is or is not usable, in operator-facing terms.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TestEntryPoint {
+    pub available: State,
+    pub reason: String,
+}
+
+/// Decide whether the AOSP test-injection action can reach the telephony test receiver.
+///
+/// This is the single most important honest answer the tool gives about a retail phone. The
+/// receiver inside `GsmInboundSmsHandler` is registered only when `ro.debuggable == 1`, so on
+/// production firmware the broadcast is *accepted by `am`* and then does nothing at all. An
+/// accepted command is not a delivered alert, and the tool has to say so before the operator
+/// spends an evening chasing a message that was never going to arrive.
+pub fn assess_test_entrypoint(debuggable: &str, receiver_package: Option<&str>) -> TestEntryPoint {
+    if receiver_package.is_none() {
+        return TestEntryPoint {
+            available: State::NotPresent,
+            reason: "No Cell Broadcast receiver package was found on this device.".to_string(),
+        };
+    }
+    match debuggable_permits_test_entrypoint(debuggable) {
+        Some(true) => TestEntryPoint {
+            available: State::Granted,
+            reason: format!(
+                "ro.debuggable=1, so the AOSP test receiver in GsmInboundSmsHandler is registered. \
+                 {} is present. The test broadcast can reach the telephony pipeline.",
+                receiver_package.unwrap_or("the receiver")
+            ),
+        },
+        Some(false) => TestEntryPoint {
+            available: State::Denied,
+            reason: "ro.debuggable=0. This is a production build, so the AOSP test receiver is \
+                     never registered and the test broadcast is accepted by `am` and then \
+                     discarded. This is a build property, not a permission, so it cannot be \
+                     granted on the device."
+                .to_string(),
+        },
+        None => TestEntryPoint {
+            available: State::Unknown,
+            reason: "ro.debuggable could not be read, so whether the AOSP test receiver exists is \
+                     unknown. Do not assume it is absent."
+                .to_string(),
+        },
+    }
+}
+
+/// What a logcat capture proves about the platform Cell Broadcast pipeline.
+///
+/// Each field is a separate, strictly stronger claim. The old code jumped from "a package exists"
+/// to "Cell Broadcast supported"; these are the distinctions that jump skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct PlatformEvidence {
+    /// The AOSP test receiver reported receiving the intent.
+    pub test_receiver_accepted: bool,
+    /// A `SmsCbMessage` was constructed from the PDU.
+    pub message_constructed: bool,
+    /// The Cell Broadcast service or handler processed the message.
+    pub service_reached: bool,
+    /// The Cell Broadcast receiver ran.
+    pub receiver_processed: bool,
+    /// Android requested its own alert UI.
+    pub alert_ui_requested: bool,
+}
+
+impl PlatformEvidence {
+    /// The strongest stage this evidence supports, and nothing stronger.
+    pub fn stage(&self) -> CapabilityStage {
+        if self.alert_ui_requested || self.receiver_processed {
+            CapabilityStage::SystemUiReached
+        } else if self.service_reached {
+            CapabilityStage::CellBroadcastServiceReached
+        } else if self.test_receiver_accepted {
+            CapabilityStage::TestEntryPointAccepted
+        } else {
+            CapabilityStage::TestEntryPointDiscovered
+        }
+    }
+
+    /// True when the capture shows the pipeline actually ran.
+    pub fn pipeline_ran(&self) -> bool {
+        self.test_receiver_accepted
+            || self.message_constructed
+            || self.service_reached
+            || self.receiver_processed
+            || self.alert_ui_requested
+    }
+}
+
+/// Log markers that indicate each stage of the AOSP pipeline.
+///
+/// AOSP uses a separate log line for each step, so these are distinct claims rather than one
+/// regex over a single line. The set is deliberately small and each entry is a tag AOSP actually
+/// emits; anything not matched leaves the corresponding stage false rather than assumed.
+const MARKER_TEST_RECEIVER: &[&str] = &["Received test intent action"];
+const MARKER_MESSAGE_CONSTRUCTED: &[&str] = &["SmsCbMessage", "handleGsmCellBroadcastSms", "CellBroadcastMessage"];
+const MARKER_SERVICE: &[&str] = &["CellBroadcastService", "CellBroadcastHandler", "GsmCellBroadcastHandler"];
+const MARKER_RECEIVER: &[&str] = &["CellBroadcastReceiver"];
+const MARKER_ALERT_UI: &[&str] = &["CellBroadcastAlertService", "CellBroadcastAlertDialog", "CellBroadcastAlertAudio"];
+
+/// Scan a logcat capture for platform-path evidence.
+pub fn scan_platform_logcat(logcat: &str) -> PlatformEvidence {
+    let matches = |markers: &[&str]| markers.iter().any(|marker| logcat.contains(marker));
+    PlatformEvidence {
+        test_receiver_accepted: matches(MARKER_TEST_RECEIVER),
+        message_constructed: matches(MARKER_MESSAGE_CONSTRUCTED),
+        service_reached: matches(MARKER_SERVICE),
+        receiver_processed: matches(MARKER_RECEIVER),
+        alert_ui_requested: matches(MARKER_ALERT_UI),
+    }
+}
+
+/// The complete, honest capability picture for one device.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlatformProbe {
+    pub build_type: Option<String>,
+    pub debuggable: Option<String>,
+    pub test_entrypoint: TestEntryPoint,
+    pub cellbroadcast_candidates: Vec<String>,
+    pub cellbroadcast_package: Option<String>,
+    pub receiver_declared: State,
+    pub local_simulator_installed: bool,
+    pub post_notifications: State,
+    pub full_screen_intent: State,
+    pub notifications_enabled: State,
+    /// The strongest capability established by evidence, not by inference.
+    pub stage: CapabilityStage,
+    /// One line the UI can show without overclaiming.
+    pub summary: String,
+    /// Every command that produced this picture, with its raw result.
+    pub evidence: Vec<ProbeEvidence>,
+}
+
+/// One probe command and what came back.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProbeEvidence {
+    pub label: String,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    /// The parsed meaning, or why parsing produced nothing.
+    pub parsed: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,5 +930,78 @@ Packages:
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
             .collect()
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Platform test path: the boundary the project kept blurring
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_retail_build_is_reported_as_unavailable_rather_than_supported() {
+        let entry = assess_test_entrypoint("0", Some("com.google.android.cellbroadcastreceiver"));
+        assert_eq!(entry.available, State::Denied);
+        assert!(entry.reason.contains("ro.debuggable=0"));
+        assert!(entry.reason.contains("cannot be granted"));
+    }
+
+    #[test]
+    fn a_userdebug_build_is_reported_as_available() {
+        let entry = assess_test_entrypoint("1", Some("com.google.android.cellbroadcastreceiver"));
+        assert_eq!(entry.available, State::Granted);
+    }
+
+    #[test]
+    fn an_unreadable_property_is_unknown_not_denied() {
+        let entry = assess_test_entrypoint("", Some("com.google.android.cellbroadcastreceiver"));
+        assert_eq!(entry.available, State::Unknown);
+    }
+
+    #[test]
+    fn a_device_with_no_receiver_is_not_assumed_capable() {
+        assert_eq!(assess_test_entrypoint("1", None).available, State::NotPresent);
+    }
+
+    /// An accepted command with no downstream lines must not be called a delivery.
+    #[test]
+    fn accepted_by_am_but_nothing_downstream_proves_nothing() {
+        let evidence = scan_platform_logcat("Broadcast completed: result=0\n");
+        assert!(!evidence.pipeline_ran());
+        assert_eq!(evidence.stage(), CapabilityStage::TestEntryPointDiscovered);
+    }
+
+    #[test]
+    fn each_downstream_marker_advances_the_stage_by_one_claim() {
+        let receiver = "I GsmInboundSmsHandler: Received test intent action=com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST\n";
+        assert_eq!(
+            scan_platform_logcat(receiver).stage(),
+            CapabilityStage::TestEntryPointAccepted
+        );
+        assert!(!scan_platform_logcat(receiver).service_reached);
+
+        let service = format!("{receiver}I CellBroadcastHandler: handleGsmCellBroadcastSms\n");
+        assert_eq!(
+            scan_platform_logcat(&service).stage(),
+            CapabilityStage::CellBroadcastServiceReached
+        );
+
+        let ui = format!("{service}I CellBroadcastAlertDialog: onCreate\n");
+        assert_eq!(scan_platform_logcat(&ui).stage(), CapabilityStage::SystemUiReached);
+    }
+
+    /// Package presence alone must never exceed the weakest stage.
+    #[test]
+    fn package_presence_is_not_capability() {
+        let evidence = PlatformEvidence::default();
+        assert_eq!(evidence.stage(), CapabilityStage::TestEntryPointDiscovered);
+        assert!(!evidence.pipeline_ran());
+    }
+
+    #[test]
+    fn stage_labels_match_the_ui_contract() {
+        assert_eq!(CapabilityStage::PackagePresent.label(), "PACKAGE PRESENT");
+        assert_eq!(CapabilityStage::TestEntryPointDiscovered.label(), "TEST ENTRY POINT DISCOVERED");
+        assert_eq!(CapabilityStage::SystemUiReached.label(), "SYSTEM UI REACHED");
+        assert_eq!(State::Granted.label(), "GRANTED");
+        assert_eq!(State::Unknown.label(), "UNKNOWN");
     }
 }
