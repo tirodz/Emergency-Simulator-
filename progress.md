@@ -143,6 +143,80 @@ session does not misread it as a regression.
 
 ### Prior session — repository audit (BUG-015, BUG-016)
 
+**The root-free local simulator path was exercised end to end on a real Android 35 device for the
+first time, and doing so exposed three defects that only appear under real platform latency.**
+
+Previous sessions had built the simulator APK but never driven it. This session installed it on a
+booted emulator, sent real broadcasts through the actual `am broadcast` → `AlertReceiver` →
+`NotificationManager` → `EmergencyActivity` chain, and read the downstream stage lines back out of
+logcat. The chain works: `FULLSCREEN_ACTIVITY_STARTED`, `AUDIO_FOCUS_REQUEST granted=true` and
+`VIBRATION_START` were all observed from a real run. Three defects were found by doing that rather
+than by reading the code.
+
+### What was found and fixed this session
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-017](docs/bugs/BUG-017-evidence-timeout-false-negative.md) | The evidence collector's 8 s budget was shorter than the platform's own latency (12.7 s measured), so a genuine full-screen alert was reported as an evidence timeout | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-018](docs/bugs/BUG-018-premature-notification-only-verdict.md) | The collector concluded at `NOTIFICATION_POSTED`, but Android posts the notification and launches the full-screen activity up to 8 s apart, so a real full-screen alert was under-reported as notification-only | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-019](docs/bugs/BUG-019-blocking-audio-prepare-anr.md) | `MediaPlayer.prepare()` ran on the main thread; on a device whose alarm URI does not resolve it blocked the alert UI for ~13 s, an ANR risk | `EmergencyActivity.kt` | FIXED |
+
+All three are the same shape as the two bugs already recorded in `docs/bugs/`: a signal that looked
+correct while the thing it claimed to prove was not true. BUG-017 and BUG-018 are both false
+*negatives* — the alert had appeared and the tool said it had not. BUG-017 in particular is the
+mirror image of the recorded false successes, and it was only visible because a slow device was
+tested instead of a fast one.
+
+### Why BUG-017 and BUG-018 could not be caught by a unit test alone
+
+Both are timing defects. The verdict *logic* was correct; the *deadlines* it ran under were wrong.
+The fix therefore separates the two: `local_simulator_verdict()` is now a pure function of the
+stage lines, tested against real captured logcat, and the polling loop that feeds it carries the
+measured timeouts (`LOCAL_EVIDENCE_TIMEOUT = 25 s`, `FULLSCREEN_GRACE = 14 s`) with the measurement
+that produced each number recorded next to it.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **15/15 pass** (was 7). The new tests include a pure-function verdict
+  test driven by real logcat captured from the device, and a cross-language contract test that fails
+  if `AlertStages.kt` and the Rust stage names ever drift apart.
+* Real device run, Android 35 emulator, `ro.debuggable=1`:
+  `ANDROID_RECEIVER_ACCEPTED` → `NOTIFICATION_POSTED` → `FULLSCREEN_ACTIVITY_STARTED rendered` →
+  `AUDIO_FOCUS_REQUEST granted=true` → `VIBRATION_START pattern=700,300,700,300,1100`.
+* **BUG-001/BUG-015 quoting re-verified end to end**, not just in unit tests: a body containing
+  spaces, `;`, `$(whoami)`, backticks, `&`, `|`, `>`, `<`, double quotes and embedded single quotes
+  arrived at the receiver **byte-identical at 77/77 characters**.
+* `gradle :app:assembleDebug`: BUILD SUCCESSFUL; APK installs and runs.
+* No ANR recorded after the async-audio change (`grep -ci "ANR in com.tirodz"` → 0).
+* Frontend contract check: consistent (15 commands, 14 invoked, 98 ids). The new `SendResult` fields
+  are additive; the frontend reads only `state`, `message` and `failure`, all of which are preserved.
+* Android 14+ full-screen intent behaviour characterised: with the screen **on**, Android shows a
+  heads-up notification and does *not* launch the activity even though the op is `allow`; with the
+  screen **off or dozing**, it does launch. This is platform policy, and the tool now reports the
+  two outcomes distinctly rather than conflating them.
+
+### What the simulator can and cannot claim
+
+The local simulator path is **CONFIRMED** on a `userdebug` emulator: a root-free app produces a real
+full-screen Android alert UI with sound and vibration. It is still **not** a CellBroadcast path — it
+never touches `SMS_CB_RECEIVED` and no radio is involved. The stock-device claim remains exactly as
+bounded as before.
+
+`README.md` did not mention the simulator at all, which is what let the boundary stay ambiguous to a
+reader. It now documents it plainly: what it is, what it is not, and the two Android 14+ behaviours
+that decide what the operator sees. The stock-device claim itself was not weakened or strengthened.
+
+Two limits found on the emulator image and recorded rather than worked around: it ships **no ringtone
+media at all** (`/system/media/audio/` is absent, `alarm_alert` and `notification_sound` are both
+`null`), so `AUDIO_UNAVAILABLE` there is correct reporting and not a defect; and its SystemUI crashed
+under repeated power-key toggling, which silently disables full-screen intents until the device is
+rebooted. The second is an emulator artefact, not a product bug, and is written down so a future
+session does not misread it as a regression.
+
+---
+
+### Prior session — repository audit (BUG-015, BUG-016)
+
 **Repository audit completed; two latent defects in the shipped Rust controller were found and
 fixed, and the root-free question was answered explicitly rather than left implicit.**
 
