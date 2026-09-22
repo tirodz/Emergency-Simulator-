@@ -12,6 +12,8 @@ use std::{
 
 use tauri::{Emitter, Manager, State};
 
+mod platform;
+
 const SERVICE_CATEGORY: u32 = 4355;
 const REQUIRED_PREFIX: &str = "TEST";
 const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
