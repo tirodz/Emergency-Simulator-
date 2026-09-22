@@ -106,7 +106,14 @@ pub enum CapabilityStage {
     TestEntryPointAccepted,
     /// Downstream evidence shows the Cell Broadcast service processed the message.
     CellBroadcastServiceReached,
-    /// Downstream evidence shows Android's own alert UI was presented.
+    /// The Cell Broadcast receiver ran for a Cell-Broadcast action.
+    ///
+    /// This sits above the service stage only because the receiver re-dispatches into the alert
+    /// service; it is still *before* the alert service has looked at the message. It is deliberately
+    /// **not** `SystemUiReached`: the receiver running is not the UI being presented, and the old
+    /// mapping jumped that gap.
+    ReceiverProcessed,
+    /// Downstream evidence shows Android's own alert UI was requested.
     SystemUiReached,
 }
 
@@ -119,6 +126,7 @@ impl CapabilityStage {
             CapabilityStage::TestEntryPointDiscovered => "TEST ENTRY POINT DISCOVERED",
             CapabilityStage::TestEntryPointAccepted => "TEST ENTRY POINT ACCEPTED",
             CapabilityStage::CellBroadcastServiceReached => "CB SERVICE REACHED",
+            CapabilityStage::ReceiverProcessed => "CB RECEIVER PROCESSED",
             CapabilityStage::SystemUiReached => "SYSTEM UI REACHED",
         }
     }
@@ -679,8 +687,10 @@ pub enum SuppressionGate {
 impl PlatformEvidence {
     /// The strongest stage this evidence supports, and nothing stronger.
     pub fn stage(&self) -> CapabilityStage {
-        if self.alert_ui_requested || self.receiver_processed {
+        if self.alert_ui_requested {
             CapabilityStage::SystemUiReached
+        } else if self.receiver_processed {
+            CapabilityStage::ReceiverProcessed
         } else if self.service_reached {
             CapabilityStage::CellBroadcastServiceReached
         } else if self.test_receiver_accepted {
@@ -719,6 +729,7 @@ impl PlatformEvidence {
 const SUPPRESSION_MARKERS: &[(&str, SuppressionGate)] = &[
     ("GSM CB message ignored - CB messages disabled by OEM", SuppressionGate::DisabledByOem),
     ("CDMA CB message ignored - CB messages disabled by OEM", SuppressionGate::DisabledByOem),
+    ("CDMA SCP CB message ignored - CB messages disabled by OEM", SuppressionGate::DisabledByOem),
     ("ignoring the alert due to not in testing mode", SuppressionGate::TestModeRequired),
     ("ignoring the alert due to configured channels was marked", SuppressionGate::ChannelDisabled),
     ("ignoring the alert due to language mismatch", SuppressionGate::LanguageMismatch),
@@ -768,14 +779,27 @@ const MARKER_MESSAGE_CONSTRUCTED: &[&str] =
 const MARKER_SERVICE: &[&str] =
     &["CellBroadcastService", "CellBroadcastHandler", "GsmCellBroadcastHandler"];
 /// Positive evidence that the Cell Broadcast app *processed the message*, not merely that its
-/// process existed. The bare class tag is deliberately absent; see the comment above.
+/// process existed.
+///
+/// The app's only unconditional receive-side log is `CellBroadcastReceiver: onReceive <intent>`
+/// (guarded by a `DBG` flag that is hardcoded `true`), and it fires for **every** action the
+/// receiver is handed — including the `onReceive() unexpected action` case below. So the bare tag
+/// is not evidence, and neither is the bare action string (the alert service logs the same action
+/// from its own tag). The marker is the receiver's own intent dump carrying a Cell-Broadcast action,
+/// which only appears when that receiver was entered with that action. If an OEM reformats the
+/// intent dump the marker misses and the stage stays unclaimed, which is the safe direction.
 const MARKER_RECEIVER: &[&str] = &[
-    "CellBroadcastReceiver: onReceive android.provider.Telephony.SMS_CB_RECEIVED",
-    "CellBroadcastReceiver: onReceive android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+    "CellBroadcastReceiver: onReceive Intent { act=android.provider.Telephony.SMS_CB_RECEIVED",
+    "CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
 ];
+/// Evidence that Android moved from "the message exists" to "present this alert".
+///
+/// `CBAlertService: onStartCommand` is the service actually starting on a Cell-Broadcast action, and
+/// `openEmergencyAlertNotification` is the call that selects the presentation. The bare tag is not
+/// used: `CBAlertService: onStartCommand` is checked with its action suffix stripped for robustness
+/// across the two AOSP forms (`onStartCommand: <action>`), so the marker is the prefix only.
 const MARKER_ALERT_UI: &[&str] = &[
     "CBAlertService: onStartCommand",
-    "CellBroadcastAlertDialog",
     "openEmergencyAlertNotification",
 ];
 
@@ -1208,7 +1232,7 @@ Packages:
             CapabilityStage::CellBroadcastServiceReached
         );
 
-        let ui = format!("{service}I CellBroadcastAlertDialog: onCreate\n");
+        let ui = format!("{service}I CBAlertService: onStartCommand: {action}\n", action="android.provider.Telephony.SMS_CB_RECEIVED");
         assert_eq!(scan_platform_logcat(&ui).stage(), CapabilityStage::SystemUiReached);
     }
 
@@ -1227,7 +1251,8 @@ Packages:
     /// rejected broadcast into a `SYSTEM UI REACHED` claim.
     #[test]
     fn a_rejected_broadcast_to_the_receiver_tag_is_not_a_delivery() {
-        let rejected = "W CellBroadcastReceiver: onReceive() unexpected action com.example.SOMETHING_ELSE\n";
+        let rejected = "D CellBroadcastReceiver: onReceive Intent { act=com.example.SOMETHING_ELSE }\n\
+W CellBroadcastReceiver: onReceive() unexpected action com.example.SOMETHING_ELSE\n";
         let evidence = scan_platform_logcat(rejected);
         assert!(!evidence.receiver_processed);
         assert!(!evidence.pipeline_ran());
@@ -1241,7 +1266,7 @@ Packages:
             "android.provider.Telephony.SMS_CB_RECEIVED",
             "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
         ] {
-            let line = format!("D CellBroadcastReceiver: onReceive {action}\n");
+            let line = format!("D CellBroadcastReceiver: onReceive Intent {{ act={action} }}\n");
             assert!(
                 scan_platform_logcat(&line).receiver_processed,
                 "{action} must count as processing"
@@ -1310,8 +1335,30 @@ Packages:
     /// A capture with no suppression marker must not invent one.
     #[test]
     fn a_normal_capture_reports_no_suppression() {
-        let log = "I CellBroadcastAlertDialog: onCreate\n";
+        let log = "I CBAlertService: onStartCommand\n";
         assert!(!scan_platform_logcat(log).was_suppressed());
+    }
+
+    /// A capture can contain both positive traces and a stated drop, and the drop must win.
+    ///
+    /// `CBAlertService: onStartCommand` fires before the testing-mode and channel-range checks, so a
+    /// real capture of a gated message looks like this: the service started *and* the platform said
+    /// it dropped the alert. `pipeline_ran()` is true and `was_suppressed()` is true at once. The
+    /// caller must consult `was_suppressed()` first; this test pins that both are observable so the
+    /// ordering in the verdict is a decision rather than an accident.
+    #[test]
+    fn a_gated_message_shows_both_a_positive_trace_and_a_drop() {
+        let log = "\
+D CBAlertService: onStartCommand: android.provider.Telephony.SMS_CB_RECEIVED
+D CBAlertService: ignoring the alert due to not in testing mode
+";
+        let evidence = scan_platform_logcat(log);
+        assert!(evidence.pipeline_ran(), "the service start line is a positive trace");
+        assert!(evidence.was_suppressed(), "the drop line must be visible");
+        assert_eq!(
+            evidence.suppression.as_ref().unwrap().gate,
+            SuppressionGate::TestModeRequired
+        );
     }
 
     /// `is_definite` must not treat a failed probe as a fact about the device.

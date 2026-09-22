@@ -224,3 +224,64 @@ It is documented here as a non-solution so it is not re-proposed.
 | `allow_testing_mode_on_user_build` defaults to `true` in AOSP | `CONFIRMED` |
 | Which of these gates the A35 actually has | `UNKNOWN` — no evidence yet |
 | Samsung has not modified any of the above | `UNKNOWN` — must not be assumed in either direction |
+
+---
+
+## Log markers: what is actually emitted, and what it is worth
+
+Every marker below was read out of the AOSP sources this session. The distinction between a
+*positive* marker (the pipeline ran) and a *negative* marker (the platform dropped the message and
+said why) matters, because a partial capture can contain both.
+
+### Negative markers — the platform states a cause
+
+| Log line (verbatim) | Gate | Emitted by |
+| --- | --- | --- |
+| `GSM CB message ignored - CB messages disabled by OEM.` | 3 | `CellBroadcastServiceManager` |
+| `CDMA CB message ignored - CB messages disabled by OEM.` | 3 | `CellBroadcastServiceManager` |
+| `CDMA SCP CB message ignored - CB messages disabled by OEM.` | 3 | `CellBroadcastServiceManager` |
+| `ignoring the alert due to not in testing mode` | 4 | `CellBroadcastAlertService` |
+| `ignoring the alert due to configured channels was marked ...` | 5 | `CellBroadcastAlertService` |
+| `ignoring the alert due to language mismatch. Message lang=` | 5 | `CellBroadcastAlertService` |
+| `Skipped message due to filter: ` | 5 | `CellBroadcastAlertService` |
+
+These are the most trustworthy lines in a capture: each is emitted only after the message reached
+the platform and was deliberately discarded, and each names its own cause. A run that produces one is
+a **definite negative result**, not an unknown, and re-running cannot change it.
+
+### Positive markers — the pipeline ran
+
+| Log line (verbatim) | Stage claimed |
+| --- | --- |
+| `GsmInboundSmsHandler: Received test intent action=` | `TEST ENTRY POINT ACCEPTED` |
+| `CBAlertService: onStartCommand` | `CB SERVICE REACHED` |
+| `CellBroadcastReceiver: onReceive Intent { act=android.provider.Telephony.SMS_CB_RECEIVED` | `CB RECEIVER PROCESSED` |
+| `CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED` | `CB RECEIVER PROCESSED` |
+| `openEmergencyAlertNotification` | `SYSTEM UI REACHED` |
+
+### Two traps in these markers, both of which we fell into
+
+**The receiver tag fires on actions the app rejects.** `CellBroadcastReceiver.onReceive` begins with
+`if (DBG) log("onReceive " + intent)`, and `DBG` is hardcoded `true`. It runs for *every* action
+handed to the receiver, including the `onReceive() unexpected action` fallback. So the bare tag
+`CellBroadcastReceiver` proves only that the process exists — not that it processed anything. The
+marker must be the receiver's own intent dump carrying a Cell-Broadcast action, which is the only
+form that appears when that receiver was entered with that action.
+
+**`CBAlertService: onStartCommand` fires before the message is judged.** It is emitted at the top of
+`onStartCommand`, before the testing-mode, channel-range and language checks run. A gated message
+therefore produces *both* this line and a suppression line. The suppression is the more specific and
+more final fact, so a verdict must consult it first; checking "did anything positive happen" first
+would report a dropped message as delivered.
+
+### Stage ordering
+
+`ReceiverProcessed` is a distinct stage between `CellBroadcastServiceReached` and `SystemUiReached`.
+The receiver running re-dispatches into the alert service, but it is still before the alert service
+has looked at the message, so it must not be reported as `SYSTEM UI REACHED`.
+
+| Claim | Label |
+| --- | --- |
+| The marker strings above are the exact AOSP log text | `CONFIRMED` (source read this session) |
+| The receiver tag is not by itself evidence of processing | `CONFIRMED` |
+| Which markers the A35's Samsung firmware emits verbatim | `UNKNOWN` — no capture yet |

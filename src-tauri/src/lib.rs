@@ -2103,13 +2103,13 @@ fn send_platform_test_alert(
     result.logcat_excerpt = truncate_for_log(&logcat, 3000);
 
     // 6. The verdict comes from downstream evidence, never from the exit code.
-    if platform_evidence.pipeline_ran() {
-        result.state = "ALERT_DISPLAYED".to_string();
-        result.message = format!(
-            "Platform Cell Broadcast pipeline evidence found: reached stage {}.",
-            result.stage.label()
-        );
-    } else if platform_evidence.was_suppressed() {
+    //
+    // Suppression is checked *first*. A gated message can still leave positive traces: the
+    // `CBAlertService: onStartCommand` line fires before the testing-mode and channel-range checks
+    // run, so a capture can contain both "the service started" and "the platform dropped it". The
+    // drop is the more specific and more final fact, and checking `pipeline_ran()` first would have
+    // reported such a run as `ALERT_DISPLAYED`.
+    if platform_evidence.was_suppressed() {
         // The platform processed the message and then deliberately dropped it, and said why. This
         // is a definite answer and a different one from "nothing was observed": the injection
         // reached the Cell Broadcast stack, so re-running it cannot help. Report the gate instead
@@ -2124,6 +2124,12 @@ fn send_platform_test_alert(
         );
         result.failure = Some("SUPPRESSED_BY_PLATFORM".to_string());
         result.suppression = Some(suppression.clone());
+    } else if platform_evidence.pipeline_ran() {
+        result.state = "ALERT_DISPLAYED".to_string();
+        result.message = format!(
+            "Platform Cell Broadcast pipeline evidence found: reached stage {}.",
+            result.stage.label()
+        );
     } else if accepted {
         result.state = "ACCEPTED_NO_EVIDENCE".to_string();
         result.message = "`am broadcast` was accepted, but no downstream Cell Broadcast log line \
