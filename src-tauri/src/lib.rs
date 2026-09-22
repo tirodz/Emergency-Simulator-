@@ -592,9 +592,23 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 ///   manifest component name. `-n` also takes `package/class`, and the package names that
 ///   `cellbroadcast_candidates()` returns would be rejected as a bad component name.
 /// * `--es pdu_string <hex>` — the key the handler reads.
-/// * `--ei phone_id 0` — the default subscription, matching AOSP's own documented example.
 /// * `--es format 3gpp` is not sent: `pdu_string` is already the encoded PDU and the handler does
 ///   not read a `format` key.
+/// * No `--ei phone_id`. `CbTestBroadcastReceiver.onReceive` in `InboundSmsHandler` returns early
+///   when `phone_id` is present and does not equal the handler's own phone id:
+///
+///   ```java
+///   int phoneId = mPhone.getPhoneId();
+///   if (intent.getIntExtra("phone_id", phoneId) != phoneId) {
+///       return;
+///   }
+///   ```
+///
+///   A pinned `0` therefore fails **silently** on a device whose active subscription is not phone
+///   0 — the receiver returns, `am` still exits 0, and the attempt looks identical to a build that
+///   lacks the receiver. Omitting the extra uses the default `phoneId`, so the handler for whichever
+///   phone is active accepts it. On a dual-SIM device both handlers may run, which is a visible,
+///   diagnosable outcome rather than silence, so it is the safer default.
 fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
     vec![
         "-s",
@@ -607,9 +621,6 @@ fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a st
         "--es",
         "pdu_string",
         pdu_hex,
-        "--ei",
-        "phone_id",
-        "0",
     ]
 }
 
@@ -1766,6 +1777,9 @@ pub struct PlatformSendResult {
     pub failure: Option<String>,
     pub evidence: Vec<String>,
     pub logcat_excerpt: String,
+    /// The platform gate that discarded the message, when the platform said so, with the verbatim
+    /// device line. Present only when the run reached the Cell Broadcast stack and was suppressed.
+    pub suppression: Option<platform::Suppression>,
     /// Every command that was run, with its raw output. Never collapsed.
     pub diagnostics: Vec<ProbeEvidence>,
 }
@@ -2024,6 +2038,7 @@ fn send_platform_test_alert(
         failure: None,
         evidence: Vec::new(),
         logcat_excerpt: String::new(),
+        suppression: None,
         diagnostics: Vec::new(),
     };
 
@@ -2094,6 +2109,21 @@ fn send_platform_test_alert(
             "Platform Cell Broadcast pipeline evidence found: reached stage {}.",
             result.stage.label()
         );
+    } else if platform_evidence.was_suppressed() {
+        // The platform processed the message and then deliberately dropped it, and said why. This
+        // is a definite answer and a different one from "nothing was observed": the injection
+        // reached the Cell Broadcast stack, so re-running it cannot help. Report the gate instead
+        // of leaving the operator with an unexplained silence.
+        let suppression = platform_evidence.suppression.as_ref().expect("was_suppressed()");
+        result.state = "SUPPRESSED_BY_PLATFORM".to_string();
+        result.message = format!(
+            "The message reached the Cell Broadcast stack and the platform then discarded it, \
+             because {}. The injection itself worked; the device's own configuration is what \
+             prevented the alert.",
+            suppression.explain()
+        );
+        result.failure = Some("SUPPRESSED_BY_PLATFORM".to_string());
+        result.suppression = Some(suppression.clone());
     } else if accepted {
         result.state = "ACCEPTED_NO_EVIDENCE".to_string();
         result.message = "`am broadcast` was accepted, but no downstream Cell Broadcast log line \
@@ -3006,8 +3036,12 @@ mod tests {
     /// BUG-021: the injection command named a bare package with `-n`, included a `format` extra the
     /// handler does not read, and omitted the `phone_id` selector. `-n` takes `package/class`, so
     /// `am` rejected the arguments outright and the attempt could never have reached the receiver on
-    /// any device. Asserted as a whole argv: the point is that a stray `-n` or a missing
-    /// `phone_id` must fail the build rather than be read as a device limitation.
+    /// any device. Asserted as a whole argv: the point is that a stray `-n` or a wrong extra must
+    /// fail the build rather than be read as a device limitation.
+    ///
+    /// `phone_id` is now deliberately *absent* rather than pinned to `0`. See the note on
+    /// `platform_test_alert_args`: pinning it makes the receiver return silently on a device whose
+    /// active subscription is not phone 0, which is indistinguishable from a missing receiver.
     #[test]
     fn platform_test_injection_matches_the_aosp_contract() {
         let args = platform_test_alert_args("R5CXA1B2C3D", "00001100");
@@ -3024,14 +3058,19 @@ mod tests {
                 "--es",
                 "pdu_string",
                 "00001100",
-                "--ei",
-                "phone_id",
-                "0",
             ]
         );
-        // The two regressions, stated directly so the reason survives a refactor of the vector.
+        // The regressions, stated directly so the reason survives a refactor of the vector.
         assert!(!args.contains(&"-n"), "the test receiver has no manifest component to target");
         assert!(!args.windows(2).any(|w| w == ["--es", "format"]));
+        assert!(
+            !args.contains(&"phone_id"),
+            "pinning phone_id makes the receiver return silently off phone 0"
+        );
+        assert!(
+            !args.windows(2).any(|w| w == ["--ei", "phone_id"]),
+            "phone_id must not be pinned to a fixed slot"
+        );
     }
 
     /// The defect this guards is the one BUG-001 recorded in the retired Python controller: a

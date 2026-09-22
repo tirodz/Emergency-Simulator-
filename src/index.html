@@ -424,17 +424,26 @@ function showResult(r){
  const ok=r&&(r.state==="ALERT_DISPLAYED"||r.state==="NOTIFICATION_POSTED");
  /* ACCEPTED_NO_EVIDENCE is the false-success case this project exists to prevent: `am` returned 0
     and nothing downstream happened. It must read as uncertain, never as delivered. */
- const uncertain=r&&r.state==="ACCEPTED_NO_EVIDENCE";
+ const uncertain=r&&(r.state==="ACCEPTED_NO_EVIDENCE"||r.state==="SUPPRESSED_BY_PLATFORM");
  const orb=ok?"var(--accent)":uncertain?"var(--warning)":"var(--danger)";
  $("resultOrb").style.color=orb;
  $("resultOrb").style.background=ok?"var(--accentSoft)":uncertain?"rgba(255,202,99,.12)":"rgba(255,109,109,.10)";
- $("resultTitle").textContent=ok?"Alert displayed":uncertain?"Accepted, but no delivery evidence":"Test blocked / uncertain";
+ /* SUPPRESSED_BY_PLATFORM is a definite negative: the message reached the Cell Broadcast stack and
+    the platform named the gate that dropped it. It is not a delivery and not an unknown, so it gets
+    its own wording rather than being folded into "no evidence followed". */
+ const suppressed=r&&r.state==="SUPPRESSED_BY_PLATFORM";
+ $("resultTitle").textContent=ok?"Alert displayed":suppressed?"Blocked by this phone's settings":uncertain?"Accepted, but no delivery evidence":"Test blocked / uncertain";
  $("resultText").textContent=(r&&r.message)||r?.failure||"No result returned.";
  $("ackBtn").disabled=!state.selected;
  if(ok){
   toast(r.state==="NOTIFICATION_POSTED"?"Local alert notification posted.":"Android system alert UI confirmed.","ok");
   log(r.state==="NOTIFICATION_POSTED"?"Local notification posted · full-screen UI available via tap/FSI":"Android system alert UI displayed · downstream evidence confirmed","ok");
   $("statusDot").className="dot green";$("statusTitle").textContent="Alert displayed by Android.";$("statusText").textContent=" Dismiss it on the phone, then acknowledge it here."
+ }else if(suppressed){
+  uiClick(false);
+  toast("The phone discarded the alert. Its own configuration blocked it.","error");
+  log("SUPPRESSED_BY_PLATFORM · the injection reached the Cell Broadcast stack and the platform dropped it: "+(r.suppression&&r.suppression.sent||r.failure),"error");
+  $("statusDot").className="dot amber";$("statusTitle").textContent="Reached the phone, blocked there.";$("statusText").textContent=" The message arrived at Android's Cell Broadcast stack and was discarded by a device setting. Re-running will not change this."
  }else if(uncertain){
   uiClick(false);
   toast("Command accepted, but Android produced no downstream evidence.","error");
