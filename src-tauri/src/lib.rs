@@ -12,6 +12,7 @@ use std::{
 
 use tauri::{Emitter, Manager, State};
 
+mod diagnostics;
 mod platform;
 
 use platform::{CapabilityStage, ProbeEvidence, State as PlatformState};
@@ -1862,8 +1863,106 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
     })
 }
 
-/// Inject one ETWS test Cell Broadcast through the AOSP telephony test entry point.
+/// Collect a structured, read-only diagnostic report for one device.
 ///
+/// Read-only by construction: every command below inspects state. Nothing here writes a setting,
+/// installs, clears data or touches a user file, so the operator can run it on their own phone
+/// without approval for a specific command.
+///
+/// The report is assembled from raw command output by pure functions in `diagnostics`, so the same
+/// text can be re-parsed in a test. Where a command fails or returns nothing, the corresponding
+/// field stays `Unknown` rather than becoming a negative answer — an unreadable dump is not a
+/// denial, and a package name is not a component declaration.
+#[tauri::command]
+fn device_diagnostics(
+    app: tauri::AppHandle,
+    serial: String,
+) -> Result<diagnostics::DiagnosticReport, String> {
+    let mut commands: Vec<diagnostics::CommandResult> = Vec::new();
+
+    let capture = |label: &str, args: &[&str]| {
+        let (stdout, record) = shell_captured(&app, &serial, args);
+        (stdout, record, label.to_string())
+    };
+
+    // 1. Every property the report needs, in one `getprop` invocation.
+    let (properties_raw, record, label) = capture("device properties", &["getprop"]);
+    let mut record = record;
+    let properties = diagnostics::parse_getprop_batch(&properties_raw);
+    record.parsed = format!("{} properties parsed", properties.len());
+    commands.push(diagnostics::CommandResult {
+        label,
+        command: record.command,
+        exit_code: record.exit_code,
+        stdout: record.stdout,
+        stderr: record.stderr,
+        parsed: record.parsed,
+    });
+
+    // 2. Package inventory with APK paths, so an APEX-shipped module is visible as such.
+    let (packages_raw, record, label) = capture("package inventory", &["pm", "list", "packages", "-f"]);
+    let listed = diagnostics::parse_pm_list_packages_f(&packages_raw);
+    let mut record = record;
+    record.parsed = format!("{} installed packages listed", listed.len());
+    commands.push(diagnostics::CommandResult {
+        label,
+        command: record.command,
+        exit_code: record.exit_code,
+        stdout: record.stdout,
+        stderr: record.stderr,
+        parsed: record.parsed,
+    });
+
+    // 3. For each package that could plausibly participate, read its dump once.
+    let mut records = Vec::new();
+    for (name, path) in &listed {
+        let Some((relevance, _)) = diagnostics::classify_package(name) else {
+            continue;
+        };
+
+        let (dump, record) = shell_captured(&app, &serial, &["dumpsys", "package", name]);
+        let dump_readable = !dump.trim().is_empty();
+        let receivers = if dump_readable {
+            diagnostics::parse_receivers(&dump)
+                .into_iter()
+                .filter(diagnostics::receiver_is_cellbroadcast)
+                .count()
+        } else {
+            0
+        };
+        let note = if !dump_readable {
+            "dump returned nothing; capabilities from this package are UNKNOWN, not denied"
+        } else if receivers > 0 {
+            "Cell Broadcast receiver declaration found"
+        } else {
+            "no Cell Broadcast receiver declaration in this package"
+        };
+
+        commands.push(diagnostics::CommandResult {
+            label: format!("package dump: {} [{}]", name, relevance.label()),
+            command: record.command,
+            exit_code: record.exit_code,
+            stdout: record.stdout,
+            stderr: record.stderr,
+            parsed: note.to_string(),
+        });
+
+        if let Some(entry) = diagnostics::package_record(name, vec![path.clone()], &dump) {
+            records.push(entry);
+        }
+    }
+
+    // Most relevant first, so a reader sees the component before the carrier configuration.
+    records.sort_by(|a, b| {
+        a.relevance
+            .cmp(&b.relevance)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    Ok(diagnostics::build_report(&properties, &records, commands))
+}
+
+/// Inject one ETWS test Cell Broadcast through the AOSP telephony test entry point.
 /// This is the root-free path: `GsmInboundSmsHandler` registers a receiver for
 /// `com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST` on `eng`/`userdebug` builds,
 /// and it decodes a Cell Broadcast PDU placed in the `pdu_string` extra. Running it needs only the
@@ -3211,6 +3310,7 @@ pub fn run() {
             app_info,
             adb_diagnostics,
             platform_diagnostics,
+            device_diagnostics,
             send_platform_test_alert,
             adb_pair,
             adb_connect,
