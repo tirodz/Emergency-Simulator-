@@ -3,7 +3,147 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status
+## Current status — overnight lead-engineer session (2026-09-21)
+
+Branch `fix/platform-test-path-and-capability-truth`, based on main after PR #4. This session
+continued capability UI/lifecycle hardening and audited the platform test-injection path.
+
+### What this session changed
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-020](docs/bugs/BUG-020-capability-probe-reports-granted-permission-as-denied.md) | A granted `POST_NOTIFICATIONS` was parsed as denied (the name is mentioned on several lines and `find` took the first, state-less one); an unreadable/unmentioned permission was also collapsed into a denial and then blocked the send | `src-tauri/src/lib.rs`, `src-tauri/src/platform.rs` | FIXED |
+| [BUG-021](docs/bugs/BUG-021-platform-test-injection-could-never-reach-the-receiver.md) | The platform test-injection broadcast passed a bare package name to `am broadcast -n`, which takes `package/class`; the AOSP test receiver is dynamically registered and has no component name, so the command could never have reached it on any device | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-022](docs/bugs/BUG-022-ui-harness-measured-a-hidden-panel.md) | The UI harness measured `#deviceDetail` while the app was in `view-overview`, which hides it behind `display:none !important`, so every overflow assertion was vacuous | `tools/check_ui.mjs` | FIXED |
+| [BUG-023](docs/bugs/BUG-023-studio-device-image-clipped.md) | Fixed-width device renders clipped inside shrinking `overflow:hidden` boxes below ~1180px | `src/index.html` | FIXED |
+
+### The platform test entry point
+
+`platform::assess_test_entrypoint` now decides usability from `ro.debuggable`, and the reason is
+carried through to the UI. This is stated plainly in `platform.rs`:
+
+* `ro.debuggable=1` (`userdebug`/`eng`) — the AOSP test receiver
+  `GsmInboundSmsHandler.GsmCbTestBroadcastReceiver` is registered and the broadcast can reach the
+  telephony pipeline.
+* `ro.debuggable=0` (`user`) — the receiver is never registered. `am` accepts the broadcast and the
+  platform discards it. This is a build property, not a permission, so it **cannot be granted on the
+  device**, with or without adb, and it is not a root question.
+
+Verified against AOSP source: `TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1` in
+`frameworks/opt/telephony/.../GsmInboundSmsHandler.java`, whose doc comment gives the exact
+invocation now matched by the controller:
+`am broadcast -a com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST --es pdu_string <hex>
+--ei phone_id 0`.
+
+### What this session deliberately did not claim
+
+The safety boundary in AGENTS.md is unchanged and this session did not move it:
+
+* **CONTROLLED DEVELOPMENT MODE** remains the only demonstrated end-to-end alert path.
+* **STOCK DEVICE MODE** remains unproven. A retail Samsung A35 with `ro.debuggable=0` is reported
+  `BLOCKED` with the reason above — not as a failure of the tool and not as working.
+* BUG-021 is `INFERRED`, not `CONFIRMED`. The argument contract is checked against AOSP and covered
+  by a regression test, but no `userdebug` target was driven from this environment. It has no adb and
+  no radio.
+* Shizuku is **not** a bypass for either limit and was not implemented as one. It elevates to
+  `shell` (`uid=2000`) via a user-granted Binder proxy; it does not change `ro.debuggable`, does not
+  add privileges to a `user` build telephony process, and cannot make a dynamically registered
+  receiver exist. Using it to reach a `user` build's Cell Broadcast pipeline is not possible by this
+  mechanism.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **54/54 pass** (was 53). The new test asserts the whole injection argv
+  and was confirmed to **fail** when `-n <package>` is reintroduced, so it is not an inert check.
+* `node tools/check_ui.mjs`: all assertions pass at 1000/1180/1360/1600px. The harness asserts the
+  measured panel is visible, checks in-box clipping per element, and self-tests its own overflow
+  detector.
+* The corrected harness reproduced the original `.kv span` clipping (`scroll=442 client=282`) before
+  the CSS fix, confirming the check bites.
+* The harness now runs in the `verify` CI job on every pull request. It was previously never run in
+  CI, so the defect class it exists to catch could be reintroduced unchecked.
+
+### Environment note
+
+This session has no adb, no USB, no Bluetooth adapter and no route to the operator's laptop. Nothing
+here was validated against a phone; all device-facing claims are from source, unit tests and captured
+logcat already in `docs/experiments/`.
+
+## Previous status — Mission 2B
+
+**The root-free local simulator path was exercised end to end on a real Android 35 device for the
+first time, and doing so exposed three defects that only appear under real platform latency.**
+
+Previous sessions had built the simulator APK but never driven it. This session installed it on a
+booted emulator, sent real broadcasts through the actual `am broadcast` → `AlertReceiver` →
+`NotificationManager` → `EmergencyActivity` chain, and read the downstream stage lines back out of
+logcat. The chain works: `FULLSCREEN_ACTIVITY_STARTED`, `AUDIO_FOCUS_REQUEST granted=true` and
+`VIBRATION_START` were all observed from a real run. Three defects were found by doing that rather
+than by reading the code.
+
+### What was found and fixed this session
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-017](docs/bugs/BUG-017-evidence-timeout-false-negative.md) | The evidence collector's 8 s budget was shorter than the platform's own latency (12.7 s measured), so a genuine full-screen alert was reported as an evidence timeout | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-018](docs/bugs/BUG-018-premature-notification-only-verdict.md) | The collector concluded at `NOTIFICATION_POSTED`, but Android posts the notification and launches the full-screen activity up to 8 s apart, so a real full-screen alert was under-reported as notification-only | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-019](docs/bugs/BUG-019-blocking-audio-prepare-anr.md) | `MediaPlayer.prepare()` ran on the main thread; on a device whose alarm URI does not resolve it blocked the alert UI for ~13 s, an ANR risk | `EmergencyActivity.kt` | FIXED |
+
+All three are the same shape as the two bugs already recorded in `docs/bugs/`: a signal that looked
+correct while the thing it claimed to prove was not true. BUG-017 and BUG-018 are both false
+*negatives* — the alert had appeared and the tool said it had not. BUG-017 in particular is the
+mirror image of the recorded false successes, and it was only visible because a slow device was
+tested instead of a fast one.
+
+### Why BUG-017 and BUG-018 could not be caught by a unit test alone
+
+Both are timing defects. The verdict *logic* was correct; the *deadlines* it ran under were wrong.
+The fix therefore separates the two: `local_simulator_verdict()` is now a pure function of the
+stage lines, tested against real captured logcat, and the polling loop that feeds it carries the
+measured timeouts (`LOCAL_EVIDENCE_TIMEOUT = 25 s`, `FULLSCREEN_GRACE = 14 s`) with the measurement
+that produced each number recorded next to it.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **15/15 pass** (was 7). The new tests include a pure-function verdict
+  test driven by real logcat captured from the device, and a cross-language contract test that fails
+  if `AlertStages.kt` and the Rust stage names ever drift apart.
+* Real device run, Android 35 emulator, `ro.debuggable=1`:
+  `ANDROID_RECEIVER_ACCEPTED` → `NOTIFICATION_POSTED` → `FULLSCREEN_ACTIVITY_STARTED rendered` →
+  `AUDIO_FOCUS_REQUEST granted=true` → `VIBRATION_START pattern=700,300,700,300,1100`.
+* **BUG-001/BUG-015 quoting re-verified end to end**, not just in unit tests: a body containing
+  spaces, `;`, `$(whoami)`, backticks, `&`, `|`, `>`, `<`, double quotes and embedded single quotes
+  arrived at the receiver **byte-identical at 77/77 characters**.
+* `gradle :app:assembleDebug`: BUILD SUCCESSFUL; APK installs and runs.
+* No ANR recorded after the async-audio change (`grep -ci "ANR in com.tirodz"` → 0).
+* Frontend contract check: consistent (15 commands, 14 invoked, 98 ids). The new `SendResult` fields
+  are additive; the frontend reads only `state`, `message` and `failure`, all of which are preserved.
+* Android 14+ full-screen intent behaviour characterised: with the screen **on**, Android shows a
+  heads-up notification and does *not* launch the activity even though the op is `allow`; with the
+  screen **off or dozing**, it does launch. This is platform policy, and the tool now reports the
+  two outcomes distinctly rather than conflating them.
+
+### What the simulator can and cannot claim
+
+The local simulator path is **CONFIRMED** on a `userdebug` emulator: a root-free app produces a real
+full-screen Android alert UI with sound and vibration. It is still **not** a CellBroadcast path — it
+never touches `SMS_CB_RECEIVED` and no radio is involved. The stock-device claim remains exactly as
+bounded as before.
+
+`README.md` did not mention the simulator at all, which is what let the boundary stay ambiguous to a
+reader. It now documents it plainly: what it is, what it is not, and the two Android 14+ behaviours
+that decide what the operator sees. The stock-device claim itself was not weakened or strengthened.
+
+Two limits found on the emulator image and recorded rather than worked around: it ships **no ringtone
+media at all** (`/system/media/audio/` is absent, `alarm_alert` and `notification_sound` are both
+`null`), so `AUDIO_UNAVAILABLE` there is correct reporting and not a defect; and its SystemUI crashed
+under repeated power-key toggling, which silently disables full-screen intents until the device is
+rebooted. The second is an emulator artefact, not a product bug, and is written down so a future
+session does not misread it as a regression.
+
+---
+
+### Prior session — repository audit (BUG-015, BUG-016)
 
 **The root-free local simulator path was exercised end to end on a real Android 35 device for the
 first time, and doing so exposed three defects that only appear under real platform latency.**

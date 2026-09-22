@@ -12,6 +12,10 @@ use std::{
 
 use tauri::{Emitter, Manager, State};
 
+mod platform;
+
+use platform::{CapabilityStage, ProbeEvidence, State as PlatformState};
+
 const SERVICE_CATEGORY: u32 = 4355;
 const REQUIRED_PREFIX: &str = "TEST";
 const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
@@ -73,6 +77,11 @@ pub struct Device {
     pub cellbroadcast_package: Option<String>,
     pub cellbroadcast_candidates: Vec<String>,
     pub local_simulator: bool,
+    /// Whether the AOSP test entry point exists on this build, and why.
+    pub test_entrypoint_available: PlatformState,
+    pub test_entrypoint_reason: String,
+    /// The strongest capability established by evidence rather than by inference.
+    pub capability_stage: CapabilityStage,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -498,11 +507,106 @@ fn shell(app: &tauri::AppHandle, serial: &str, parts: &[&str]) -> Result<String,
     adb_call(app, &args)
 }
 
+/// Run a command and keep *everything*: exit code, stdout, stderr and the argv that produced it.
+///
+/// The diagnostic panel and the capability probe both need the unedited record. Collapsing stderr
+/// into stdout or dropping a non-zero exit code is what makes a diagnostic tool unable to explain
+/// its own conclusions, so this never discards either.
+fn run_captured(app: &tauri::AppHandle, args: &[&str]) -> (String, ProbeEvidence) {
+    let command = format!("adb {}", args.join(" "));
+    let label = args.last().map(|s| s.to_string()).unwrap_or_default();
+
+    match command_output(app, args) {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let code = output.status.code();
+            (
+                stdout.clone(),
+                ProbeEvidence {
+                    label,
+                    command,
+                    exit_code: code,
+                    stdout,
+                    stderr,
+                    parsed: if output.status.success() {
+                        String::new()
+                    } else {
+                        format!("command failed with exit code {}", code.unwrap_or(-1))
+                    },
+                },
+            )
+        }
+        Err(error) => (
+            String::new(),
+            ProbeEvidence {
+                label,
+                command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: error.clone(),
+                parsed: error,
+            },
+        ),
+    }
+}
+
+/// Trim long command output for the diagnostic panel without hiding that it was trimmed.
+fn truncate_for_log(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(limit).collect();
+    format!("{kept}\n…[{} more characters omitted]", trimmed.chars().count() - limit)
+}
+
+/// `shell` that also returns the raw evidence for the diagnostic panel.
+fn shell_captured(
+    app: &tauri::AppHandle,
+    serial: &str,
+    parts: &[&str],
+) -> (String, ProbeEvidence) {
+    let mut args = vec!["-s", serial, "shell"];
+    args.extend_from_slice(parts);
+    run_captured(app, &args)
+}
+
 fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
     shell(app, serial, &["getprop", key])
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Build the argv for the AOSP platform test-injection broadcast.
+///
+/// Split out from the send so the argument contract can be asserted without a device. Four details
+/// are deliberate and were each wrong before (BUG-021):
+///
+/// * no `-n` — `GsmInboundSmsHandler` registers the test receiver dynamically, so it has no
+///   manifest component name. `-n` also takes `package/class`, and the package names that
+///   `cellbroadcast_candidates()` returns would be rejected as a bad component name.
+/// * `--es pdu_string <hex>` — the key the handler reads.
+/// * `--ei phone_id 0` — the default subscription, matching AOSP's own documented example.
+/// * `--es format 3gpp` is not sent: `pdu_string` is already the encoded PDU and the handler does
+///   not read a `format` key.
+fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
+    vec![
+        "-s",
+        serial,
+        "shell",
+        "am",
+        "broadcast",
+        "-a",
+        platform::TEST_TRIGGER_ACTION,
+        "--es",
+        "pdu_string",
+        pdu_hex,
+        "--ei",
+        "phone_id",
+        "0",
+    ]
 }
 
 /// Every package on the device that looks like a Cell Broadcast receiver, most likely first.
@@ -686,7 +790,7 @@ fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<Strin
     Ok("Local Android alert simulator installed.".to_string())
 }
 
-/// The capability state that decides what the operator will actually see on the phone.
+/// Local-simulator prerequisites, each an explicit five-state answer.
 ///
 /// Reported separately from installation because they fail independently: a simulator can be
 /// installed and still be unable to post a notification (Android 13+ POST_NOTIFICATIONS denied) or
@@ -696,69 +800,82 @@ fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<Strin
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SimulatorCapabilities {
     pub installed: bool,
-    pub post_notifications: Option<bool>,
-    pub full_screen_intent: Option<bool>,
-    pub notifications_enabled: Option<bool>,
+    pub post_notifications: PlatformState,
+    pub full_screen_intent: PlatformState,
+    pub notifications_enabled: PlatformState,
+    pub post_notifications_detail: String,
+    pub full_screen_intent_detail: String,
 }
 
-fn simulator_capabilities(app: &tauri::AppHandle, serial: &str) -> SimulatorCapabilities {
+fn simulator_capabilities(
+    app: &tauri::AppHandle,
+    serial: &str,
+    evidence: &mut Vec<ProbeEvidence>,
+) -> SimulatorCapabilities {
     let mut capabilities = SimulatorCapabilities {
         installed: local_simulator_installed(app, serial),
         ..Default::default()
     };
 
     if !capabilities.installed {
+        capabilities.post_notifications = PlatformState::NotPresent;
+        capabilities.full_screen_intent = PlatformState::NotPresent;
+        capabilities.notifications_enabled = PlatformState::NotPresent;
         return capabilities;
     }
 
-    // POST_NOTIFICATIONS is only runtime-granted from Android 13 (API 33). Below that the
-    // permission does not exist and reporting `false` would be a false alarm.
-    let sdk = getprop(app, serial, "ro.build.version.sdk")
-        .trim()
-        .parse::<u32>()
-        .ok();
+    // POST_NOTIFICATIONS is only a runtime permission from Android 13 (API 33). Below that it does
+    // not exist, and reporting a denial there would be a false alarm.
+    let (sdk_text, sdk_evidence) = shell_captured(app, serial, &["getprop", "ro.build.version.sdk"]);
+    let sdk = sdk_text.trim().parse::<u32>().ok();
+    evidence.push(sdk_evidence);
+
     if sdk.is_some_and(|sdk| sdk >= 33) {
-        capabilities.post_notifications = shell(
-            app,
-            serial,
-            &["dumpsys", "package", LOCAL_SIMULATOR_PACKAGE],
-        )
-        .ok()
-        .and_then(|dump| {
-            dump.lines()
-                .find(|line| line.contains("android.permission.POST_NOTIFICATIONS"))
-                .map(|line| line.contains("granted=true"))
+        let (dump, record) =
+            shell_captured(app, serial, &["dumpsys", "package", LOCAL_SIMULATOR_PACKAGE]);
+        capabilities.post_notifications = platform::parse_post_notifications(&dump);
+        capabilities.post_notifications_detail =
+            capabilities.post_notifications.label().to_string();
+        evidence.push(ProbeEvidence {
+            parsed: capabilities.post_notifications.label().to_string(),
+            ..record
         });
+    } else {
+        capabilities.post_notifications = PlatformState::NotPresent;
+        capabilities.post_notifications_detail = format!(
+            "POST_NOTIFICATIONS does not exist below API 33 (device reports SDK {})",
+            sdk_text.trim()
+        );
     }
 
-    // `appops get` reports the current mode for the op. On Android 14+ this defaults to `deny`
-    // for apps that are not calling/alarm apps, which is exactly the condition that makes a
-    // full-screen alert silently degrade into a heads-up notification.
-    capabilities.full_screen_intent = shell(
+    // Android 14+ defaults USE_FULL_SCREEN_INTENT to denied for apps that are not calling or alarm
+    // apps, which degrades a full-screen alert into a heads-up notification without any error.
+    let (appop, record) = shell_captured(
         app,
         serial,
         &["appops", "get", LOCAL_SIMULATOR_PACKAGE, "USE_FULL_SCREEN_INTENT"],
-    )
-    .ok()
-    .map(|text| {
-        let text = text.to_ascii_lowercase();
-        if text.contains("allow") {
-            true
-        } else if text.contains("deny") || text.contains("ignore") || text.contains("default") {
-            false
-        } else {
-            // Op not present on this API level; treat as unrestricted.
-            true
-        }
+    );
+    capabilities.full_screen_intent = platform::parse_full_screen_intent(&appop);
+    capabilities.full_screen_intent_detail = capabilities.full_screen_intent.label().to_string();
+    evidence.push(ProbeEvidence {
+        parsed: capabilities.full_screen_intent.label().to_string(),
+        ..record
     });
 
-    capabilities.notifications_enabled = shell(
-        app,
-        serial,
-        &["dumpsys", "notification", "--noredact"],
-    )
-    .ok()
-    .map(|dump| !dump.contains(&format!("{LOCAL_SIMULATOR_PACKAGE}: banned")));
+    let (notifications, record) = shell_captured(app, serial, &["dumpsys", "notification"]);
+    capabilities.notifications_enabled = if notifications.trim().is_empty() {
+        PlatformState::Unknown
+    } else if notifications.contains(&format!("{LOCAL_SIMULATOR_PACKAGE}: banned")) {
+        PlatformState::Denied
+    } else {
+        // The package not being mentioned is the normal state for an app that has not posted
+        // anything yet. That is not a ban, so it must not be reported as a denial.
+        PlatformState::Unknown
+    };
+    evidence.push(ProbeEvidence {
+        parsed: capabilities.notifications_enabled.label().to_string(),
+        ..record
+    });
 
     capabilities
 }
@@ -1073,6 +1190,10 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "No probe ran: the device is not yet authorised for debugging."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1098,6 +1219,10 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "No probe ran: ADB reports the device as offline."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1120,6 +1245,10 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "ADB transport is not in the device state; no probe ran."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1154,21 +1283,73 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         }
 
         let specs = query_device_specs(app, &serial, &model);
+        let cellbroadcast_package_was_found = cellbroadcast_package.is_some();
+
+        // Whether the AOSP test entry point exists is a build property, not a permission. Stating
+        // it here means the operator learns it before selecting an action, rather than from a
+        // broadcast that reported success and produced nothing.
+        let test_entrypoint =
+            platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
+        let capabilities = if local_simulator {
+            Some(simulator_capabilities(app, &serial, &mut Vec::new()))
+        } else {
+            None
+        };
+
         let (state, support_level) = if local_simulator {
-            notes.push("Root-free local simulator is installed. Send uses our explicit test receiver and notification/full-screen pipeline.".to_string());
-            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
-        } else if root && cellbroadcast_package.is_some() {
             notes.push(
-                "Rooted/userdebug controlled target. The genuine Android CellBroadcast test path is available."
+                "Root-free local simulator is installed. Send uses our explicit test receiver and \
+                 the notification/full-screen pipeline. This is a local app notification, not a \
+                 Cell Broadcast."
                     .to_string(),
             );
+            match &capabilities {
+                Some(capabilities) if capabilities.post_notifications == PlatformState::Denied => {
+                    notes.push(
+                        "Notifications are denied for the local simulator, so Android will run the \
+                         receiver and drop the alert silently. Grant notifications for that app."
+                            .to_string(),
+                    );
+                }
+                Some(capabilities) if capabilities.post_notifications == PlatformState::Unknown => {
+                    notes.push(
+                        "Notification permission could not be read. The simulator may still work; \
+                         the state is unknown rather than denied."
+                            .to_string(),
+                    );
+                }
+                _ => {}
+            }
+            if matches!(
+                capabilities.as_ref().map(|c| c.full_screen_intent),
+                Some(PlatformState::Denied)
+            ) {
+                notes.push(
+                    "USE_FULL_SCREEN_INTENT is denied, so the alert will be a heads-up notification \
+                     rather than a full-screen takeover."
+                        .to_string(),
+                );
+            }
+            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
+        } else if root && cellbroadcast_package.is_some() {
+            notes.push(format!(
+                "Rooted/userdebug controlled target. AOSP test entry point: {}.",
+                test_entrypoint.available.label()
+            ));
+            notes.push(test_entrypoint.reason.clone());
             (DeviceState::Ready, SupportLevel::Supported)
         } else if cellbroadcast_package.is_none() {
-            notes.push("No CellBroadcast receiver package was detected. Install the local simulator to test alert UI on a stock device.".to_string());
+            notes.push(
+                "No CellBroadcast receiver package was detected. Install the local simulator to \
+                 test the alert UI on a stock device."
+                    .to_string(),
+            );
             (DeviceState::Unsupported, SupportLevel::Unsupported)
         } else {
+            notes.push(test_entrypoint.reason.clone());
             notes.push(
-                "Stock/non-root device. Install the bundled local simulator to test alert UI without root."
+                "Stock/non-root device. The local simulator provides a root-free alert UI path; it \
+                 produces a local app notification, not a Cell Broadcast."
                     .to_string(),
             );
             (DeviceState::NoRoot, SupportLevel::RootRequired)
@@ -1187,6 +1368,15 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             cellbroadcast_package,
             cellbroadcast_candidates,
             local_simulator,
+            test_entrypoint_available: test_entrypoint.available,
+            test_entrypoint_reason: test_entrypoint.reason,
+            capability_stage: if local_simulator {
+                CapabilityStage::TestEntryPointDiscovered
+            } else if cellbroadcast_package_was_found {
+                CapabilityStage::ReceiverDiscovered
+            } else {
+                CapabilityStage::None
+            },
             state,
             support_level,
             specs,
@@ -1555,6 +1745,257 @@ fn collect_evidence(
     Ok(())
 }
 
+/// The result of a platform test-injection attempt.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlatformSendResult {
+    pub device_serial: String,
+    pub body: String,
+    pub pdu_hex: String,
+    pub message_id: String,
+    pub entrypoint_available: PlatformState,
+    pub stage: CapabilityStage,
+    pub state: String,
+    pub message: String,
+    pub failure: Option<String>,
+    pub evidence: Vec<String>,
+    pub logcat_excerpt: String,
+    /// Every command that was run, with its raw output. Never collapsed.
+    pub diagnostics: Vec<ProbeEvidence>,
+}
+
+/// Probe a device's Cell Broadcast capability without changing anything.
+///
+/// Read-only, and it returns the raw output of every command behind its conclusions so the
+/// operator can check the parsing rather than trust it.
+#[tauri::command]
+fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platform::PlatformProbe, String> {
+    let mut evidence = Vec::new();
+
+    let (debuggable, record) = shell_captured(&app, &serial, &["getprop", platform::DEBUGGABLE_PROPERTY]);
+    let debuggable = debuggable.trim().to_string();
+    let mut entrypoint_record = record;
+    entrypoint_record.parsed = format!("ro.debuggable={debuggable:?}");
+    evidence.push(entrypoint_record);
+
+    let (build_type, record) = shell_captured(&app, &serial, &["getprop", "ro.build.type"]);
+    evidence.push(record);
+
+    let candidates = cellbroadcast_candidates(&app, &serial);
+    let cellbroadcast_package = candidates.first().cloned();
+
+    // Package presence must be paired with an actual receiver declaration. A package name is a
+    // string; it is not evidence that the component exists.
+    let receiver_declared = match &cellbroadcast_package {
+        Some(package) => {
+            let (dump, mut record) =
+                shell_captured(&app, &serial, &["dumpsys", "package", package]);
+            let declared = dump.contains("CellBroadcastReceiver")
+                || dump.contains("CellBroadcastAlertService")
+                || dump.contains("cellbroadcastreceiver");
+            record.parsed = if declared {
+                "CellBroadcast receiver/service declared in the package manifest".to_string()
+            } else if dump.trim().is_empty() {
+                "no package dump returned".to_string()
+            } else {
+                "package present but no CellBroadcast component found in its dump".to_string()
+            };
+            evidence.push(record);
+            if declared {
+                PlatformState::Granted
+            } else if dump.trim().is_empty() {
+                PlatformState::Unknown
+            } else {
+                PlatformState::NotPresent
+            }
+        }
+        None => PlatformState::NotPresent,
+    };
+
+    let test_entrypoint =
+        platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
+
+    let local_simulator_installed = local_simulator_installed(&app, &serial);
+    let capabilities = simulator_capabilities(&app, &serial, &mut evidence);
+
+    // Capability is the *lowest* honest stage: what the device is, not what we hope it is.
+    let stage = if receiver_declared == PlatformState::Granted
+        && test_entrypoint.available == PlatformState::Granted
+    {
+        CapabilityStage::TestEntryPointDiscovered
+    } else if receiver_declared == PlatformState::Granted {
+        CapabilityStage::ReceiverDiscovered
+    } else if cellbroadcast_package.is_some() {
+        CapabilityStage::PackagePresent
+    } else {
+        CapabilityStage::None
+    };
+
+    let summary = if test_entrypoint.available == PlatformState::Granted {
+        format!(
+            "{} The platform Cell Broadcast test path is available on this build.",
+            test_entrypoint.reason
+        )
+    } else if test_entrypoint.available == PlatformState::Denied {
+        format!(
+            "{} Use the local simulator command instead: it posts a local app alert and needs no \
+             root, but it is not a Cell Broadcast.",
+            test_entrypoint.reason
+        )
+    } else {
+        test_entrypoint.reason.clone()
+    };
+
+    Ok(platform::PlatformProbe {
+        build_type: (!build_type.trim().is_empty()).then(|| build_type.trim().to_string()),
+        debuggable: (!debuggable.is_empty()).then_some(debuggable),
+        test_entrypoint,
+        cellbroadcast_candidates: candidates,
+        cellbroadcast_package,
+        receiver_declared,
+        local_simulator_installed,
+        post_notifications: capabilities.post_notifications,
+        full_screen_intent: capabilities.full_screen_intent,
+        notifications_enabled: capabilities.notifications_enabled,
+        stage,
+        summary,
+        evidence,
+    })
+}
+
+/// Inject one ETWS test Cell Broadcast through the AOSP telephony test entry point.
+///
+/// This is the root-free path: `GsmInboundSmsHandler` registers a receiver for
+/// `com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST` on `eng`/`userdebug` builds,
+/// and it decodes a Cell Broadcast PDU placed in the `pdu_string` extra. Running it needs only the
+/// ADB shell identity, not root, because the receiver is not a `<protected-broadcast>`.
+///
+/// Three things this deliberately does not do:
+///
+/// * It does not run on a production build. `ro.debuggable=0` means the receiver was never
+///   registered, so the broadcast would be accepted by `am` and silently discarded. Returning an
+///   honest "not available" is worth more than a command that looks like it worked.
+/// * It does not build a shell string. Arguments go to `Command::new(adb).args(..)` as a vector, so
+///   nothing in the body, the package name or the PDU can be reinterpreted by a shell on either
+///   side of the transport.
+/// * It does not claim delivery from the exit code. The verdict comes from downstream logcat
+///   markers, and an accepted-but-silent broadcast is reported as such.
+#[tauri::command]
+fn send_platform_test_alert(
+    app: tauri::AppHandle,
+    serial: String,
+    body: String,
+) -> Result<PlatformSendResult, String> {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !body.starts_with(REQUIRED_PREFIX) {
+        return Err(format!(
+            "Refusing to send: the body must begin with {REQUIRED_PREFIX} so the alert is \
+             unambiguously identifiable as a test."
+        ));
+    }
+
+    let mut diagnostics = Vec::new();
+    let mut result = PlatformSendResult {
+        device_serial: serial.clone(),
+        body: body.clone(),
+        pdu_hex: String::new(),
+        message_id: String::new(),
+        entrypoint_available: PlatformState::Unknown,
+        stage: CapabilityStage::None,
+        state: "UNKNOWN".to_string(),
+        message: String::new(),
+        failure: None,
+        evidence: Vec::new(),
+        logcat_excerpt: String::new(),
+        diagnostics: Vec::new(),
+    };
+
+    // 1. Is the test entry point present at all?
+    let (debuggable, record) = shell_captured(&app, &serial, &["getprop", platform::DEBUGGABLE_PROPERTY]);
+    diagnostics.push(record);
+    let debuggable = debuggable.trim().to_string();
+
+    let candidates = cellbroadcast_candidates(&app, &serial);
+    let receiver = candidates.first().cloned();
+    let entrypoint = platform::assess_test_entrypoint(&debuggable, receiver.as_deref());
+    result.entrypoint_available = entrypoint.available;
+
+    if entrypoint.available != PlatformState::Granted {
+        result.state = "BLOCKED".to_string();
+        result.message = entrypoint.reason.clone();
+        result.failure = Some(entrypoint.available.label().to_string());
+        result.diagnostics = diagnostics;
+        return Ok(result);
+    }
+
+    // 2. Build the PDU here, from validated input, so the device receives a checked message.
+    let serial_number = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u16)
+        .unwrap_or(0))
+        .wrapping_add(1);
+    let pdu = platform::etws_test_pdu(&body, serial_number)?;
+    let pdu_hex: String = pdu.iter().map(|byte| format!("{byte:02X}")).collect();
+    if let Some(header) = platform::parse_cb_header(&pdu) {
+        result.message_id = format!("0x{:04X} {}", header.message_id, header.message_id_label());
+    }
+    result.pdu_hex = pdu_hex.clone();
+    result.evidence.push(format!(
+        "PDU {} bytes, {pdu_hex}",
+        pdu.len()
+    ));
+
+    // 3. Clear logcat so the evidence belongs only to this attempt.
+    let (_cleared, record) = shell_captured(&app, &serial, &["logcat", "-c"]);
+    diagnostics.push(record);
+
+    // 4. Send. Every argument is a separate argv element: no shell string is ever constructed.
+    let args = platform_test_alert_args(&serial, &pdu_hex);
+    let (stdout, record) = run_captured(&app, &args);
+    // `am` reports a missing receiver on stdout while still exiting 0 on some builds, so the
+    // wording is checked as well as the exit code.
+    let accepted = record.exit_code == Some(0) && !stdout.contains("Broadcast failed");
+    result.evidence.push(format!(
+        "am broadcast exit={:?} accepted_by_am={accepted}",
+        record.exit_code
+    ));
+    diagnostics.push(record);
+
+    // 5. Wait for the pipeline, then read what actually happened.
+    thread::sleep(Duration::from_millis(2500));
+    let (logcat, record) = shell_captured(&app, &serial, &["logcat", "-d", "-t", "800"]);
+    diagnostics.push(record);
+
+    let platform_evidence = platform::scan_platform_logcat(&logcat);
+    result.stage = platform_evidence.stage();
+    result.logcat_excerpt = truncate_for_log(&logcat, 3000);
+
+    // 6. The verdict comes from downstream evidence, never from the exit code.
+    if platform_evidence.pipeline_ran() {
+        result.state = "ALERT_DISPLAYED".to_string();
+        result.message = format!(
+            "Platform Cell Broadcast pipeline evidence found: reached stage {}.",
+            result.stage.label()
+        );
+    } else if accepted {
+        result.state = "ACCEPTED_NO_EVIDENCE".to_string();
+        result.message = "`am broadcast` was accepted, but no downstream Cell Broadcast log line \
+                          followed. Per this project's rule, that is not a delivery. The command \
+                          was accepted; Android did not act on it."
+            .to_string();
+        result.failure = Some("NO_DOWNSTREAM_EVIDENCE".to_string());
+    } else {
+        result.state = "REJECTED".to_string();
+        result.message = "The platform test broadcast was not accepted by this device.".to_string();
+        result.failure = Some("BROADCAST_REJECTED".to_string());
+    }
+
+    result.diagnostics = diagnostics;
+    if let Some(first) = result.evidence.first().cloned() {
+        emit_log(&app, format!("Platform test alert: {first}"), "info");
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let (_, source) = adb_path(&app);
@@ -1891,37 +2332,49 @@ async fn send_test_alert(
         }
 
         if matches!(device.state, DeviceState::SimulatorReady) {
-            let capabilities = simulator_capabilities(&app, &serial);
+            let mut probe_evidence = Vec::new();
+            let capabilities = simulator_capabilities(&app, &serial, &mut probe_evidence);
             diag(
                 &app,
                 &mut result,
                 stage::CAPABILITY_CHECK,
                 "simulator capability probe",
                 Some(format!(
-                    "installed={} post_notifications={} full_screen_intent={} notifications_enabled={}",
+                    "installed={} post_notifications={} ({}) full_screen_intent={} ({}) notifications_enabled={}",
                     capabilities.installed,
-                    capabilities
-                        .post_notifications
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    capabilities
-                        .full_screen_intent
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    capabilities
-                        .notifications_enabled
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
+                    capabilities.post_notifications.label(),
+                    capabilities.post_notifications_detail,
+                    capabilities.full_screen_intent.label(),
+                    capabilities.full_screen_intent_detail,
+                    capabilities.notifications_enabled.label(),
                 )),
                 None,
                 None,
                 if capabilities.installed { "info" } else { "warn" },
             );
 
-            // A denied POST_NOTIFICATIONS means the receiver will run and Android will drop the
-            // notification silently. Saying so up front is the difference between an operator
-            // fixing a phone setting and an operator concluding the tool is broken.
-            if capabilities.post_notifications == Some(false) {
+            for entry in &probe_evidence {
+                diag(
+                    &app,
+                    &mut result,
+                    stage::CAPABILITY_CHECK,
+                    format!("probe: {}", entry.command),
+                    Some(format!(
+                        "exit={:?} parsed={}",
+                        entry.exit_code,
+                        if entry.parsed.is_empty() { "-" } else { &entry.parsed }
+                    )),
+                    (!entry.stdout.trim().is_empty()).then(|| truncate_for_log(&entry.stdout, 1200)),
+                    (!entry.stderr.trim().is_empty()).then(|| truncate_for_log(&entry.stderr, 600)),
+                    "info",
+                );
+            }
+
+            // Only an explicit denial blocks the send. An UNKNOWN result means the probe could not
+            // read the grant state, which is a reason to warn, not a reason to refuse: refusing on
+            // unknown is how this tool previously told operators to grant a permission that was
+            // already granted.
+            if capabilities.post_notifications == PlatformState::Denied {
                 let _ = set_tx(&app, &tx_store, &serial, None);
                 fail_stage(
                     &app,
@@ -1929,11 +2382,48 @@ async fn send_test_alert(
                     stage::CAPABILITY_CHECK,
                     "NOTIFICATION_PERMISSION_DENIED",
                     "POST_NOTIFICATIONS",
-                    "Notification permission is not granted for Emergency Simulator Local. Grant notifications for that app on the phone, then retry.",
+                    "Notification permission is explicitly denied for Emergency Simulator Local. \
+                     Android will run the receiver and then drop the notification silently. Grant \
+                     notifications for that app on the phone, then retry.",
                     None,
                     None,
                 );
                 return Ok(result);
+            }
+
+            if capabilities.post_notifications == PlatformState::Unknown {
+                diag(
+                    &app,
+                    &mut result,
+                    stage::CAPABILITY_CHECK,
+                    "notification permission state is unknown",
+                    Some(
+                        "The probe could not read an explicit grant state. Continuing, but a \
+                         denied notification permission would silently suppress the alert."
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    "warn",
+                );
+            }
+
+            if capabilities.full_screen_intent == PlatformState::Denied {
+                diag(
+                    &app,
+                    &mut result,
+                    stage::CAPABILITY_CHECK,
+                    "full-screen intent is denied",
+                    Some(
+                        "USE_FULL_SCREEN_INTENT is denied, so Android will show a heads-up \
+                         notification instead of a full-screen alert. The alert still posts; only \
+                         the presentation differs."
+                            .to_string(),
+                    ),
+                    None,
+                    None,
+                    "warn",
+                );
             }
 
             let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
@@ -2395,6 +2885,37 @@ fn reset_safety_state(
 mod tests {
     use super::*;
 
+    /// BUG-021: the injection command named a bare package with `-n`, included a `format` extra the
+    /// handler does not read, and omitted the `phone_id` selector. `-n` takes `package/class`, so
+    /// `am` rejected the arguments outright and the attempt could never have reached the receiver on
+    /// any device. Asserted as a whole argv: the point is that a stray `-n` or a missing
+    /// `phone_id` must fail the build rather than be read as a device limitation.
+    #[test]
+    fn platform_test_injection_matches_the_aosp_contract() {
+        let args = platform_test_alert_args("R5CXA1B2C3D", "00001100");
+        assert_eq!(
+            args,
+            vec![
+                "-s",
+                "R5CXA1B2C3D",
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST",
+                "--es",
+                "pdu_string",
+                "00001100",
+                "--ei",
+                "phone_id",
+                "0",
+            ]
+        );
+        // The two regressions, stated directly so the reason survives a refactor of the vector.
+        assert!(!args.contains(&"-n"), "the test receiver has no manifest component to target");
+        assert!(!args.windows(2).any(|w| w == ["--es", "format"]));
+    }
+
     /// The defect this guards is the one BUG-001 recorded in the retired Python controller: a
     /// multi-word body arriving at the injector as several shell words, so only the first was
     /// bound to `argv[2]`. The alert still displayed and every exit code was 0, which is why the
@@ -2689,6 +3210,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             adb_diagnostics,
+            platform_diagnostics,
+            send_platform_test_alert,
             adb_pair,
             adb_connect,
             restart_adb_server,
