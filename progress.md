@@ -60,6 +60,8 @@ The safety boundary in AGENTS.md is unchanged and this session did not move it:
   detector.
 * The corrected harness reproduced the original `.kv span` clipping (`scroll=442 client=282`) before
   the CSS fix, confirming the check bites.
+* The harness now runs in the `verify` CI job on every pull request. It was previously never run in
+  CI, so the defect class it exists to catch could be reintroduced unchecked.
 
 ### Environment note
 
