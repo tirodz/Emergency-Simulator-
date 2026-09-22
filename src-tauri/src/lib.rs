@@ -1863,6 +1863,17 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
     })
 }
 
+/// The diagnostic report, plus the same report rendered as readable Markdown.
+///
+/// Both forms are returned from one call so the controller never has to re-run the commands to
+/// produce the written form. The Markdown is what the operator attaches to an issue; the structured
+/// form is what the UI renders.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticBundle {
+    pub report: diagnostics::DiagnosticReport,
+    pub markdown: String,
+}
+
 /// Collect a structured, read-only diagnostic report for one device.
 ///
 /// Read-only by construction: every command below inspects state. Nothing here writes a setting,
@@ -1877,7 +1888,7 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
 fn device_diagnostics(
     app: tauri::AppHandle,
     serial: String,
-) -> Result<diagnostics::DiagnosticReport, String> {
+) -> Result<DiagnosticBundle, String> {
     let mut commands: Vec<diagnostics::CommandResult> = Vec::new();
 
     let capture = |label: &str, args: &[&str]| {
@@ -1959,7 +1970,9 @@ fn device_diagnostics(
             .then_with(|| a.name.cmp(&b.name))
     });
 
-    Ok(diagnostics::build_report(&properties, &records, commands))
+    let report = diagnostics::build_report(&properties, &records, commands);
+    let markdown = diagnostics::render_report(&report);
+    Ok(DiagnosticBundle { report, markdown })
 }
 
 /// Inject one ETWS test Cell Broadcast through the AOSP telephony test entry point.
