@@ -2,11 +2,11 @@ package com.tirodz.emergencysimulator
 
 import android.app.Activity
 import android.content.Context
+import android.net.Uri
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaPlayer
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
 import android.os.VibrationEffect
@@ -231,13 +231,18 @@ class EmergencyActivity : Activity() {
      * falls back to the notification tone rather than falling silent.
      */
     private fun startAudio(attributes: AudioAttributes) {
+        // The alert tone is bundled rather than taken from the device. The device's own alarm or
+        // notification ringtone is a pleasant chime on most OEM builds, which makes a simulated
+        // emergency alert indistinguishable by ear from an incoming text message. A bundled,
+        // recognisable attention tone is what makes this a test instrument rather than a
+        // notification demo. The tone is also the only source that is guaranteed to exist, so the
+        // previous multi-candidate fallback to the notification sound is no longer needed.
         audioCandidates = listOfNotNull(
-            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM),
-            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
-        ).distinct()
+            Uri.parse("android.resource://" + packageName + "/" + R.raw.emergency_tone),
+        )
 
         if (audioCandidates.isEmpty()) {
-            AlertStages.log(AlertStages.AUDIO_UNAVAILABLE, "no alarm or notification ringtone")
+            AlertStages.log(AlertStages.AUDIO_UNAVAILABLE, "no bundled tone resource")
             return
         }
 
@@ -314,7 +319,7 @@ class EmergencyActivity : Activity() {
 
         // Repeat index -1 plays the pattern once. A repeating pattern would keep buzzing after the
         // alert is gone on any device where the cancel is missed.
-        val pattern = longArrayOf(0, 700, 300, 700, 300, 1100)
+        val pattern = AlertNotificationHelper.VIBRATION_PATTERN
         val outcome = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 target.vibrate(VibrationEffect.createWaveform(pattern, -1))

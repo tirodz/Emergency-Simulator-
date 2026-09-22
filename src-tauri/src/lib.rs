@@ -110,6 +110,9 @@ pub struct SendResult {
     pub evidence: Vec<String>,
     pub injector_exit_code: Option<i32>,
     pub diagnostics: Vec<DiagEvent>,
+    /// Wall-clock duration of the whole send, in milliseconds. `None` for results that never
+    /// reached the transport (validation failures).
+    pub duration_ms: Option<u64>,
     /// The pipeline stage that actually failed, so the UI can name it instead of showing a
     /// generic error. `None` when the run did not fail.
     pub failed_stage: Option<String>,
@@ -129,8 +132,13 @@ pub struct DiagEvent {
     pub detail: Option<String>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    /// How long the underlying command took, when it was timed. This is what separates "the
+    /// command failed" from "the command never came back": without it a hang and an error read the
+    /// same in the log.
+    pub duration_ms: Option<u64>,
     pub timestamp: String,
 }
+
 
 #[derive(Debug, Clone, Serialize)]
 struct ActivityEvent {
@@ -228,6 +236,41 @@ fn diag(
         detail,
         stdout,
         stderr,
+        duration_ms: None,
+        timestamp: now_timestamp(),
+    });
+}
+
+/// Record a diagnostic event for a command whose execution time was measured.
+///
+/// Kept alongside `diag` rather than folded into it so that a duration is only ever reported for
+/// something that was actually timed. Stamping a duration on untimed events would invent data.
+fn diag_timed(
+    app: &tauri::AppHandle,
+    result: &mut SendResult,
+    stage: &str,
+    action: impl Into<String>,
+    detail: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    duration_ms: u64,
+    kind: &str,
+) {
+    let action = action.into();
+    let summary = match &detail {
+        Some(detail) => format!("{stage} · {action} · {detail} · {duration_ms}ms"),
+        None => format!("{stage} · {action} · {duration_ms}ms"),
+    };
+    emit_log(app, summary, kind);
+
+    result.diagnostics.push(DiagEvent {
+        stage: stage.to_string(),
+        serial: result.device_serial.clone(),
+        action,
+        detail,
+        stdout,
+        stderr,
+        duration_ms: Some(duration_ms),
         timestamp: now_timestamp(),
     });
 }
@@ -2295,6 +2338,7 @@ async fn send_test_alert(
     let cancel_store = cancel.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let send_started = Instant::now();
         let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_body = if normalized_body.is_empty() {
             DEFAULT_BODY.to_string()
@@ -2312,6 +2356,7 @@ async fn send_test_alert(
             evidence: Vec::new(),
             injector_exit_code: None,
             diagnostics: Vec::new(),
+            duration_ms: None,
             failed_stage: None,
         };
 
@@ -2600,6 +2645,7 @@ async fn send_test_alert(
                 "info",
             );
 
+            let broadcast_started = Instant::now();
             let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
                 Ok(output) => output,
                 Err(error) => {
@@ -2618,12 +2664,15 @@ async fn send_test_alert(
                 }
             };
 
+
             result.injector_exit_code = output.status.code();
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let combined = output_text(&output).trim().to_string();
 
-            diag(
+            let broadcast_ms = broadcast_started.elapsed().as_millis() as u64;
+
+            diag_timed(
                 &app,
                 &mut result,
                 stage::ADB_BROADCAST_RESULT,
@@ -2631,6 +2680,7 @@ async fn send_test_alert(
                 Some(format!("exit={:?}", output.status.code())),
                 Some(stdout.clone()).filter(|s| !s.is_empty()),
                 Some(stderr.clone()).filter(|s| !s.is_empty()),
+                broadcast_ms,
                 if output.status.success() { "info" } else { "error" },
             );
 
@@ -2664,6 +2714,7 @@ async fn send_test_alert(
                 &tx_store,
             )?;
             clear_cancel(&cancel_store, &serial);
+            result.duration_ms = Some(send_started.elapsed().as_millis() as u64);
             let _ = persist_transactions(&app, &tx_store);
             return Ok(result);
         }
