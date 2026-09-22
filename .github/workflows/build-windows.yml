@@ -163,7 +163,23 @@ jobs:
           target: x86_64-pc-windows-msvc
       - name: Install frontend dependencies
         shell: pwsh
-        run: npm install
+        run: |
+          # The Tauri CLI ships its Windows binary as an optional dependency, and `npm install` has a
+          # known bug where a cached node_modules tree from a restore step leaves that platform
+          # package missing. The symptom is "Cannot find module '@tauri-apps/cli-win32-x64-msvc'"
+          # from the icon step, which reads as an icon bug and is not one. Retry with a clean tree
+          # before giving up, so the job does not fail on a packaging flake.
+          $ErrorActionPreference = "Continue"
+          npm install
+          $probe = node -e "try { require.resolve('@tauri-apps/cli-win32-x64-msvc'); console.log('ok') } catch (e) { console.log('missing') }"
+          if ($probe -notmatch "ok") {
+            Write-Host "Tauri Windows CLI binding missing; reinstalling from a clean tree."
+            Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+            Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+            npm install
+            $probe = node -e "try { require.resolve('@tauri-apps/cli-win32-x64-msvc'); console.log('ok') } catch (e) { console.log('missing') }"
+            if ($probe -notmatch "ok") { throw "Tauri Windows CLI binding could not be installed." }
+          }
       - name: Generate Windows icon set
         shell: pwsh
         run: npx tauri icon src-tauri/icons/icon.png
