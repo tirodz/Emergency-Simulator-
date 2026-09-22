@@ -5,6 +5,80 @@
 
 ## Current status
 
+**The root-free local simulator path was exercised end to end on a real Android 35 device for the
+first time, and doing so exposed three defects that only appear under real platform latency.**
+
+Previous sessions had built the simulator APK but never driven it. This session installed it on a
+booted emulator, sent real broadcasts through the actual `am broadcast` → `AlertReceiver` →
+`NotificationManager` → `EmergencyActivity` chain, and read the downstream stage lines back out of
+logcat. The chain works: `FULLSCREEN_ACTIVITY_STARTED`, `AUDIO_FOCUS_REQUEST granted=true` and
+`VIBRATION_START` were all observed from a real run. Three defects were found by doing that rather
+than by reading the code.
+
+### What was found and fixed this session
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-017](docs/bugs/BUG-017-evidence-timeout-false-negative.md) | The evidence collector's 8 s budget was shorter than the platform's own latency (12.7 s measured), so a genuine full-screen alert was reported as an evidence timeout | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-018](docs/bugs/BUG-018-premature-notification-only-verdict.md) | The collector concluded at `NOTIFICATION_POSTED`, but Android posts the notification and launches the full-screen activity up to 8 s apart, so a real full-screen alert was under-reported as notification-only | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-019](docs/bugs/BUG-019-blocking-audio-prepare-anr.md) | `MediaPlayer.prepare()` ran on the main thread; on a device whose alarm URI does not resolve it blocked the alert UI for ~13 s, an ANR risk | `EmergencyActivity.kt` | FIXED |
+
+All three are the same shape as the two bugs already recorded in `docs/bugs/`: a signal that looked
+correct while the thing it claimed to prove was not true. BUG-017 and BUG-018 are both false
+*negatives* — the alert had appeared and the tool said it had not. BUG-017 in particular is the
+mirror image of the recorded false successes, and it was only visible because a slow device was
+tested instead of a fast one.
+
+### Why BUG-017 and BUG-018 could not be caught by a unit test alone
+
+Both are timing defects. The verdict *logic* was correct; the *deadlines* it ran under were wrong.
+The fix therefore separates the two: `local_simulator_verdict()` is now a pure function of the
+stage lines, tested against real captured logcat, and the polling loop that feeds it carries the
+measured timeouts (`LOCAL_EVIDENCE_TIMEOUT = 25 s`, `FULLSCREEN_GRACE = 14 s`) with the measurement
+that produced each number recorded next to it.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **15/15 pass** (was 7). The new tests include a pure-function verdict
+  test driven by real logcat captured from the device, and a cross-language contract test that fails
+  if `AlertStages.kt` and the Rust stage names ever drift apart.
+* Real device run, Android 35 emulator, `ro.debuggable=1`:
+  `ANDROID_RECEIVER_ACCEPTED` → `NOTIFICATION_POSTED` → `FULLSCREEN_ACTIVITY_STARTED rendered` →
+  `AUDIO_FOCUS_REQUEST granted=true` → `VIBRATION_START pattern=700,300,700,300,1100`.
+* **BUG-001/BUG-015 quoting re-verified end to end**, not just in unit tests: a body containing
+  spaces, `;`, `$(whoami)`, backticks, `&`, `|`, `>`, `<`, double quotes and embedded single quotes
+  arrived at the receiver **byte-identical at 77/77 characters**.
+* `gradle :app:assembleDebug`: BUILD SUCCESSFUL; APK installs and runs.
+* No ANR recorded after the async-audio change (`grep -ci "ANR in com.tirodz"` → 0).
+* Frontend contract check: consistent (15 commands, 14 invoked, 98 ids). The new `SendResult` fields
+  are additive; the frontend reads only `state`, `message` and `failure`, all of which are preserved.
+* Android 14+ full-screen intent behaviour characterised: with the screen **on**, Android shows a
+  heads-up notification and does *not* launch the activity even though the op is `allow`; with the
+  screen **off or dozing**, it does launch. This is platform policy, and the tool now reports the
+  two outcomes distinctly rather than conflating them.
+
+### What the simulator can and cannot claim
+
+The local simulator path is **CONFIRMED** on a `userdebug` emulator: a root-free app produces a real
+full-screen Android alert UI with sound and vibration. It is still **not** a CellBroadcast path — it
+never touches `SMS_CB_RECEIVED` and no radio is involved. The stock-device claim remains exactly as
+bounded as before.
+
+`README.md` did not mention the simulator at all, which is what let the boundary stay ambiguous to a
+reader. It now documents it plainly: what it is, what it is not, and the two Android 14+ behaviours
+that decide what the operator sees. The stock-device claim itself was not weakened or strengthened.
+
+Two limits found on the emulator image and recorded rather than worked around: it ships **no ringtone
+media at all** (`/system/media/audio/` is absent, `alarm_alert` and `notification_sound` are both
+`null`), so `AUDIO_UNAVAILABLE` there is correct reporting and not a defect; and its SystemUI crashed
+under repeated power-key toggling, which silently disables full-screen intents until the device is
+rebooted. The second is an emulator artefact, not a product bug, and is written down so a future
+session does not misread it as a regression.
+
+---
+
+### Prior session — repository audit (BUG-015, BUG-016)
+
 **Repository audit completed; two latent defects in the shipped Rust controller were found and
 fixed, and the root-free question was answered explicitly rather than left implicit.**
 
@@ -109,14 +183,50 @@ visual system. The next milestones, in order:
 
 ## Last known working state
 
-* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `d1a85d2`.
-* **Active branch:** the BUG-015/BUG-016 fix branch.
+* **Repo:** `/workspace/project/Emergency-Simulator-`, branch `main`, HEAD `c69bdaa` at the start of
+  this session.
+* **Active branch:** `fix/verified-local-simulator-pipeline`, pushed, **PR #6**, CI green (4/4,
+  including `cargo test --lib` on the real Windows runner: 15/15 pass).
 * **Build:** `npx tauri build --ci`; CI `.github/workflows/build-windows.yml` builds on
   `windows-latest` and produces the app, the NSIS installer and the release artifacts.
-* **Tests:** `cargo test --manifest-path src-tauri/Cargo.toml --lib` (7 tests, no device needed).
+* **Tests:** `cargo test --manifest-path src-tauri/Cargo.toml --lib --locked` (**15 tests**, no
+  device needed).
 * **Injector build:** `bash android/alertinject/build.sh` (needs JDK + Android SDK).
+* **Local simulator build:** `cd android/local-simulator && gradle :app:assembleDebug`
+  (needs JDK 21 + Android SDK 35 + Gradle 8.9). Output:
+  `android/local-simulator/app/build/outputs/apk/debug/app-debug.apk`.
 * **Paste check:** `python3 tools/check_paste_ps1.py`.
 * **Controlled target recipe:** [`docs/environment-setup.md`](docs/environment-setup.md) §8.
+* **Local simulator reference device:** AVD `emulator-5554`, Android 15 / API 35, `userdebug`,
+  `ro.debuggable=1`. Note the two image limitations recorded above: no ringtone media, and SystemUI
+  crashes under repeated power-key toggling (reboot to recover).
+
+### How to drive the local simulator path manually
+
+The three steps below are the whole path, and they are what the controller automates. Run them in
+order and read the stage lines, not the exit codes.
+
+```
+# 1. Install and grant what a stock device would otherwise withhold
+adb install -r -d android/local-simulator/app/build/outputs/apk/debug/app-debug.apk
+adb shell pm grant com.tirodz.emergencysimulator android.permission.POST_NOTIFICATIONS
+adb shell appops set com.tirodz.emergencysimulator USE_FULL_SCREEN_INTENT allow
+
+# 2. Sleep the device, or Android will show a heads-up instead of the full-screen alert
+adb shell input keyevent 223
+
+# 3. Send, then read the evidence. Allow ~15 s: the platform is slow, not the tool.
+adb shell "am broadcast --receiver-foreground \
+  -a 'com.tirodz.emergencysimulator.TRIGGER_ALERT' \
+  -n 'com.tirodz.emergencysimulator/.AlertReceiver' \
+  --es title 'EMERGENCY SIMULATOR TEST' --es message 'TEST multi word body' \
+  --es severity 'TEST' --es category '4355'"
+adb shell logcat -d -t 4000 -s EmergencySimulator:I
+```
+
+Expected stage sequence on a working run: `ANDROID_RECEIVER_ACCEPTED` → `NOTIFICATION_POSTED` →
+`FULLSCREEN_ACTIVITY_STARTED` → `AUDIO_FOCUS_REQUEST` → `VIBRATION_START`. `AUDIO_UNAVAILABLE` in
+place of `AUDIO_START` is correct on an image with no ringtone media.
 
 ## Git commits
 
@@ -126,6 +236,11 @@ visual system. The next milestones, in order:
 | (this branch) | fix: carry every CellBroadcast candidate and retry only on explicit rejection |
 | (this branch) | test: guard the transport quoting with unit tests and a real-shell cross-check |
 | (this branch) | docs: record BUG-015 and BUG-016, and answer the root-free question |
+| (this branch) | feat: emit a structured diagnostic pipeline from the controller |
+| (this branch) | fix: wait long enough for the platform, and for the full-screen stage, before judging |
+| (this branch) | fix: prepare alert audio off the main thread and fall back to the notification tone |
+| (this branch) | test: drive the verdict from real captured device output |
+| (this branch) | docs: record BUG-017 to BUG-019 and update progress |
 
 
 **Controlled-path hardening just completed on branch `fix/controlled-oem-path-and-capability-ui`.**

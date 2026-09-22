@@ -53,6 +53,9 @@ So: no silent patches.
 | [BUG-014](BUG-014-installer-artifact-path-mismatch.md) | Installer job looked for the executable at the wrong artifact path | HIGH | FIXED |
 | [BUG-015](BUG-015-rust-shell-argument-flattening.md) | The Rust controller passed the alert body as a separate `adb shell` argument | HIGH | FIXED |
 | [BUG-016](BUG-016-single-cellbroadcast-candidate.md) | The controller assumed exactly one CellBroadcast package and never retried another | MEDIUM | FIXED |
+| [BUG-017](BUG-017-evidence-timeout-false-negative.md) | The evidence timeout was shorter than the platform's own alert latency, so a real full-screen alert was reported as a timeout | HIGH | FIXED |
+| [BUG-018](BUG-018-premature-notification-only-verdict.md) | The verdict was fixed at the notification, before the full-screen activity arrived | MEDIUM | FIXED |
+| [BUG-019](BUG-019-blocking-audio-prepare-anr.md) | Blocking audio preparation froze the alert UI for ~13 s, an ANR risk | MEDIUM | FIXED |
 
 ## Severity scale
 
