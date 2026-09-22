@@ -83,6 +83,9 @@ pub struct Device {
     pub test_entrypoint_reason: String,
     /// The strongest capability established by evidence rather than by inference.
     pub capability_stage: CapabilityStage,
+    /// Which alert path this controller will take for this device, and what it may be called.
+    /// The UI must label a `LOCAL UI SIMULATION` as a simulation, never as a Cell Broadcast.
+    pub alert_mode: platform::AlertMode,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -1195,6 +1198,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 test_entrypoint_reason: "No probe ran: the device is not yet authorised for debugging."
                     .to_string(),
                 capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1224,6 +1228,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 test_entrypoint_reason: "No probe ran: ADB reports the device as offline."
                     .to_string(),
                 capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1250,6 +1255,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 test_entrypoint_reason: "ADB transport is not in the device state; no probe ran."
                     .to_string(),
                 capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1371,13 +1377,18 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             local_simulator,
             test_entrypoint_available: test_entrypoint.available,
             test_entrypoint_reason: test_entrypoint.reason,
-            capability_stage: if local_simulator {
-                CapabilityStage::TestEntryPointDiscovered
-            } else if cellbroadcast_package_was_found {
-                CapabilityStage::ReceiverDiscovered
-            } else {
-                CapabilityStage::None
-            },
+            capability_stage: platform::capability_stage(
+                cellbroadcast_package_was_found,
+                cellbroadcast_package_was_found,
+                test_entrypoint.available,
+            ),
+            // `verified` is false here by construction: verification is a per-send logcat
+            // observation, and this is a device profile built before any send happened.
+            alert_mode: platform::alert_mode(
+                test_entrypoint.available,
+                local_simulator,
+                false,
+            ),
             state,
             support_level,
             specs,

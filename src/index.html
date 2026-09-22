@@ -265,6 +265,13 @@ function visual(d){
 }
 function stateKind(v){return v==="GRANTED"?"ok":v==="DENIED"||v==="ERROR"?"bad":v==="NOT_PRESENT"?"warn":"info"}
 function stageLabel(d){return (d&&d.capability_stage||"NONE").replace(/_/g," ")}
+/* The alert path is decided by the backend, which knows the device's build properties. The UI must
+   not re-derive it: three separate copies of this condition is how a local notification ends up
+   being called a Cell Broadcast. The fallback exists only for an older backend that predates
+   `alert_mode`, and it errs toward the local simulation, which is the weaker claim. */
+function alertModeOf(d){return (d&&d.alert_mode)||((d&&d.test_entrypoint_available==="GRANTED"&&d.state!=="SIMULATOR_READY")?"PLATFORM_CELL_BROADCAST_TEST":(d&&d.local_simulator)?"LOCAL_UI_SIMULATION":"UNAVAILABLE")}
+function modeLabel(d){return alertModeOf(d).replace(/_/g," ")}
+function modeIsCellBroadcast(d){return alertModeOf(d)==="PLATFORM_CELL_BROADCAST_TEST"||alertModeOf(d)==="GENUINE_CELL_BROADCAST_VERIFIED"}
 function deviceLabel(d){return (d?.model||d?.product||"Android device")+" · "+d.serial}
 function renderPreview(d){
  const e=$("devicePreview"); if(!e) return;
@@ -297,6 +304,7 @@ function renderDetail(d){
   +'<div class="kv"><label>Root</label><span>'+esc(d.root?"YES":"NO")+'</span></div>'
   +'<div class="kv"><label>CellBroadcast</label><span>'+esc(cbTarget(d))+'</span></div>'
   +'<div class="kv"><label>Local simulator</label><span>'+esc(d.local_simulator?"INSTALLED":"NOT INSTALLED")+'</span></div>'
+  +'<div class="kv"><label>Alert mode</label><span>'+esc(modeLabel(d))+'</span></div>'
   +'<div class="kv"><label>Capability stage</label><span>'+esc(stageLabel(d))+'</span></div>'
   +'<div class="kv"><label>Support</label><span>'+esc((d.support_level||"UNTESTED").replace(/_/g," "))+'</span></div>'
   +'<div class="kv"><label>AOSP test entry point</label><span class="'+entryKind+'">'+esc(entry)+'</span></div>'
@@ -348,7 +356,7 @@ function selectedDevice(){return state.devices.find(d=>d.serial===state.selected
   }
 }
 function validate(){const b=$("message").value.trim().replace(/\s+/g," ");const v=$("validation");if(!b){v.textContent="Empty message will use TEST ALERT - SIMULATION.";v.className="validation";return true}if(!b.startsWith("TEST")){v.textContent="Blocked: the message must begin with TEST.";v.className="validation error";return false}if(b.length>300){v.textContent="Blocked: message is longer than 300 characters.";v.className="validation error";return false}v.textContent="Valid test message · "+b.length+"/300 characters.";v.className="validation ok";return true}
-function openConfirm(){const d=selected();if(!d||!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED"))return;const platform=d.test_entrypoint_available==="GRANTED"&&d.state!=="SIMULATOR_READY";$("confirmText").textContent=platform?"Send one ETWS TEST Cell Broadcast to "+deviceLabel(d)+" through the AOSP telephony test entry point (ro.debuggable=1). The message is built as a 3GPP TS 23.041 PDU with message identifier 0x1103, the ETWS test channel. Delivery is only claimed if downstream log evidence follows. No cellular transmission or RF operation is performed.":(d.state==="NO_ROOT"||d.state==="UNSUPPORTED")?"The desktop will install the bundled local alert simulator on "+deviceLabel(d)+" and send one local alert simulation through its notification, sound, vibration and full-screen UI. This is a local app notification, not a Cell Broadcast, and it will not look like an emergency alert. No root, cellular transmission or RF operation is used.":d.state==="SIMULATOR_READY"?"Send one local alert simulation to "+deviceLabel(d)+" using the bundled Android receiver, notification, sound, vibration and full-screen UI. This is not a Cell Broadcast. No cellular transmission or RF operation is performed.":"Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
+function openConfirm(){const d=selected();if(!d||!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED"))return;const platform=modeIsCellBroadcast(d);$("confirmText").textContent=platform?"Send one ETWS TEST Cell Broadcast to "+deviceLabel(d)+" through the AOSP telephony test entry point (ro.debuggable=1). The message is built as a 3GPP TS 23.041 PDU with message identifier 0x1103, the ETWS test channel. Delivery is only claimed if downstream log evidence follows. No cellular transmission or RF operation is performed.":(d.state==="NO_ROOT"||d.state==="UNSUPPORTED")?"The desktop will install the bundled local alert simulator on "+deviceLabel(d)+" and send one local alert simulation through its notification, sound, vibration and full-screen UI. This is a local app notification, not a Cell Broadcast, and it will not look like an emergency alert. No root, cellular transmission or RF operation is used.":d.state==="SIMULATOR_READY"?"Send one local alert simulation to "+deviceLabel(d)+" using the bundled Android receiver, notification, sound, vibration and full-screen UI. This is not a Cell Broadcast. No cellular transmission or RF operation is performed.":"Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
 function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
 async function runSend(dry){if(!validate())return;const d=selected();if(!d)return;if(!dry&&!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED")){toast("Authorize the device before sending.","error");return}
  state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing controlled test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{
@@ -356,7 +364,7 @@ async function runSend(dry){if(!validate())return;const d=selected();if(!d)retur
      with the AOSP test entry point available goes through the real platform pipeline; anything
      else falls back to the local simulator, which is a local app notification and is labelled as
      such. The backend re-checks the entry point before sending either way. */
-  const platform=d.test_entrypoint_available==="GRANTED"&&d.state!=="SIMULATOR_READY";
+  const platform=modeIsCellBroadcast(d);
   if(platform&&!dry){
    log("Using the AOSP platform test path (ro.debuggable=1)");
    const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value});

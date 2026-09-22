@@ -110,6 +110,99 @@ impl CapabilityStage {
     }
 }
 
+/// The alert paths this controller can take.
+///
+/// These are kept as distinct states on purpose. The defect this project exists to prevent is a
+/// local app notification being presented as Cell Broadcast delivery, so "the local simulator is
+/// installed" and "Android's Cell Broadcast pipeline is reachable" must never collapse into one
+/// notion of "ready".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AlertMode {
+    /// The bundled local simulator app posts a notification on the phone: sound, vibration,
+    /// full-screen UI. It is a local app alert and **not** Android's Cell Broadcast stack, so the
+    /// UI must label it as a simulation.
+    LocalUiSimulation,
+    /// The AOSP telephony test entry point. The message is decoded by the telephony process into a
+    /// real `SmsCbMessage` and enters Android's Cell Broadcast pipeline.
+    PlatformCellBroadcastTest,
+    /// Android's own alert UI was observed downstream after a platform send. This is the only mode
+    /// that represents a genuine alert, and it is established per-send from logcat evidence — never
+    /// inferred from the device or from a command's exit code.
+    GenuineCellBroadcastVerified,
+    /// No path is available on this build: the test entry point is not present and no local
+    /// simulator is installed. A valid, reportable outcome.
+    Unavailable,
+}
+
+impl AlertMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            AlertMode::LocalUiSimulation => "LOCAL UI SIMULATION",
+            AlertMode::PlatformCellBroadcastTest => "PLATFORM CELL BROADCAST TEST",
+            AlertMode::GenuineCellBroadcastVerified => "GENUINE CELL BROADCAST — VERIFIED",
+            AlertMode::Unavailable => "UNAVAILABLE",
+        }
+    }
+
+    /// True only for the two modes that involve Android's Cell Broadcast stack. The UI uses this to
+    /// decide whether it may use Cell Broadcast wording at all.
+    pub fn is_cell_broadcast(self) -> bool {
+        matches!(
+            self,
+            AlertMode::PlatformCellBroadcastTest | AlertMode::GenuineCellBroadcastVerified
+        )
+    }
+}
+
+/// Choose the mode from what the device actually reports.
+///
+/// The ordering encodes one decision: the platform path is preferred whenever it exists, because it
+/// is the only one that reaches Android's Cell Broadcast stack. The local simulator is a fallback
+/// for testing the alert *presentation*, never a substitute for delivery.
+///
+/// `verified` is passed in rather than derived, because it can only come from downstream logcat
+/// evidence for a specific send. A caller with no evidence must pass `false`, and then this function
+/// cannot return the verified mode — an assertion that no code path can claim verification for free.
+pub fn alert_mode(
+    entrypoint: State,
+    local_simulator_installed: bool,
+    verified: bool,
+) -> AlertMode {
+    if verified {
+        return AlertMode::GenuineCellBroadcastVerified;
+    }
+    if entrypoint == State::Granted {
+        return AlertMode::PlatformCellBroadcastTest;
+    }
+    if local_simulator_installed {
+        return AlertMode::LocalUiSimulation;
+    }
+    AlertMode::Unavailable
+}
+
+/// The strongest capability stage established by evidence.
+///
+/// This is the single place that decides the stage, so the devices list and the diagnostics panel
+/// cannot disagree. The previous version promoted a device to `TestEntryPointDiscovered` when the
+/// **local simulator** was installed, which reported a platform Cell Broadcast capability on the
+/// strength of an unrelated local app. That is the conflation this project forbids.
+pub fn capability_stage(
+    receiver_declared: bool,
+    package_present: bool,
+    entrypoint: State,
+) -> CapabilityStage {
+    if receiver_declared && entrypoint == State::Granted {
+        CapabilityStage::TestEntryPointDiscovered
+    } else if receiver_declared {
+        CapabilityStage::ReceiverDiscovered
+    } else if package_present {
+        CapabilityStage::PackagePresent
+    } else {
+        CapabilityStage::None
+    }
+}
+
 /// Whether the AOSP test receiver will be present on this build.
 ///
 /// `GsmInboundSmsHandler` gates registration on `ro.debuggable`, so this is a hard boundary rather
@@ -1012,5 +1105,88 @@ Packages:
         assert_eq!(CapabilityStage::SystemUiReached.label(), "SYSTEM UI REACHED");
         assert_eq!(State::Granted.label(), "GRANTED");
         assert_eq!(State::Unknown.label(), "UNKNOWN");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Mode selection: keeping local simulation and Cell Broadcast apart
+    // -------------------------------------------------------------------------------------
+
+    /// The defect being prevented: a device with the local simulator installed is a device on which
+    /// an app notification can be posted. It says nothing about Android's Cell Broadcast stack.
+    #[test]
+    fn the_local_simulator_is_not_a_cell_broadcast_mode() {
+        let mode = alert_mode(State::Denied, true, false);
+        assert_eq!(mode, AlertMode::LocalUiSimulation);
+        assert!(
+            !mode.is_cell_broadcast(),
+            "a local app notification must never be labelled Cell Broadcast"
+        );
+    }
+
+    #[test]
+    fn the_platform_test_mode_is_a_cell_broadcast_mode() {
+        let mode = alert_mode(State::Granted, false, false);
+        assert_eq!(mode, AlertMode::PlatformCellBroadcastTest);
+        assert!(mode.is_cell_broadcast());
+    }
+
+    /// The platform path wins when it exists: it is the only one that reaches Android's stack.
+    #[test]
+    fn the_platform_path_is_preferred_over_the_local_simulator() {
+        assert_eq!(
+            alert_mode(State::Granted, true, false),
+            AlertMode::PlatformCellBroadcastTest
+        );
+    }
+
+    /// Verification cannot be asserted into existence. A caller with no logcat evidence passes
+    /// false, and there is no other way to reach the verified mode.
+    #[test]
+    fn verification_requires_evidence_and_is_never_implied() {
+        assert_ne!(alert_mode(State::Granted, true, false), AlertMode::GenuineCellBroadcastVerified);
+        assert_ne!(alert_mode(State::Denied, true, false), AlertMode::GenuineCellBroadcastVerified);
+        assert_eq!(
+            alert_mode(State::Granted, true, true),
+            AlertMode::GenuineCellBroadcastVerified
+        );
+    }
+
+    /// An unreadable entry point is unknown, and unknown is not granted. With nothing installed the
+    /// honest mode is Unavailable, not a hopeful simulation.
+    #[test]
+    fn an_unknown_entry_point_with_nothing_installed_is_unavailable() {
+        assert_eq!(alert_mode(State::Unknown, false, false), AlertMode::Unavailable);
+        assert_eq!(alert_mode(State::Error, false, false), AlertMode::Unavailable);
+        assert_eq!(alert_mode(State::NotPresent, false, false), AlertMode::Unavailable);
+    }
+
+    /// The mislabelling that was found in the devices list: installing the local simulator promoted
+    /// the device to TestEntryPointDiscovered, which is a platform Cell Broadcast claim.
+    #[test]
+    fn a_local_simulator_does_not_promote_the_capability_stage() {
+        // Receiver declared, but the build cannot run the test receiver.
+        let stage = capability_stage(true, true, State::Denied);
+        assert_eq!(stage, CapabilityStage::ReceiverDiscovered);
+        assert_ne!(stage, CapabilityStage::TestEntryPointDiscovered);
+    }
+
+    #[test]
+    fn the_stage_ladder_advances_only_on_real_evidence() {
+        assert_eq!(capability_stage(false, false, State::Unknown), CapabilityStage::None);
+        assert_eq!(capability_stage(false, true, State::Denied), CapabilityStage::PackagePresent);
+        assert_eq!(capability_stage(true, true, State::Denied), CapabilityStage::ReceiverDiscovered);
+        assert_eq!(
+            capability_stage(true, true, State::Granted),
+            CapabilityStage::TestEntryPointDiscovered
+        );
+        // A granted entry point with no receiver declaration is not a receiver claim.
+        assert_eq!(capability_stage(false, true, State::Granted), CapabilityStage::PackagePresent);
+    }
+
+    #[test]
+    fn the_mode_labels_cannot_be_confused_with_each_other() {
+        assert_eq!(AlertMode::LocalUiSimulation.label(), "LOCAL UI SIMULATION");
+        assert_eq!(AlertMode::Unavailable.label(), "UNAVAILABLE");
+        assert!(AlertMode::GenuineCellBroadcastVerified.label().contains("VERIFIED"));
     }
 }
