@@ -43,9 +43,19 @@ because the AOSP test receiver is gated on `ro.debuggable` at class initialisati
 change that. Recorded as **BUG-024** with the fix; `tools/check_read_only.py` now fails the build if
 any state-changing ADB invoker returns, and it was confirmed to bite.
 
-The same change corrected the controlled-path gate, which used `root && cellbroadcast_package` and
-therefore reported a **rooted `user` build** as `READY` — a build on which the receiver does not exist
-and delivery is impossible.
+### A second safety-relevant fix in the same change
+
+The controlled-path gate used `root && cellbroadcast_package` and therefore reported a **rooted
+`user` build** as `READY` — a build on which the receiver does not exist and delivery is impossible.
+
+### A second false success, in the operator paste
+
+Step 5 of the paste — the check that asks the operator to confirm the phone is unchanged — branched on
+`$script:Device`, which was never assigned. On every run with a phone attached it took the `else`
+branch and printed *"No phone attached, so there is nothing phone-side to compare."* The verification
+step always ran and always passed, by testing an empty value. Recorded as **BUG-025**;
+`tools/check_paste_ps1.py` now rejects any `$script:X` read but never assigned, and the check was
+confirmed to bite.
 
 ### What this session added
 
