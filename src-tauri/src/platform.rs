@@ -45,6 +45,9 @@ pub enum State {
     Granted,
     Denied,
     NotPresent,
+    /// The question does not apply to this device or this mode. Distinct from `NotPresent`,
+    /// which means the thing was looked for and is absent.
+    NotApplicable,
     Unknown,
     Error,
 }
@@ -61,6 +64,7 @@ impl State {
             State::Granted => "GRANTED",
             State::Denied => "DENIED",
             State::NotPresent => "NOT_PRESENT",
+            State::NotApplicable => "NOT_APPLICABLE",
             State::Unknown => "UNKNOWN",
             State::Error => "ERROR",
         }
@@ -69,6 +73,16 @@ impl State {
     /// True only for an affirmative answer. Callers must not treat `Unknown` as `Denied`.
     pub fn is_granted(self) -> bool {
         self == State::Granted
+    }
+
+    /// True when the answer is a fact about the device rather than a gap in our knowledge.
+    ///
+    /// `Unknown` and `Error` are the two states a probe produces when it *failed to find out*
+    /// something. Everywhere else in this module they are kept distinct from a real negative
+    /// result; this predicate exists so a report can say "we could not determine this" without
+    /// enumerating both states at each site.
+    pub fn is_definite(self) -> bool {
+        !matches!(self, State::Unknown | State::Error)
     }
 }
 
@@ -596,7 +610,7 @@ pub fn assess_test_entrypoint(debuggable: &str, receiver_package: Option<&str>) 
 ///
 /// Each field is a separate, strictly stronger claim. The old code jumped from "a package exists"
 /// to "Cell Broadcast supported"; these are the distinctions that jump skipped.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PlatformEvidence {
     /// The AOSP test receiver reported receiving the intent.
     pub test_receiver_accepted: bool,
@@ -608,6 +622,58 @@ pub struct PlatformEvidence {
     pub receiver_processed: bool,
     /// Android requested its own alert UI.
     pub alert_ui_requested: bool,
+    /// A log line shows the platform *deliberately dropped* the message, and why.
+    ///
+    /// This is the difference between "nothing happened and we do not know why" and "the platform
+    /// told us why". `sent` is the raw marker so the report can quote the device rather than
+    /// paraphrase it. When this is set, an absent `alert_ui_requested` is an explained outcome, not
+    /// an unresolved one.
+    pub suppression: Option<Suppression>,
+}
+
+/// A platform decision to discard the message, read from a log line AOSP actually emits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Suppression {
+    /// Which gate closed.
+    pub gate: SuppressionGate,
+    /// The matching log text, verbatim.
+    pub sent: String,
+}
+
+impl Suppression {
+    /// A sentence an operator can act on, naming the gate and what it means.
+    pub fn explain(&self) -> String {
+        match self.gate {
+            SuppressionGate::DisabledByOem => "the OEM master switch for Cell Broadcast is on \
+                (`config_disable_all_cb_messages`), so every Cell Broadcast message is dropped \
+                before it reaches the handler. This is a framework resource, not a permission; \
+                nothing on this desktop can change it."
+                .to_string(),
+            SuppressionGate::TestModeRequired => "the message landed on a channel range marked \
+                test-mode-only and the device is not in testing mode, so the alert was filtered. \
+                Testing mode is toggled on the phone itself."
+                .to_string(),
+            SuppressionGate::ChannelDisabled => "the channel carrying this message is not enabled \
+                in the device's Cell Broadcast settings, so the alert was discarded."
+                .to_string(),
+            SuppressionGate::LanguageMismatch => "the message's declared language does not match \
+                the device language, so the alert was filtered."
+                .to_string(),
+            SuppressionGate::ContentFilter => "a device-configured content filter matched the \
+                message text, so the alert was discarded."
+                .to_string(),
+        }
+    }
+}
+
+/// The specific platform gate that discarded the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SuppressionGate {
+    DisabledByOem,
+    TestModeRequired,
+    ChannelDisabled,
+    LanguageMismatch,
+    ContentFilter,
 }
 
 impl PlatformEvidence {
@@ -632,18 +698,32 @@ impl PlatformEvidence {
             || self.receiver_processed
             || self.alert_ui_requested
     }
+
+    /// True when the platform was witnessed discarding the message.
+    ///
+    /// A suppressed message is a definite negative result with a stated cause, so a caller must not
+    /// keep treating it as "we could not tell". Saying `UNKNOWN` here would hide the one thing the
+    /// device was most explicit about.
+    pub fn was_suppressed(&self) -> bool {
+        self.suppression.is_some()
+    }
 }
 
-/// Log markers that indicate each stage of the AOSP pipeline.
+/// Log text that shows the platform dropped the message, and which gate did it.
 ///
-/// AOSP uses a separate log line for each step, so these are distinct claims rather than one
-/// regex over a single line. The set is deliberately small and each entry is a tag AOSP actually
-/// emits; anything not matched leaves the corresponding stage false rather than assumed.
-const MARKER_TEST_RECEIVER: &[&str] = &["Received test intent action"];
-const MARKER_MESSAGE_CONSTRUCTED: &[&str] = &["SmsCbMessage", "handleGsmCellBroadcastSms", "CellBroadcastMessage"];
-const MARKER_SERVICE: &[&str] = &["CellBroadcastService", "CellBroadcastHandler", "GsmCellBroadcastHandler"];
-const MARKER_RECEIVER: &[&str] = &["CellBroadcastReceiver"];
-const MARKER_ALERT_UI: &[&str] = &["CellBroadcastAlertService", "CellBroadcastAlertDialog", "CellBroadcastAlertAudio"];
+/// These are the exact strings AOSP emits, read from `CellBroadcastServiceManager`,
+/// `CellBroadcastAlertService` and the carrier-config path. Each one is a *negative* marker: it
+/// proves the message arrived and was then deliberately discarded. They are matched before the
+/// positive markers so a suppression is never masked by a tag that also appeared earlier in the
+/// pipeline.
+const SUPPRESSION_MARKERS: &[(&str, SuppressionGate)] = &[
+    ("GSM CB message ignored - CB messages disabled by OEM", SuppressionGate::DisabledByOem),
+    ("CDMA CB message ignored - CB messages disabled by OEM", SuppressionGate::DisabledByOem),
+    ("ignoring the alert due to not in testing mode", SuppressionGate::TestModeRequired),
+    ("ignoring the alert due to configured channels was marked", SuppressionGate::ChannelDisabled),
+    ("ignoring the alert due to language mismatch", SuppressionGate::LanguageMismatch),
+    ("Skipped message due to filter", SuppressionGate::ContentFilter),
+];
 
 /// Scan a logcat capture for platform-path evidence.
 pub fn scan_platform_logcat(logcat: &str) -> PlatformEvidence {
@@ -654,8 +734,50 @@ pub fn scan_platform_logcat(logcat: &str) -> PlatformEvidence {
         service_reached: matches(MARKER_SERVICE),
         receiver_processed: matches(MARKER_RECEIVER),
         alert_ui_requested: matches(MARKER_ALERT_UI),
+        suppression: first_suppression(logcat),
     }
 }
+
+/// The first suppression marker present in the capture, if any.
+fn first_suppression(logcat: &str) -> Option<Suppression> {
+    SUPPRESSION_MARKERS
+        .iter()
+        .find(|(marker, _)| logcat.contains(marker))
+        .map(|(marker, gate)| Suppression {
+            gate: *gate,
+            sent: (*marker).to_string(),
+        })
+}
+
+/// Log markers that indicate each stage of the AOSP pipeline.
+///
+/// AOSP uses a separate log line for each step, so these are distinct claims rather than one
+/// regex over a single line.
+///
+/// These markers were re-checked against the AOSP sources this session, because the earlier set
+/// contained a marker that could fire on an action the Cell Broadcast app **rejects**. The app's
+/// receiver tag is literally `"CellBroadcastReceiver"`, and its `onReceive` logs
+/// `"onReceive() unexpected action <action>"` for anything it does not handle — so a stray broadcast
+/// to that component could be read as proof the Cell Broadcast alert path ran. Matching the tag
+/// alone is not evidence. The negative markers in `SUPPRESSION_MARKERS` are the opposite case: each
+/// one is emitted only *after* the message reached the platform and was deliberately dropped, so
+/// they are the most trustworthy lines in the capture.
+const MARKER_TEST_RECEIVER: &[&str] = &["Received test intent action"];
+const MARKER_MESSAGE_CONSTRUCTED: &[&str] =
+    &["SmsCbMessage", "handleGsmCellBroadcastSms", "CellBroadcastMessage"];
+const MARKER_SERVICE: &[&str] =
+    &["CellBroadcastService", "CellBroadcastHandler", "GsmCellBroadcastHandler"];
+/// Positive evidence that the Cell Broadcast app *processed the message*, not merely that its
+/// process existed. The bare class tag is deliberately absent; see the comment above.
+const MARKER_RECEIVER: &[&str] = &[
+    "CellBroadcastReceiver: onReceive android.provider.Telephony.SMS_CB_RECEIVED",
+    "CellBroadcastReceiver: onReceive android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+];
+const MARKER_ALERT_UI: &[&str] = &[
+    "CBAlertService: onStartCommand",
+    "CellBroadcastAlertDialog",
+    "openEmergencyAlertNotification",
+];
 
 /// The complete, honest capability picture for one device.
 #[derive(Debug, Clone, Serialize)]
@@ -1096,6 +1218,112 @@ Packages:
         let evidence = PlatformEvidence::default();
         assert_eq!(evidence.stage(), CapabilityStage::TestEntryPointDiscovered);
         assert!(!evidence.pipeline_ran());
+    }
+
+    /// A stray broadcast the Cell Broadcast app rejects must not be read as the alert path running.
+    ///
+    /// The app's receiver tag is `CellBroadcastReceiver` and its `onReceive` logs an "unexpected
+    /// action" warning for anything it does not handle. Matching the bare tag would have turned a
+    /// rejected broadcast into a `SYSTEM UI REACHED` claim.
+    #[test]
+    fn a_rejected_broadcast_to_the_receiver_tag_is_not_a_delivery() {
+        let rejected = "W CellBroadcastReceiver: onReceive() unexpected action com.example.SOMETHING_ELSE\n";
+        let evidence = scan_platform_logcat(rejected);
+        assert!(!evidence.receiver_processed);
+        assert!(!evidence.pipeline_ran());
+        assert_eq!(evidence.stage(), CapabilityStage::TestEntryPointDiscovered);
+    }
+
+    /// The paths the app does handle are evidence that it processed the message.
+    #[test]
+    fn the_handled_cb_actions_are_recognised_as_processing() {
+        for action in [
+            "android.provider.Telephony.SMS_CB_RECEIVED",
+            "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+        ] {
+            let line = format!("D CellBroadcastReceiver: onReceive {action}\n");
+            assert!(
+                scan_platform_logcat(&line).receiver_processed,
+                "{action} must count as processing"
+            );
+        }
+    }
+
+    /// A message the platform deliberately dropped is a definite result with a stated cause.
+    ///
+    /// This is the difference between "nothing happened and we do not know why" and "the OEM master
+    /// switch is on". Reporting `UNKNOWN` here would hide the most explicit thing in the capture.
+    #[test]
+    fn an_oem_disabled_message_is_reported_as_suppressed_not_unknown() {
+        let log = "D CellBroadcastServiceManager: GSM CB message ignored - CB messages disabled by OEM.\n";
+        let evidence = scan_platform_logcat(log);
+        assert!(evidence.was_suppressed());
+        assert_eq!(
+            evidence.suppression.as_ref().unwrap().gate,
+            SuppressionGate::DisabledByOem
+        );
+        let explanation = evidence.suppression.as_ref().unwrap().explain();
+        assert!(explanation.contains("config_disable_all_cb_messages"));
+        assert!(explanation.contains("not a permission"));
+    }
+
+    /// Each suppression gate is distinguished, because each implies a different next step.
+    #[test]
+    fn each_suppression_gate_is_identified_separately() {
+        let cases = [
+            (
+                "ignoring the alert due to not in testing mode",
+                SuppressionGate::TestModeRequired,
+            ),
+            (
+                "ignoring the alert due to configured channels was marked",
+                SuppressionGate::ChannelDisabled,
+            ),
+            (
+                "ignoring the alert due to language mismatch",
+                SuppressionGate::LanguageMismatch,
+            ),
+            ("Skipped message due to filter: foo", SuppressionGate::ContentFilter),
+        ];
+        for (line, expected) in cases {
+            let evidence = scan_platform_logcat(line);
+            assert_eq!(
+                evidence.suppression.as_ref().map(|s| s.gate),
+                Some(expected),
+                "line {line:?} must be identified"
+            );
+        }
+    }
+
+    /// The raw device text is preserved so a report can quote the device, not paraphrase it.
+    #[test]
+    fn the_suppression_keeps_the_verbatim_device_line() {
+        let line = "GSM CB message ignored - CB messages disabled by OEM.";
+        let evidence = scan_platform_logcat(line);
+        let sent = evidence.suppression.unwrap().sent;
+        assert!(
+            line.contains(&sent),
+            "the stored text {sent:?} must come from the device line {line:?}"
+        );
+    }
+
+    /// A capture with no suppression marker must not invent one.
+    #[test]
+    fn a_normal_capture_reports_no_suppression() {
+        let log = "I CellBroadcastAlertDialog: onCreate\n";
+        assert!(!scan_platform_logcat(log).was_suppressed());
+    }
+
+    /// `is_definite` must not treat a failed probe as a fact about the device.
+    #[test]
+    fn unknown_and_error_are_not_definite_answers() {
+        assert!(State::Granted.is_definite());
+        assert!(State::Denied.is_definite());
+        assert!(State::NotPresent.is_definite());
+        assert!(State::NotApplicable.is_definite());
+        assert!(!State::Unknown.is_definite());
+        assert!(!State::Error.is_definite());
+        assert_eq!(State::NotApplicable.label(), "NOT_APPLICABLE");
     }
 
     #[test]
