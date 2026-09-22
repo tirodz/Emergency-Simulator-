@@ -112,6 +112,19 @@ jobs:
           Path("frontend-check.js").write_text(text[start + 8:end], encoding="utf-8")
           PY
           node --check frontend-check.js
+      - name: Run the desktop UI layout gate
+        shell: bash
+        run: |
+          set -e
+          npm install
+          # The harness prefers a system Chromium and only falls back to Playwright's own browser
+          # when there is none (tools/check_ui.mjs), so install one only if the runner lacks it.
+          # It fails on a hidden measured panel, on document overflow, on text clipped inside its own
+          # box, and on a dead overflow detector (BUG-022). A UI gate that cannot fail is worse than
+          # no gate, so this runs on every PR.
+          CHROMIUM="$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)"
+          if [ -z "$CHROMIUM" ]; then npx playwright install --with-deps chromium; fi
+          CHROMIUM_PATH="$CHROMIUM" npm run test:ui
 
   build:
     name: Build Windows app and installer
