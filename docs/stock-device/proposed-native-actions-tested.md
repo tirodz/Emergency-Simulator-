@@ -134,6 +134,33 @@ requires root, and none requires installing anything on the phone.
 
 ---
 
+## Two further surfaces examined this session
+
+Both were checked and both are dead ends, recorded here so the enumeration in
+`A35-native-test-path.md` stays honest rather than merely large.
+
+**`TelephonyTester`** (`frameworks/opt/telephony/.../TelephonyTester.java`) registers a set of
+test actions — `TestServiceState`, `TestConferenceEventPackage`, `TestSuppSrvcFail`,
+`TestHandoverFail`, `TestImsECall`, `TestReceiveDtmf`, `TestChangeNumber` — exported and requiring no
+permission, gated on `TelephonyUtils.IS_DEBUGGABLE`. All of them are IMS and supplementary-service
+test hooks. **None touches Cell Broadcast**, so a debuggable build still yields only the one
+injection action. Verdict: `NOT APPLICABLE` to this problem.
+
+**`com.android.cellbroadcastservice.action.DUPLICATE_DETECTION`** — the module's own documented
+debugging switch, `--ez enable true|false`. It is unprotected (absent from the framework manifest)
+and it is a real, documented, root-free broadcast. It is also **gated on `ro.debuggable`** at
+registration (`CellBroadcastHandler.java` line 290), and it only toggles a duplicate-detection flag.
+It neither displays nor injects an alert. Verdict: reachable but `NOT AN INJECTOR`; registered in
+`tools/check_actions.py` with `reaches_pipeline: false`.
+
+There is no `cmd phone` verb that injects a broadcast either: the telephony package exposes no
+`TelephonyShellCommand` on `android14-release` (167 entries, none matching shell or command).
+
+The count of surfaces that reach the pipeline remains **one**: `TEST_TRIGGER_CELL_BROADCAST`, in its
+GSM, CDMA and SCP variants, all gated on `ro.debuggable`.
+
+---
+
 ## Evidence index
 
 | Claim | Label | Source |
