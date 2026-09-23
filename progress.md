@@ -30,13 +30,13 @@ operator at the one channel that could not work until they found a settings togg
 * **`list_alert_channels`** exposes the catalogue to the interface, which renders a channel selector
   and states the gate for the selected channel in the confirmation dialog. One table, one owner.
 
-### Ten tests now guard it
+### Eight new tests now guard it
 
-`an_uncatalogued_channel_cannot_be_encoded`, `the_default_channel_needs_no_operator_action`,
-`the_catalogue_records_the_as_p_is_channel_enabled_gates`,
-`the_requirement_text_matches_the_default_state`, `every_channel_is_self_describing`,
-`channel_identifiers_are_unique`, `a_non_default_channel_encodes_into_the_header`,
-`the_refactor_preserved_the_etws_test_encoding`, plus the pre-existing PDU vectors.
+`every_channel_is_self_describing`, `the_requirement_text_matches_the_default_state`,
+`channel_identifiers_are_unique`, `the_default_channel_needs_no_operator_action`,
+`the_catalogue_records_the_as_p_is_channel_enabled_gates`, `an_uncatalogued_channel_cannot_be_encoded`,
+`a_non_default_channel_encodes_into_the_header`, `the_refactor_preserved_the_etws_test_encoding` —
+on top of the pre-existing PDU vectors. `platform.rs` alone runs 67 tests, all passing.
 
 `docs/stock-device/alert-channel-gating.md` is the full write-up. `docs/bugs/BUG-026` records it as a
 defect.
