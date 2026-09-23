@@ -3,7 +3,84 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status — native-test-surface enumeration session (2026-09-23)
+## Current status — proposed native trigger sequence, tested and refused (2026-09-23, later)
+
+### What happened
+
+A task brief proposed a four-step native injection engine. Four of its five commands are inoperative,
+and each fails *silently* — the exact failure shape this project exists to catch. Rather than
+implement them, they were tested against AOSP source and the reason the failure is invisible was
+fixed structurally.
+
+`docs/stock-device/proposed-native-actions-tested.md` records the whole analysis.
+
+| Proposed command | Verdict |
+|---|---|
+| `settings put global cell_broadcast_test_alerts 1` | **no effect** — key does not exist; the real preferences are per-SIM `SharedPreferences`, not global settings |
+| `settings put global show_option_to_opt_out_notifications 1` | **no effect** — same |
+| `am broadcast -a com.android.cellbroadcastreceiver.SHOW_TEST_MESSAGE` | **does not exist** — no such action in any branch; nothing handles it |
+| `am start -n .../.CellBroadcastListActivity` | launches; **injects nothing** — it is the history list, correct only as a verification aid |
+| `am broadcast -a android.provider.Telephony.SMS_CB_RECEIVED` | **refused** — protected broadcast |
+
+A `settings put global` for a key no code reads is the purest version of the recurring defect: it
+exits 0, it shows up in `settings list global`, and it *persists*, so a later session reads it back
+and believes test alerts are on.
+
+### Implemented instead
+
+**`tools/check_actions.py`** — a gate over `src-tauri/src/**/*.rs` and `docs/**/*.md`:
+
+* a registry of every broadcast action the project may emit, each with its AOSP file and line and a
+  `reaches_pipeline` flag;
+* names `SHOW_TEST_MESSAGE` explicitly as fabricated, rather than reporting a generic unknown action;
+* refuses any action whose `reaches_pipeline` is false — the protected broadcasts and the
+  non-exported internal actions;
+* requires any new action to be registered with provenance first, so "does this exist?" is answered
+  before the command is written;
+* `--self-test` proves it catches the three real mistakes and accepts the one real action.
+
+When first run it found two actions in the code that were real but unregistered
+(`cdma.TEST_TRIGGER_SCP_MESSAGE`, `cellbroadcastreceiver.SHOW_NEW_ALERT`) — the check working as
+intended. Wired into CI as the step after the read-only gate.
+
+### STEP 1 and STEP 3 responses, stated plainly
+
+* **All 25 bug records are `FIXED`.** BUG-001 through BUG-025; none is open. The brief's "BUG-001
+  through BUG-019" are the older half of a journal that already continues to BUG-025.
+* **No URI or hostname parsing error remains.** `tools/bridge.py` was reviewed; host parsing is
+  fine and the bridge was verified reachable from outside this container, not by self-check.
+* **CLI argument parsing**: the controller takes no CLI arguments — it is a Tauri GUI app. There is
+  no argument parser to fix.
+* **`src/index.html` state handling**: the UI already renders each probe's command, `exit_code`,
+  `stdout` and `stderr` (`src/index.html` lines 400–403), which is exactly what STEP 3 asks for. No
+  change needed.
+* **`cargo check --locked`**: passes, 0 errors. The 6 warnings are all pre-existing `never used`
+  items in `platform.rs`, unchanged by this session.
+* **CI workflow**: `.github/workflows/build-windows.yml` now runs the new action gate; no path or
+  build error.
+
+### Verified this session
+
+| Gate | Result |
+|---|---|
+| `cargo check --locked` | **exit 0**, no errors |
+| `cargo test --lib --locked` | **96 passed, 0 failed** |
+| `python3 tools/check_actions.py --self-test` | passed — catches the fabricated and the two protected actions, accepts the real one |
+| `python3 tools/check_actions.py` | OK — every action in 64 files registered or provably fabricated |
+| `python3 tools/check_read_only.py` | OK |
+| `python3 tools/check_paste_ps1.py` | OK |
+| `npm run test:ui` | all layout and honesty assertions passed |
+
+### Still the same gap
+
+**The A35 has never been queried; `evidence/` is empty.** No hardware test was performed and none is
+claimed. The environment reset three times during this session, each time removing the Rust
+toolchain and the GTK/WebKit libraries; they were reinstalled to run the checks above, and the
+results are real but the container is not durable.
+
+`adb shell getprop ro.debuggable` still decides the final result.
+
+## Prior status — native-test-surface enumeration session (2026-09-23)
 
 ### What this session did
 

@@ -147,6 +147,19 @@ jobs:
           # See docs/bugs/BUG-024.
           python3 tools/check_read_only.py
 
+      - name: Check every broadcast action exists in AOSP
+        shell: bash
+        run: |
+          set -e
+          # Fails if the tool emits a broadcast action that Android does not implement, or that is
+          # a protected broadcast, or is a non-exported internal action. `am` accepts all of these
+          # and prints nothing, so a fabricated action is indistinguishable from a real one at a
+          # terminal. Three such commands have been proposed to this project; the third,
+          # `...cellbroadcastreceiver.SHOW_TEST_MESSAGE`, does not exist in any AOSP branch.
+          # See docs/stock-device/proposed-native-actions-tested.md.
+          python3 tools/check_actions.py --self-test
+          python3 tools/check_actions.py
+
   build:
     name: Build Windows app and installer
     runs-on: windows-latest
