@@ -393,6 +393,209 @@ pub fn rank_cellbroadcast_packages(packages: &[String]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The enumerated native test surface
+// ---------------------------------------------------------------------------------------------
+
+/// Why a candidate entry point into the phone's Cell Broadcast machinery does or does not work.
+///
+/// The point of enumerating candidates instead of reporting one verdict is that "no root-free path
+/// exists" is only a useful answer if every candidate was tried and each failed for its own stated
+/// reason. "SMS_CB_RECEIVED is protected" is one reason, not the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EntryPointOutcome {
+    /// A non-system caller may send it and it feeds the real pipeline. Gated only by `ro.debuggable`.
+    Reachable,
+    /// The action is in the platform's `<protected-broadcast>` list, so `ActivityManagerService`
+    /// refuses any caller that is not a system UID. No permission can be granted to fix this.
+    ProtectedBroadcast,
+    /// The component is not exported, so a shell caller cannot address it even if the action is
+    /// unprotected.
+    NotExported,
+    /// The component is reachable but only reads or changes state; it cannot originate a message.
+    NotAnInjector,
+    /// A signature-level permission or a build property stands in the way.
+    SignatureOrBuildGate,
+}
+
+impl EntryPointOutcome {
+    /// A short label for tables.
+    pub fn label(self) -> &'static str {
+        match self {
+            EntryPointOutcome::Reachable => "REACHABLE",
+            EntryPointOutcome::ProtectedBroadcast => "PROTECTED BROADCAST",
+            EntryPointOutcome::NotExported => "NOT EXPORTED",
+            EntryPointOutcome::NotAnInjector => "NOT AN INJECTOR",
+            EntryPointOutcome::SignatureOrBuildGate => "SIGNATURE/BUILD GATE",
+        }
+    }
+
+    /// One line an operator can act on.
+    pub fn explain(self) -> &'static str {
+        match self {
+            EntryPointOutcome::Reachable => {
+                "reachable by adb shell; the only remaining gate is a build property"
+            }
+            EntryPointOutcome::ProtectedBroadcast => {
+                "a protected broadcast: the platform refuses any non-system caller before the \
+                 receiver is resolved, so the permissionless `exported` flag never applies"
+            }
+            EntryPointOutcome::NotExported => {
+                "the component is not exported, so a shell caller cannot address it"
+            }
+            EntryPointOutcome::NotAnInjector => {
+                "reachable, but it reads or filters state and cannot originate a message"
+            }
+            EntryPointOutcome::SignatureOrBuildGate => {
+                "behind a signature permission or a build property, neither of which can be granted"
+            }
+        }
+    }
+}
+
+/// One way the phone's Cell Broadcast machinery might be driven, and what stands in the way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EntryPoint {
+    pub component: &'static str,
+    pub action: &'static str,
+    pub outcome: EntryPointOutcome,
+}
+
+/// The AOSP Cell Broadcast entry-point surface, enumerated from source.
+///
+/// Every row was read out of `android14-release` this session; the three `Reachable` rows are the
+/// only non-protected alert-bearing actions in the stack, and each is a *dynamically registered*
+/// receiver gated on `ro.debuggable`, which is why none has a manifest component name.
+///
+/// This list is the answer to "did we check everything?". It is deliberately exhaustively boring:
+/// the value is in the rows that look promising and are not.
+pub fn entry_points() -> Vec<EntryPoint> {
+    let row = |component, action, outcome| EntryPoint {
+        component,
+        action,
+        outcome,
+    };
+    vec![
+        row(
+            "CellBroadcastReceiver",
+            "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.provider.Telephony.SMS_CB_RECEIVED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.provider.Telephony.SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.telephony.action.DEFAULT_SMS_SUBSCRIPTION_CHANGED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.telephony.action.CARRIER_CONFIG_CHANGED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.intent.action.SERVICE_STATE",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.intent.action.LOCALE_CHANGED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "CellBroadcastReceiver",
+            "android.intent.action.BOOT_COMPLETED",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        // The secret code is a protected broadcast *and* a gate-opener rather than an injector.
+        // BUG-002's reproduction used `am broadcast` for this action, which the platform refuses;
+        // the toggle-not-idempotent lesson still holds, but the reproduction did not.
+        row(
+            "CellBroadcastReceiver",
+            "android.telephony.action.SECRET_CODE (2627 / CMAS)",
+            EntryPointOutcome::ProtectedBroadcast,
+        ),
+        row(
+            "GsmCbTestBroadcastReceiver (dynamic)",
+            TEST_TRIGGER_ACTION,
+            EntryPointOutcome::Reachable,
+        ),
+        row(
+            "CdmaCbTestBroadcastReceiver (dynamic)",
+            "com.android.internal.telephony.cdma.TEST_TRIGGER_CELL_BROADCAST",
+            EntryPointOutcome::Reachable,
+        ),
+        row(
+            "CdmaCbTestBroadcastReceiver (dynamic)",
+            "com.android.internal.telephony.cdma.TEST_TRIGGER_SCP_MESSAGE",
+            EntryPointOutcome::Reachable,
+        ),
+        row(
+            "CellBroadcastAlertService",
+            "cellbroadcastreceiver.SHOW_NEW_ALERT",
+            EntryPointOutcome::NotExported,
+        ),
+        row(
+            "CellBroadcastAlertDialog",
+            "android.provider.Telephony.SMS_CB_RECEIVED",
+            EntryPointOutcome::NotExported,
+        ),
+        row(
+            "persist.cellbroadcast.message_filter",
+            "(system property)",
+            EntryPointOutcome::NotAnInjector,
+        ),
+        row(
+            "DefaultCellBroadcastService",
+            "android.telephony.CellBroadcastService",
+            EntryPointOutcome::SignatureOrBuildGate,
+        ),
+    ]
+}
+
+/// Which entry points, if any, lead into the phone's own alert pipeline without a system UID.
+pub fn reachable_entry_points() -> Vec<EntryPoint> {
+    entry_points()
+        .into_iter()
+        .filter(|entry| entry.outcome == EntryPointOutcome::Reachable)
+        .collect()
+}
+
+/// A sentence stating the whole surface, for the diagnostics report.
+///
+/// Built from [`entry_points`] so the prose cannot drift from the enumeration: if a row is added or
+/// its outcome changes, this sentence changes with it.
+pub fn entry_point_summary() -> String {
+    let all = entry_points();
+    let reachable = reachable_entry_points();
+    let protected = all
+        .iter()
+        .filter(|entry| entry.outcome == EntryPointOutcome::ProtectedBroadcast)
+        .count();
+    let other = all.len() - reachable.len() - protected;
+    format!(
+        "{} entry points were enumerated across the Cell Broadcast stack: {} are protected \
+         broadcasts (refused before the receiver is resolved), {} are behind an `exported=\"false\"` \
+         component, a signature permission or a build property, and {} are reachable by adb shell. \
+         The reachable ones are the telephony test receivers, registered only when ro.debuggable=1, \
+         and they feed the genuine pipeline rather than a copy of it.",
+        all.len(),
+        protected,
+        other,
+        reachable.len()
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
 // Cell Broadcast PDU construction
 // ---------------------------------------------------------------------------------------------
 
@@ -1014,6 +1217,89 @@ Packages:
         assert!(CapabilityStage::TestEntryPointDiscovered < CapabilityStage::TestEntryPointAccepted);
         assert!(CapabilityStage::TestEntryPointAccepted < CapabilityStage::CellBroadcastServiceReached);
         assert!(CapabilityStage::CellBroadcastServiceReached < CapabilityStage::SystemUiReached);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The enumerated native test surface
+    // -----------------------------------------------------------------------------------------
+
+    /// The enumeration must contain every alert-bearing action the receiver handles, each marked
+    /// protected. Losing a row would silently narrow the claim "we checked everything".
+    #[test]
+    fn every_protected_alert_action_is_enumerated() {
+        let actions: Vec<&str> = entry_points().iter().map(|entry| entry.action).collect();
+        for action in [
+            "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+            "android.provider.Telephony.SMS_CB_RECEIVED",
+            "android.provider.Telephony.SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED",
+            "android.telephony.action.DEFAULT_SMS_SUBSCRIPTION_CHANGED",
+            "android.telephony.action.CARRIER_CONFIG_CHANGED",
+            "android.intent.action.SERVICE_STATE",
+            "android.intent.action.LOCALE_CHANGED",
+            "android.intent.action.BOOT_COMPLETED",
+        ] {
+            assert!(
+                actions.contains(&action),
+                "the protected action {action} must be enumerated"
+            );
+        }
+    }
+
+    /// The secret code must be classified as protected *and* not counted as a way in. It is a
+    /// gate-opener, so treating it as reachable would overclaim the whole project.
+    #[test]
+    fn the_secret_code_is_protected_and_not_a_route_in() {
+        let secret = entry_points()
+            .into_iter()
+            .find(|entry| entry.action.contains("SECRET_CODE"))
+            .expect("the 2627 secret code must be enumerated");
+        assert_eq!(secret.outcome, EntryPointOutcome::ProtectedBroadcast);
+        assert!(
+            !reachable_entry_points().iter().any(|entry| entry.action.contains("SECRET_CODE")),
+            "the secret code only toggles a display filter; it must never be reported reachable"
+        );
+    }
+
+    /// Exactly the three telephony test actions are reachable, and nothing else. If a future edit
+    /// adds a fourth, this test fails and forces the reason to be stated.
+    #[test]
+    fn only_the_telephony_test_receivers_are_reachable() {
+        let reachable = reachable_entry_points();
+        assert_eq!(
+            reachable.len(),
+            3,
+            "expected exactly three reachable entry points, found {:?}",
+            reachable.iter().map(|entry| entry.action).collect::<Vec<_>>()
+        );
+        assert!(reachable.iter().all(|entry| entry.action.contains("TEST_TRIGGER")));
+        assert!(reachable.iter().any(|entry| entry.action == TEST_TRIGGER_ACTION));
+    }
+
+    /// The summary sentence is derived from the enumeration, so its counts must agree with it.
+    #[test]
+    fn the_summary_counts_match_the_enumeration() {
+        let all = entry_points().len();
+        let reachable = reachable_entry_points().len();
+        assert!(all > reachable, "most entry points must not be reachable");
+        let summary = entry_point_summary();
+        assert!(summary.contains(&format!("{all} entry points were enumerated")));
+        assert!(summary.contains(&format!("{reachable} are reachable")));
+        assert!(summary.contains("ro.debuggable=1"));
+    }
+
+    /// Every outcome must carry an explanation, so no row is a bare label.
+    #[test]
+    fn every_outcome_explains_itself() {
+        for outcome in [
+            EntryPointOutcome::Reachable,
+            EntryPointOutcome::ProtectedBroadcast,
+            EntryPointOutcome::NotExported,
+            EntryPointOutcome::NotAnInjector,
+            EntryPointOutcome::SignatureOrBuildGate,
+        ] {
+            assert!(!outcome.explain().is_empty());
+            assert!(!outcome.label().is_empty());
+        }
     }
 
     // -----------------------------------------------------------------------------------------

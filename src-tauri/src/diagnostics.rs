@@ -696,6 +696,22 @@ pub fn render_report(report: &DiagnosticReport) -> String {
     ));
     out.push_str(&format!("{}\n\n", cb.reason));
 
+    // The entry-point surface is a fact about Android, not about this device, so it is stated as
+    // verified here and enumerated row by row. It is the answer to "did we check everywhere?".
+    out.push_str("## The native test surface, enumerated\n\n");
+    out.push_str(&format!("{}\n\n", crate::platform::entry_point_summary()));
+    out.push_str("| Component | Action | Outcome |\n| --- | --- | --- |\n");
+    for entry in crate::platform::entry_points() {
+        out.push_str(&format!(
+            "| {} | `{}` | {} — {} |\n",
+            entry.component,
+            entry.action,
+            entry.outcome.label(),
+            entry.outcome.explain()
+        ));
+    }
+    out.push('\n');
+
     out.push_str("## What we could not verify\n\n");
     out.push_str(
         "- Whether a test broadcast actually reaches the telephony pipeline. That is an experiment \
@@ -1049,6 +1065,30 @@ Package [com.google.android.cellbroadcastreceiver] (9f2a1):
         );
         // The raw command output must be present so the reader can re-check the claim.
         assert!(text.contains("[ro.product.model]: [SM-A356B]"));
+    }
+
+    /// The report must carry the whole enumerated entry-point surface, not just the one blocked
+    /// broadcast. A reader who sees only `SMS_CB_RECEIVED` would reasonably ask whether anything
+    /// else was tried, and this section is the answer.
+    #[test]
+    fn the_report_enumerates_the_native_test_surface() {
+        let properties = vec![
+            ("ro.product.model".to_string(), "SM-A356B".to_string()),
+            ("ro.debuggable".to_string(), "0".to_string()),
+        ];
+        let report = build_report(&properties, &[cb_package_with_receiver()], Vec::new());
+        let text = render_report(&report);
+
+        assert!(text.contains("## The native test surface, enumerated"));
+        assert!(text.contains(crate::platform::TEST_TRIGGER_ACTION));
+        assert!(text.contains("SECRET_CODE"));
+        assert!(text.contains("PROTECTED BROADCAST"));
+        assert!(text.contains("REACHABLE"));
+        // The enumeration is a fact about Android, so it sits in the verified section.
+        let verified = text.find("## What we verified").expect("verified section");
+        let surface = text.find("## The native test surface").expect("surface section");
+        let unverified = text.find("## What we could not verify").expect("unverified section");
+        assert!(verified < surface && surface < unverified);
     }
 
     #[test]

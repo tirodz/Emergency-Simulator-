@@ -3,7 +3,93 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status — deep platform investigation session (2026-09-22)
+## Current status — native-test-surface enumeration session (2026-09-23)
+
+### What this session did
+
+The brief was to stop retrying the already-blocked `SMS_CB_RECEIVED` broadcast and instead enumerate
+the **entire** native test surface. That is now done, and it is in code, not only prose.
+
+**`docs/stock-device/A35-native-test-path.md` is the definitive answer.** It walks 23 candidate entry
+points across `packages/apps/CellBroadcastReceiver`, `packages/modules/CellBroadcastService` and
+`frameworks/opt/telephony`, each with its exported state, protected-broadcast state, whether shell can
+send it, whether it reaches the alert pipeline, and a verdict. Every AOSP claim is `CONFIRMED` with
+file and line.
+
+**The finding, stated precisely.** "`SMS_CB_RECEIVED` is protected" was never the whole answer. The
+whole answer is that every entry point fails for its own reason:
+
+| Class | Count | Why it fails |
+|---|---|---|
+| Protected broadcasts | 9 | refused before the receiver is resolved; `exported="true"` is irrelevant |
+| `exported="false"` / signature / build gate | 5 | not addressable, or behind a signature permission |
+| Reachable but not injectors | 4 | activities, providers and a system property that read or filter state |
+| **Reachable injectors** | **3** | the telephony test receivers; gated on `ro.debuggable` |
+
+**The one new mechanism confirmed this session** (it was not previously documented as a route): the
+*CDMA* and *SCP* test receivers —
+`com.android.internal.telephony.cdma.TEST_TRIGGER_CELL_BROADCAST` and `...TEST_TRIGGER_SCP_MESSAGE`
+— are unprotected, `RECEIVER_EXPORTED`, and feed the genuine pipeline exactly as the GSM one does.
+They do not change the device verdict (same `ro.debuggable` gate) but they were missing from the
+earlier account, and "we checked everywhere" is only true with them included.
+
+**The secret code 2627 was re-derived and its role corrected.** It is a protected broadcast
+(`android.telephony.action.SECRET_CODE`, line 564) so `am broadcast` cannot set it, **and** it is a
+gate-opener rather than an injector — it flips a display filter consulted downstream in
+`CellBroadcastAlertService`, and never constructs a message. This means **BUG-002's reproduction
+command was impossible** and has been corrected in place. The bug's fix and lesson survive.
+
+**The "Test alerts" setting is a receive preference, not a trigger.** `KEY_ENABLE_TEST_ALERTS` is
+documented in source as *"Whether to display monthly test messages (default is disabled)"*, and
+`isTestAlertsToggleVisible` gates its visibility on carrier channel ranges. Turning it on does not
+send anything. This is the item the brief flagged as potentially most important; it is now settled
+against source rather than left as a hope.
+
+### Implemented in code
+
+* `src-tauri/src/platform.rs`: `EntryPointOutcome` + `EntryPoint` + `entry_points()`,
+  `reachable_entry_points()`, `entry_point_summary()`. The 16-row enumeration lives in code, and the
+  summary sentence is *derived* from it so prose cannot drift from the list.
+* `src-tauri/src/diagnostics.rs`: the report now renders a "The native test surface, enumerated"
+  table in the verified section, so a reader sees every route and why it fails.
+* 6 new Rust tests, including one that **fails if a fourth reachable entry point is ever added
+  without a stated reason**, and one asserting the secret code is never reported reachable.
+* `docs/bugs/BUG-002-secret-code-toggle.md`: correction section recording that its reproduction is
+  refused by the platform.
+* `docs/stock-device/A35-native-test-path.md`: new, the full enumeration and version matrix.
+
+`cargo test --lib --locked`: **96 passed, 0 failed** (was 90; +6).
+
+### The device is still unread — and that is the whole remaining gap
+
+**The physical A35 has never been queried.** `evidence/` is empty; `bridge-tasks.json` batch
+`A35-RO-001` has been served for several sessions and never posted back. Every device-specific claim
+in every document is `UNKNOWN`, and this session did not change that.
+
+The bridge is live and externally reachable this session (verified with an external fetcher, not a
+self-check):
+
+* `https://work-1-dmmvzcgjktgnjiaf.prod-runtime.all-hands.dev/health` returns
+  `{"ok": true, "service": "emergency-simulator-bridge", ...}`.
+
+**One read decides the project's final result:**
+
+```
+adb shell getprop ro.debuggable
+```
+
+`1` → the telephony test receivers exist; Path A is available; the controlled send can be attempted
+with logcat as the sole verdict. `0` → they are never registered, `am` still accepts the command and
+nothing happens, and the answer is `RESULT B` with the local simulator as a separately-named
+UI-only fallback. Unreadable → `UNKNOWN`, and absence must not be assumed.
+
+What this session **could not** do, stated plainly rather than glossed: it had no adb, no USB, no
+Bluetooth adapter and no route to the operator's laptop. `cargo test` and the docs are real; no
+hardware test was performed and none is claimed. Missions 25 and 28 (test on the real A35; build and
+verify the Windows release) remain blocked on the operator pasting the connection block, and no
+release artifact was published.
+
+### Prior session status — deep platform investigation (2026-09-22)
 
 ### Continuation — re-verified, and the ADB route closed with citations
 
