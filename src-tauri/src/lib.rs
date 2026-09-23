@@ -1806,6 +1806,17 @@ fn collect_evidence(
     Ok(())
 }
 
+/// The alert channels this tool can address, with each channel's receive-side gate.
+///
+/// Exposed so the interface offers exactly the channels the encoding path will accept, rather than
+/// re-implementing the catalogue in JavaScript. A second copy of this table is a second chance for
+/// the two to disagree, and a UI listing a channel the backend then refuses is the same class of
+/// defect as a broadcast action that does not exist.
+#[tauri::command]
+fn list_alert_channels() -> Vec<platform::AlertChannel> {
+    platform::ALERT_CHANNELS.to_vec()
+}
+
 /// The result of a platform test-injection attempt.
 #[derive(Debug, Clone, Serialize)]
 pub struct PlatformSendResult {
@@ -1813,6 +1824,16 @@ pub struct PlatformSendResult {
     pub body: String,
     pub pdu_hex: String,
     pub message_id: String,
+    /// The 3GPP message identifier this attempt addressed.
+    pub channel_id: u16,
+    /// Its label from the [`platform::ALERT_CHANNELS`] catalogue.
+    pub channel_label: String,
+    /// The AOSP receive-side preference that decides whether the alert is raised.
+    pub channel_gate: String,
+    /// What the operator must change for this channel, if anything.
+    pub channel_requirement: String,
+    /// Whether the channel is on for a device that has never been configured.
+    pub channel_enabled_by_default: bool,
     pub entrypoint_available: PlatformState,
     pub stage: CapabilityStage,
     pub state: String,
@@ -2038,13 +2059,13 @@ fn device_diagnostics(
     Ok(DiagnosticBundle { report, markdown })
 }
 
-/// Inject one ETWS test Cell Broadcast through the AOSP telephony test entry point.
+/// Inject one Cell Broadcast through the AOSP telephony test entry point.
 /// This is the root-free path: `GsmInboundSmsHandler` registers a receiver for
 /// `com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST` on `eng`/`userdebug` builds,
 /// and it decodes a Cell Broadcast PDU placed in the `pdu_string` extra. Running it needs only the
 /// ADB shell identity, not root, because the receiver is not a `<protected-broadcast>`.
 ///
-/// Three things this deliberately does not do:
+/// Four things this deliberately does not do:
 ///
 /// * It does not run on a production build. `ro.debuggable=0` means the receiver was never
 ///   registered, so the broadcast would be accepted by `am` and silently discarded. Returning an
@@ -2054,11 +2075,15 @@ fn device_diagnostics(
 ///   side of the transport.
 /// * It does not claim delivery from the exit code. The verdict comes from downstream logcat
 ///   markers, and an accepted-but-silent broadcast is reported as such.
+/// * It does not silently pick a channel. `channel` selects the message identifier, and the
+///   receive-side gate for the chosen channel is reported alongside the result, because the ETWS
+///   test channel this tool used to hardcode is disabled by default while ETWS primary is not.
 #[tauri::command]
 fn send_platform_test_alert(
     app: tauri::AppHandle,
     serial: String,
     body: String,
+    channel: Option<u16>,
 ) -> Result<PlatformSendResult, String> {
     let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     if !body.starts_with(REQUIRED_PREFIX) {
@@ -2068,12 +2093,35 @@ fn send_platform_test_alert(
         ));
     }
 
+    let channel_id = match channel {
+        Some(id) => id,
+        None => platform::default_alert_channel().message_id,
+    };
+    let channel = match platform::alert_channel(channel_id) {
+        Some(c) => c,
+        None => {
+            let known: Vec<String> = platform::ALERT_CHANNELS
+                .iter()
+                .map(|c| format!("0x{:04X} ({})", c.message_id, c.label))
+                .collect();
+            return Err(format!(
+                "Unknown alert channel 0x{channel_id:04X}. Known channels: {}",
+                known.join(", ")
+            ));
+        }
+    };
+
     let mut diagnostics = Vec::new();
     let mut result = PlatformSendResult {
         device_serial: serial.clone(),
         body: body.clone(),
         pdu_hex: String::new(),
         message_id: String::new(),
+        channel_id: channel.message_id,
+        channel_label: channel.label.to_string(),
+        channel_gate: channel.gate.to_string(),
+        channel_requirement: channel.requirement.to_string(),
+        channel_enabled_by_default: channel.enabled_by_default,
         entrypoint_available: PlatformState::Unknown,
         stage: CapabilityStage::None,
         state: "UNKNOWN".to_string(),
@@ -2109,7 +2157,7 @@ fn send_platform_test_alert(
         .map(|d| d.subsec_nanos() as u16)
         .unwrap_or(0))
         .wrapping_add(1);
-    let pdu = platform::etws_test_pdu(&body, serial_number)?;
+    let pdu = platform::cb_pdu(channel.message_id, &body, serial_number)?;
     let pdu_hex: String = pdu.iter().map(|byte| format!("{byte:02X}")).collect();
     if let Some(header) = platform::parse_cb_header(&pdu) {
         result.message_id = format!("0x{:04X} {}", header.message_id, header.message_id_label());
@@ -2118,6 +2166,16 @@ fn send_platform_test_alert(
     result.evidence.push(format!(
         "PDU {} bytes, {pdu_hex}",
         pdu.len()
+    ));
+    result.evidence.push(format!(
+        "channel {}: receive-side gate is {}; {}",
+        channel.label,
+        channel.gate,
+        if channel.enabled_by_default {
+            "enabled on a default device".to_string()
+        } else {
+            format!("disabled by default — {}", channel.requirement)
+        }
     ));
 
     // 3. Clear logcat so the evidence belongs only to this attempt.
@@ -3427,6 +3485,7 @@ pub fn run() {
             platform_diagnostics,
             device_diagnostics,
             send_platform_test_alert,
+            list_alert_channels,
             adb_pair,
             adb_connect,
             restart_adb_server,

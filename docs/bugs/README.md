@@ -60,6 +60,7 @@ So: no silent patches.
 | [BUG-021](BUG-021-platform-test-injection-could-never-reach-the-receiver.md) | The platform test-injection command named a bare package with `-n`, so `am` rejected it and no broadcast could ever reach the receiver | HIGH | FIXED |
 | [BUG-022](BUG-022-ui-harness-measured-a-hidden-panel.md) | The UI regression harness measured a hidden panel, so every overflow assertion passed without measuring anything | HIGH | FIXED |
 | [BUG-023](BUG-023-studio-device-image-clipped.md) | Fixed-width device images clipped inside a shrinking container in the devices studio | LOW | FIXED |
+| [BUG-026](BUG-026-fixed-alert-channel-discarded-by-default.md) | Every PDU used the one channel a default phone is configured to discard | HIGH | FIXED |
 
 ## Severity scale
 

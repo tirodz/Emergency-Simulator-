@@ -28,6 +28,104 @@ pub const ETWS_TEST_SERVICE_CATEGORY: u32 = 4355;
 /// The property whose value decides whether the AOSP test receiver exists at all.
 pub const DEBUGGABLE_PROPERTY: &str = "ro.debuggable";
 
+/// One alert channel this tool can address, together with the receive-side gate that decides
+/// whether `/packages/apps/CellBroadcastReceiver` will actually raise it.
+///
+/// The catalogue exists because the channel is not a cosmetic choice. AOSP routes a received
+/// message through `CellBroadcastAlertService.isChannelEnabled`, which looks the channel up in the
+/// range arrays in `res/values/config.xml` and then consults a *different* user preference per
+/// array. Two messages with identical text and identical encoding can therefore behave in opposite
+/// ways on the same phone, and the one this project used to hardcode is the worst of them:
+///
+/// | Channel | Preference `isChannelEnabled` consults | AOSP default |
+/// |---|---|---|
+/// | 0x1100 ETWS primary | `KEY_ENABLE_ALERTS_MASTER_TOGGLE` only | **on** |
+/// | 0x1113 CMAS extreme | master **and** `KEY_ENABLE_CMAS_EXTREME_THREAT_ALERTS` | **on** |
+/// | 0x1103 ETWS test | master **and** test-alerts toggle **and** test-mode | **off** |
+/// | 0x111C monthly test | master **and** test-alerts toggle | **off** |
+///
+/// `0x1103` is enabled *only* while the device is in testing mode, which on a retail build is the
+/// `allow_testing_mode_on_user_build` default plus the operator dialling the `2627` secret code.
+/// A channel that is off by default turns an injection that worked perfectly into silence, which is
+/// indistinguishable from an injection that never ran — the exact confusion this project exists to
+/// remove. The catalogue makes that choice explicit and testable instead of a buried constant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AlertChannel {
+    /// 3GPP TS 23.041 message identifier, which AOSP also calls the service category.
+    pub message_id: u16,
+    /// Human label, including the identifier so logs can be matched against this table.
+    pub label: &'static str,
+    /// A one-line statement of what the user sees if this is delivered.
+    pub effect: &'static str,
+    /// Whether the receive-side default is on.
+    pub enabled_by_default: bool,
+    /// The preference name `isChannelEnabled` consults, beyond the master toggle.
+    pub gate: &'static str,
+    /// What the operator must change, if anything, for this channel to be delivered.
+    pub requirement: &'static str,
+}
+
+/// The channels worth addressing, ordered best-first by how little they need from the operator.
+///
+/// The ordering is the point: the first entry needs nothing switched on, so it is the one to try
+/// before asking anyone to change a setting. The list is deliberately short — these are the
+/// channels whose gating was read out of the AOSP source in `isChannelEnabled`, not a dump of every
+/// identifier in `SmsCbConstants`.
+pub const ALERT_CHANNELS: &[AlertChannel] = &[
+    AlertChannel {
+        message_id: MESSAGE_ID_ETWS_EARTHQUAKE,
+        label: "ETWS EARTHQUAKE WARNING (0x1100)",
+        effect: "Full-screen alert with the emergency tone and vibration; ETWS alerts cannot be \
+                 opted out of individually.",
+        enabled_by_default: true,
+        gate: "master toggle only",
+        requirement: "Nothing. Enabled on a default device.",
+    },
+    AlertChannel {
+        message_id: 0x1101,
+        label: "ETWS TSUNAMI WARNING (0x1101)",
+        effect: "As 0x1100.",
+        enabled_by_default: true,
+        gate: "master toggle only",
+        requirement: "Nothing. Enabled on a default device.",
+    },
+    AlertChannel {
+        message_id: 0x1113,
+        label: "CMAS EXTREME THREAT (0x1113)",
+        effect: "Highest-priority CMAS alert; full-screen and loud.",
+        enabled_by_default: true,
+        gate: "KEY_ENABLE_CMAS_EXTREME_THREAT_ALERTS",
+        requirement: "Nothing by default; must not be switched off in Emergency alerts settings.",
+    },
+    AlertChannel {
+        message_id: 0x111C,
+        label: "CMAS REQUIRED MONTHLY TEST (0x111C)",
+        effect: "A genuine test alert: the real emergency tone, full-screen, and the text prefixed \
+                 as a test message.",
+        enabled_by_default: false,
+        gate: "KEY_ENABLE_TEST_ALERTS",
+        requirement: "Turn on the test-alerts toggle (Emergency alerts settings, or the 2627 code).",
+    },
+    AlertChannel {
+        message_id: MESSAGE_ID_ETWS_TEST,
+        label: "ETWS TEST MESSAGE (0x1103)",
+        effect: "The AOSP test alert, and the channel AOSP's own test receiver is built around.",
+        enabled_by_default: false,
+        gate: "KEY_ENABLE_TEST_ALERTS and testing mode",
+        requirement: "Enable testing mode (2627) AND the test-alerts toggle.",
+    },
+];
+
+/// Look up a channel by message identifier.
+pub fn alert_channel(message_id: u16) -> Option<&'static AlertChannel> {
+    ALERT_CHANNELS.iter().find(|c| c.message_id == message_id)
+}
+
+/// The channel to try first: the one that needs nothing changed on a default device.
+pub fn default_alert_channel() -> &'static AlertChannel {
+    &ALERT_CHANNELS[0]
+}
+
 const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
 
 /// The result of asking "is this thing true?" about a device.
@@ -739,8 +837,27 @@ pub fn parse_cb_header(pdu: &[u8]) -> Option<CbHeader> {
 /// is appended: the reference `pdu_string` in `GsmInboundSmsHandler` is itself shorter than the
 /// 88-octet radio page, so the parser reads the content length from the PDU rather than the page.
 pub fn etws_test_pdu(body: &str, serial_number: u16) -> Result<Vec<u8>, String> {
+    cb_pdu(MESSAGE_ID_ETWS_TEST, body, serial_number)
+}
+
+/// Build a Cell Broadcast PDU for any identifier in the [`ALERT_CHANNELS`] catalogue.
+///
+/// The channel is a parameter rather than a constant because the identifier decides whether AOSP
+/// raises the alert at all: `CellBroadcastAlertService.isChannelEnabled` consults a different user
+/// preference per channel, and the ETWS test channel (`0x1103`) that this tool used to hardcode is
+/// disabled by default. See [`ALERT_CHANNELS`].
+///
+/// The body must still open with `TEST`, which keeps every PDU this tool can produce obviously
+/// synthetic on the receiving handset.
+pub fn cb_pdu(message_id: u16, body: &str, serial_number: u16) -> Result<Vec<u8>, String> {
     if !body.starts_with("TEST") {
         return Err("refusing to build an alert whose body does not begin with TEST".to_string());
+    }
+    if alert_channel(message_id).is_none() {
+        return Err(format!(
+            "message identifier 0x{message_id:04X} is not in the channel catalogue; \
+             register it in ALERT_CHANNELS with its receive-side gate before emitting it"
+        ));
     }
     let septets = encode_gsm7(body)?;
     if septets.len() > 93 {
@@ -752,7 +869,7 @@ pub fn etws_test_pdu(body: &str, serial_number: u16) -> Result<Vec<u8>, String> 
 
     let mut pdu = Vec::with_capacity(6 + septets.len());
     pdu.extend_from_slice(&serial_number.to_be_bytes());
-    pdu.extend_from_slice(&MESSAGE_ID_ETWS_TEST.to_be_bytes());
+    pdu.extend_from_slice(&message_id.to_be_bytes());
     pdu.push(DCS_GSM7);
     pdu.push(0x01); // page 1 of 1
     pdu.extend_from_slice(&pack_septets(&septets));
@@ -1300,6 +1417,127 @@ Packages:
             assert!(!outcome.explain().is_empty());
             assert!(!outcome.label().is_empty());
         }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The alert-channel catalogue
+    // -----------------------------------------------------------------------------------------
+
+    /// Every catalogue entry must be usable: a stable identifier, a label that carries it so a log
+    /// line can be matched back to this table, and a stated gate and requirement.
+    #[test]
+    fn every_channel_is_self_describing() {
+        for channel in ALERT_CHANNELS {
+            assert!(!channel.label.is_empty());
+            assert!(!channel.effect.is_empty());
+            assert!(!channel.gate.is_empty());
+            assert!(!channel.requirement.is_empty());
+            assert!(
+                channel.label.contains(&format!("0x{:04X}", channel.message_id)),
+                "channel label {:?} must name its identifier",
+                channel.label
+            );
+        }
+    }
+
+    /// A disabled-by-default channel must say what to enable, and an enabled-by-default channel must
+    /// not. This is the distinction the catalogue exists for: "it will not appear" has to come with
+    /// "and here is why", and "it will appear" must not invent a prerequisite the operator would
+    /// then go and satisfy for nothing.
+    #[test]
+    fn the_requirement_text_matches_the_default_state() {
+        for channel in ALERT_CHANNELS {
+            let claims_nothing_needed = channel.requirement.starts_with("Nothing");
+            assert_eq!(
+                claims_nothing_needed, channel.enabled_by_default,
+                "channel 0x{:04X} says enabled_by_default={} but its requirement is {:?}",
+                channel.message_id, channel.enabled_by_default, channel.requirement
+            );
+        }
+    }
+
+    /// Identifiers must be unique, or a lookup would silently pick whichever came first.
+    #[test]
+    fn channel_identifiers_are_unique() {
+        let mut ids: Vec<u16> = ALERT_CHANNELS.iter().map(|c| c.message_id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(before, ids.len(), "two channels share a message identifier");
+    }
+
+    /// The default channel must be one that works without the operator changing anything, and the
+    /// ETWS test channel must not be it — that inversion is the defect this catalogue repairs.
+    #[test]
+    fn the_default_channel_needs_no_operator_action() {
+        let default = default_alert_channel();
+        assert!(
+            default.enabled_by_default,
+            "the default channel must be on for an unconfigured device"
+        );
+        assert_ne!(
+            default.message_id, MESSAGE_ID_ETWS_TEST,
+            "0x1103 is disabled unless testing mode is on; it must not be the default"
+        );
+    }
+
+    /// `isChannelEnabled` in `CellBroadcastAlertService` gates these four channels differently, and
+    /// the differences are recorded here so a future edit cannot quietly lose one.
+    #[test]
+    fn the_catalogue_records_the_as_p_is_channel_enabled_gates() {
+        let etws = alert_channel(MESSAGE_ID_ETWS_EARTHQUAKE).expect("0x1100 is catalogued");
+        assert!(etws.enabled_by_default);
+        assert_eq!(etws.gate, "master toggle only");
+
+        let extreme = alert_channel(0x1113).expect("0x1113 is catalogued");
+        assert!(extreme.enabled_by_default);
+        assert!(extreme.gate.contains("EXTREME"));
+
+        let monthly = alert_channel(0x111C).expect("0x111C is catalogued");
+        assert!(!monthly.enabled_by_default);
+        assert!(monthly.gate.contains("TEST_ALERTS"));
+
+        let etws_test = alert_channel(MESSAGE_ID_ETWS_TEST).expect("0x1103 is catalogued");
+        assert!(!etws_test.enabled_by_default);
+        assert!(
+            etws_test.gate.contains("testing mode"),
+            "0x1103 additionally requires testing mode; the gate text must say so"
+        );
+    }
+
+    /// An unregistered identifier must be refused rather than encoded, so a PDU can never be built
+    /// for a channel whose receive-side gate nobody has checked.
+    #[test]
+    fn an_uncatalogued_channel_cannot_be_encoded() {
+        let err = cb_pdu(0x9999, "TEST whatever", 0).expect_err("0x9999 is not catalogued");
+        assert!(err.contains("0x9999"), "the error must name the identifier: {err}");
+    }
+
+    /// The channel identifier must land in the header where `SmsCbHeader` reads the message
+    /// identifier, and the body must still round-trip.
+    #[test]
+    fn a_non_default_channel_encodes_into_the_header() {
+        for channel in ALERT_CHANNELS {
+            let body = "TEST CHANNEL ROUTING";
+            let pdu = cb_pdu(channel.message_id, body, 0x0042)
+                .unwrap_or_else(|e| panic!("0x{:04X} must encode: {e}", channel.message_id));
+            let header = parse_cb_header(&pdu).expect("built pdu has a header");
+            assert_eq!(header.message_id, channel.message_id);
+            assert_eq!(header.serial_number, 0x0042);
+            assert_eq!(header.data_coding_scheme, DCS_GSM7);
+            assert_eq!(decode_body(&pdu, body.len()), body);
+        }
+    }
+
+    /// The reconstructed PDU for the ETWS test channel must be byte-identical to the previous
+    /// single-channel builder, so the refactor is provably behaviour-preserving for that channel.
+    #[test]
+    fn the_refactor_preserved_the_etws_test_encoding() {
+        let body = "TEST ALERT - SIMULATION";
+        let via_legacy = etws_test_pdu(body, 0x1234).expect("legacy path encodes");
+        let via_catalogue = cb_pdu(MESSAGE_ID_ETWS_TEST, body, 0x1234).expect("catalogue encodes");
+        assert_eq!(via_legacy, via_catalogue);
+        assert_eq!(&via_catalogue[..6], &[0x12, 0x34, 0x11, 0x03, 0x11, 0x01]);
     }
 
     // -----------------------------------------------------------------------------------------

@@ -3,7 +3,67 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status — proposed native trigger sequence, tested and refused (2026-09-23, later)
+## Current status — the receive-side channel gate, found and fixed (2026-09-21)
+
+### What happened
+
+The controller always emitted message identifier `0x1103`, the ETWS test channel, and the interface
+presented it as locked. Checking the *receive* side of AOSP — which this project had never done,
+because the injection entry point was the whole of the send path — showed that
+`CellBroadcastAlertService.isChannelEnabled` consults a **different user preference per channel**, and
+that `0x1103` is off on a device nobody has configured.
+
+The failure was therefore the quiet instance of the project's recurring pattern: a well-formed PDU, an
+`am` exit of 0, a receiver that really fires, a message that really reaches the alert service — and
+then a filter that discards it. The tool was not lying (it reported `UNCERTAIN`), but it pointed the
+operator at the one channel that could not work until they found a settings toggle it never named.
+
+### What is now in the code
+
+* **`ALERT_CHANNELS`** in `platform.rs`: each channel carries its identifier, the AOSP gate it is
+  subject to, whether it is on by default, and what the operator must change. Five entries:
+  `0x1100`, `0x1101`, `0x1113`, `0x111C`, `0x1103`.
+* **`cb_pdu(message_id, body, serial)`** refuses any identifier not in the catalogue, so a PDU cannot
+  be built for a channel whose gating nobody has checked. `etws_test_pdu` is kept as the `0x1103`
+  case with an identical byte output.
+* **Default is now `0x1100`** (ETWS primary), which needs no setup, instead of `0x1103`.
+* **`list_alert_channels`** exposes the catalogue to the interface, which renders a channel selector
+  and states the gate for the selected channel in the confirmation dialog. One table, one owner.
+
+### Ten tests now guard it
+
+`an_uncatalogued_channel_cannot_be_encoded`, `the_default_channel_needs_no_operator_action`,
+`the_catalogue_records_the_as_p_is_channel_enabled_gates`,
+`the_requirement_text_matches_the_default_state`, `every_channel_is_self_describing`,
+`channel_identifiers_are_unique`, `a_non_default_channel_encodes_into_the_header`,
+`the_refactor_preserved_the_etws_test_encoding`, plus the pre-existing PDU vectors.
+
+`docs/stock-device/alert-channel-gating.md` is the full write-up. `docs/bugs/BUG-026` records it as a
+defect.
+
+### The honest boundary, unchanged
+
+This does **not** create a stock-device path. `0x1100` is reachable only through the telephony test
+receiver, gated on `ro.debuggable=1`, exactly as before. Two things remain `UNKNOWN` and are recorded
+as such rather than guessed:
+
+1. **Whether the A35 is in testing mode.** `CellBroadcastReceiver:195` admits the `2627` code when
+   `ro.debuggable=1` **or** `allow_testing_mode_on_user_build` is set. The flag defaults to `true` in
+   `config.xml`, but it is **not** in `overlayable.xml` (count 0), so there is no basis for claiming
+   Samsung overlays it. Only `dumpsys activity broadcasts` on the handset can settle it.
+2. **Whether the A35 provides Cell Broadcast from a Samsung package.** If
+   `com.samsung.android.cellbroadcastreceiver` is the provider rather than the Google one, the
+   catalogue's gating claim does not automatically transfer. The read-only probe reports which package
+   exists; no name is assumed.
+
+### Gates
+
+All green: `check_actions` (+ `--self-test`), `check_read_only`, `check_paste_ps1`, the UI layout
+gate (`npm run test:ui`), embedded-JavaScript syntax, and 67/67 `platform.rs` unit tests.
+
+---
+
+## Prior status — proposed native trigger sequence, tested and refused (2026-09-23, later)
 
 ### What happened
 

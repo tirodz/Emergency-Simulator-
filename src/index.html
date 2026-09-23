@@ -185,7 +185,8 @@ html[data-theme="light"]{--bg:#d9e1dc;--bg2:#ccd6d0;--glass:rgba(246,249,247,.62
     <section class="glass card rise r4"><div class="title-row"><div><div class="title">Test alert</div><div class="kicker">Android protected test pipeline</div></div><div class="badge warn"><span class="dot amber"></span><strong>ETWS TEST</strong></div></div>
       <div class="label"><span>Target device</span><small id="targetHint">Select a device</small></div><select id="targetSelect" class="select"></select>
       <div class="divider"></div>
-      <div class="metrics"><div class="metric"><div class="metric-label">Type</div><div class="metric-value" style="font-size:14px;letter-spacing:0">ETWS TEST</div><div class="metric-sub">Fixed safe class</div></div><div class="metric"><div class="metric-label">Channel</div><div class="metric-value">4355</div><div class="metric-sub">0x1103 · locked</div></div><div class="metric"><div class="metric-label">Transport</div><div class="metric-value" style="font-size:14px;letter-spacing:0">LOCAL</div><div class="metric-sub">ADB → Android</div></div></div>
+      <div class="metrics"><div class="metric"><div class="metric-label">Type</div><div class="metric-value" style="font-size:14px;letter-spacing:0">ETWS TEST</div><div class="metric-sub">Fixed safe class</div></div><div class="metric"><div class="metric-label">Channel</div><div class="metric-value" id="channelMetric">—</div><div class="metric-sub" id="channelMetricSub">loading catalogue</div></div><div class="metric"><div class="metric-label">Transport</div><div class="metric-value" style="font-size:14px;letter-spacing:0">LOCAL</div><div class="metric-sub">ADB → Android</div></div></div>
+      <div class="label"><span>Alert channel</span><small id="channelGateHint">Receive-side gate</small></div><select id="channelSelect" class="select"></select><div id="channelNote" class="validation">Loading the channel catalogue…</div>
       <div style="height:14px"></div><div class="label"><span>Message</span><small>Must begin with TEST</small></div><textarea id="message" class="textarea" maxlength="300">TEST ALERT - SIMULATION</textarea><div id="validation" class="validation">Use a visible TEST prefix so the alert is always identifiable as a simulation.</div>
       <div class="chips"><div class="tiny green"><strong>Protected</strong> broadcast path</div><div class="tiny"><strong>System UI</strong> handles display</div><div class="tiny"><strong>No RF</strong> involved</div></div>
       <div class="actions action-main"><button id="settingsDeviceBtn" class="btn quiet" disabled>INSTALL LOCAL SIMULATOR</button><button id="sendBtn" class="btn primary" disabled><svg viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6.5 11.5 12 6l5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span>SEND TEST ALERT</span></button><button id="dryBtn" class="btn quiet" disabled>DRY RUN</button></div>
@@ -224,7 +225,7 @@ html[data-theme="light"]{--bg:#d9e1dc;--bg2:#ccd6d0;--glass:rgba(246,249,247,.62
 "use strict";
 const unavailable=()=>Promise.reject(new Error("Tauri runtime is not available. Launch the packaged desktop application."));
 const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)?window.__TAURI__.core.invoke:unavailable;
-const state={devices:[],selected:null,sending:false,theme:localStorage.getItem("es-theme")||"oled",accent:"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
+const state={devices:[],selected:null,sending:false,channels:[],channel:Number(localStorage.getItem("es-channel"))||0x1100,theme:localStorage.getItem("es-theme")||"oled",accent:"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
 const $=id=>document.getElementById(id);
 function now(){return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
 function esc(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
@@ -356,7 +357,46 @@ function selectedDevice(){return state.devices.find(d=>d.serial===state.selected
   }
 }
 function validate(){const b=$("message").value.trim().replace(/\s+/g," ");const v=$("validation");if(!b){v.textContent="Empty message will use TEST ALERT - SIMULATION.";v.className="validation";return true}if(!b.startsWith("TEST")){v.textContent="Blocked: the message must begin with TEST.";v.className="validation error";return false}if(b.length>300){v.textContent="Blocked: message is longer than 300 characters.";v.className="validation error";return false}v.textContent="Valid test message · "+b.length+"/300 characters.";v.className="validation ok";return true}
-function openConfirm(){const d=selected();if(!d||!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED"))return;const platform=modeIsCellBroadcast(d);$("confirmText").textContent=platform?"Send one ETWS TEST Cell Broadcast to "+deviceLabel(d)+" through the AOSP telephony test entry point (ro.debuggable=1). The message is built as a 3GPP TS 23.041 PDU with message identifier 0x1103, the ETWS test channel. Delivery is only claimed if downstream log evidence follows. No cellular transmission or RF operation is performed.":(d.state==="NO_ROOT"||d.state==="UNSUPPORTED")?"The desktop will install the bundled local alert simulator on "+deviceLabel(d)+" and send one local alert simulation through its notification, sound, vibration and full-screen UI. This is a local app notification, not a Cell Broadcast, and it will not look like an emergency alert. No root, cellular transmission or RF operation is used.":d.state==="SIMULATOR_READY"?"Send one local alert simulation to "+deviceLabel(d)+" using the bundled Android receiver, notification, sound, vibration and full-screen UI. This is not a Cell Broadcast. No cellular transmission or RF operation is performed.":"Send one ETWS TEST message to "+deviceLabel(d)+". Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.";$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
+/* The alert-channel catalogue, loaded from the backend rather than duplicated here. The backend
+   owns the table because it also owns the encoder, and two copies would eventually disagree.
+   The catalogue is not cosmetic: AOSP's CellBroadcastAlertService.isChannelEnabled consults a
+   different user preference per channel, and the ETWS test channel that used to be the only option
+   is off unless the phone is in testing mode. */
+async function loadChannels(){
+ try{
+  state.channels=await invoke("list_alert_channels")||[];
+ }catch(e){
+  state.channels=[];
+  $("channelNote").textContent="Channel catalogue unavailable: "+String(e?.message||e);
+  $("channelNote").className="validation error";
+  return;
+ }
+ const sel=$("channelSelect");
+ sel.innerHTML=state.channels.map(c=>`<option value="${c.message_id}">${c.label}${c.enabled_by_default?"":" — needs setup"}</option>`).join("");
+ if(!state.channels.some(c=>String(c.message_id)===String(state.channel))){
+  const first=state.channels.find(c=>c.enabled_by_default)||state.channels[0];
+  state.channel=first?first.message_id:0x1100;
+ }
+ sel.value=String(state.channel);
+ sel.onchange=()=>{state.channel=Number(sel.value);renderChannel()};
+ renderChannel();
+}
+function selectedChannel(){return state.channels.find(c=>c.message_id===state.channel)||null}
+function renderChannel(){
+ const c=selectedChannel(),note=$("channelNote");
+ if(!c){note.textContent="No channel selected.";note.className="validation";return}
+ if(c.message_id)localStorage.setItem("es-channel",String(c.message_id));
+ $("channelMetric").textContent="0x"+c.message_id.toString(16).toUpperCase().padStart(4,"0");
+ $("channelMetricSub").textContent=(c.enabled_by_default?"default ON":"default OFF")+" · "+c.message_id;
+ $("channelGateHint").textContent=c.gate;
+ const verdict=c.enabled_by_default
+  ?"On a default device this alert arrives with no setup."
+  :"Off by default — "+c.requirement;
+ note.textContent=`0x${c.message_id.toString(16).toUpperCase().padStart(4,"0")} · ${c.effect} ${verdict}`;
+ note.className=c.enabled_by_default?"validation ok":"validation";
+ log(`Channel 0x${c.message_id.toString(16).toUpperCase().padStart(4,"0")} · ${c.enabled_by_default?"enabled by default":"requires setup"}`,"info");
+}
+function openConfirm(){const d=selected();if(!d||!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED"))return;const platform=modeIsCellBroadcast(d);const c=selectedChannel();const ch=c?`0x${c.message_id.toString(16).toUpperCase().padStart(4,"0")} (${c.label})`:"the default channel";const gate=c?(c.enabled_by_default?"This channel is enabled by default, so no settings change is needed.":`This channel is disabled by default: ${c.requirement}`):"";$("confirmText").textContent=platform?`Send one Cell Broadcast to ${deviceLabel(d)} through the AOSP telephony test entry point (ro.debuggable=1). The message is built as a 3GPP TS 23.041 PDU with message identifier ${ch}. ${gate} Delivery is only claimed if downstream log evidence follows. No cellular transmission or RF operation is performed.`:(d.state==="NO_ROOT"||d.state==="UNSUPPORTED")?`The desktop will install the bundled local alert simulator on ${deviceLabel(d)} and send one local alert simulation through its notification, sound, vibration and full-screen UI. This is a local app notification, not a Cell Broadcast, and it will not look like an emergency alert. No root, cellular transmission or RF operation is used.`:d.state==="SIMULATOR_READY"?`Send one local alert simulation to ${deviceLabel(d)} using the bundled Android receiver, notification, sound, vibration and full-screen UI. This is not a Cell Broadcast. No cellular transmission or RF operation is performed.`:`Send one test message to ${deviceLabel(d)}. Android will process it through its protected CellBroadcast path. No cellular transmission or RF operation is performed.`;$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
 function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
 async function runSend(dry){if(!validate())return;const d=selected();if(!d)return;if(!dry&&!(d.state==="READY"||d.state==="SIMULATOR_READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED")){toast("Authorize the device before sending.","error");return}
  state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing controlled test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{
@@ -367,7 +407,7 @@ async function runSend(dry){if(!validate())return;const d=selected();if(!d)retur
   const platform=modeIsCellBroadcast(d);
   if(platform&&!dry){
    log("Using the AOSP platform test path (ro.debuggable=1)");
-   const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value});
+   const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value,channel:state.channel});
    if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:d.local_simulator,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
    showResult(r);return;
   }
@@ -475,6 +515,7 @@ async function init(){
  $("minBtn").onclick=()=>invoke("window_minimize");$("maxBtn").onclick=()=>invoke("window_toggle_maximize");$("closeBtn").onclick=()=>invoke("window_close");
  if(window.__TAURI__&&window.__TAURI__.event&&window.__TAURI__.event.listen){await window.__TAURI__.event.listen("activity",e=>{const p=e?.payload;if(p?.message)log(p.message,p.kind||"info")})}
  try{const info=await invoke("app_info");$("adbStatus").textContent=info?.adb_source||"BUNDLED";log("Tauri desktop runtime ready · Rust controller online","ok")}catch(e){$("fatalText").textContent=String(e?.message||e);$("fatal").classList.add("show");return}
+ await loadChannels();
  await refresh();document.body.classList.add("view-overview");setInterval(refresh,5000)
 }
 init();
