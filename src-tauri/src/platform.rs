@@ -211,6 +211,12 @@ pub enum CapabilityStage {
     /// **not** `SystemUiReached`: the receiver running is not the UI being presented, and the old
     /// mapping jumped that gap.
     ReceiverProcessed,
+    /// The alert service started on the Cell-Broadcast action.
+    ///
+    /// This is the point the message enters `CellBroadcastAlertService`. It is still *not* delivery:
+    /// the service's channel-range, testing-mode and language checks run after it starts, which is
+    /// exactly why the suppression markers are consulted before this stage is reported as success.
+    AlertServiceReached,
     /// Downstream evidence shows Android's own alert UI was requested.
     SystemUiReached,
 }
@@ -225,9 +231,102 @@ impl CapabilityStage {
             CapabilityStage::TestEntryPointAccepted => "TEST ENTRY POINT ACCEPTED",
             CapabilityStage::CellBroadcastServiceReached => "CB SERVICE REACHED",
             CapabilityStage::ReceiverProcessed => "CB RECEIVER PROCESSED",
-            CapabilityStage::SystemUiReached => "SYSTEM UI REACHED",
+            CapabilityStage::AlertServiceReached => "ALERT SERVICE REACHED",
+            CapabilityStage::SystemUiReached => "NATIVE ALERT PRESENTED",
         }
     }
+}
+
+/// The ordered stages a single send is judged against, named for the verification ladder.
+///
+/// This is a separate, finer-grained ladder than [`CapabilityStage`]: [`CapabilityStage`] answers
+/// "what can this device do in general", and this answers "what did this one attempt actually
+/// achieve". The distinction matters for the honesty rule -- a run stops at the first stage it
+/// cannot prove and is reported as `FAILED` or `UNKNOWN` there, never as `SUCCESS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum VerificationStage {
+    DeviceConnected,
+    DeviceIdentified,
+    CapabilitiesDetected,
+    NativePathSelected,
+    LoggingArmed,
+    TriggerSent,
+    TelephonyActivityDetected,
+    CellBroadcastProcessingDetected,
+    AlertServiceDetected,
+    NativeAlertDetected,
+    Success,
+}
+
+/// One rung of the ladder, with the log evidence that would prove it.
+pub struct VerificationRung {
+    pub stage: VerificationStage,
+    pub label: &'static str,
+    /// The evidence that must be present for this rung to count as reached.
+    pub requires: &'static str,
+}
+
+/// The full ladder, in order. A caller walks it and stops at the first rung it cannot evidence.
+pub fn verification_ladder() -> Vec<VerificationRung> {
+    use VerificationStage::*;
+    vec![
+        VerificationRung {
+            stage: DeviceConnected,
+            label: "DEVICE_CONNECTED",
+            requires: "adb reports the device as `device`",
+        },
+        VerificationRung {
+            stage: DeviceIdentified,
+            label: "DEVICE_IDENTIFIED",
+            requires: "model, build fingerprint and ro.debuggable were read",
+        },
+        VerificationRung {
+            stage: CapabilitiesDetected,
+            label: "CAPABILITIES_DETECTED",
+            requires: "a Cell Broadcast receiver package was found and its manifest read",
+        },
+        VerificationRung {
+            stage: NativePathSelected,
+            label: "NATIVE_PATH_SELECTED",
+            requires: "the native test path or a named native alert action was chosen for this build",
+        },
+        VerificationRung {
+            stage: LoggingArmed,
+            label: "LOGGING_ARMED",
+            requires: "logcat was cleared immediately before the trigger",
+        },
+        VerificationRung {
+            stage: TriggerSent,
+            label: "TRIGGER_SENT",
+            requires: "the trigger left the desktop and the transport did not fail",
+        },
+        VerificationRung {
+            stage: TelephonyActivityDetected,
+            label: "TELEPHONY_ACTIVITY_DETECTED",
+            requires: "the telephony test receiver logged receiving the intent",
+        },
+        VerificationRung {
+            stage: CellBroadcastProcessingDetected,
+            label: "CELL_BROADCAST_PROCESSING_DETECTED",
+            requires: "the Cell Broadcast service/handler logged processing the message",
+        },
+        VerificationRung {
+            stage: AlertServiceDetected,
+            label: "ALERT_SERVICE_DETECTED",
+            requires: "CellBroadcastAlertService logged starting on the Cell-Broadcast action",
+        },
+        VerificationRung {
+            stage: NativeAlertDetected,
+            label: "NATIVE_ALERT_DETECTED",
+            requires: "the platform logged selecting the native alert presentation",
+        },
+        VerificationRung {
+            stage: Success,
+            label: "SUCCESS",
+            requires: "NATIVE_ALERT_DETECTED with no suppression marker in the capture",
+        },
+    ]
 }
 
 /// The alert paths this controller can take.
@@ -690,6 +789,316 @@ pub fn entry_point_summary() -> String {
         protected,
         other,
         reachable.len()
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
+// The interface classes that are NOT a broadcast
+// ---------------------------------------------------------------------------------------------
+//
+// Everything above enumerates *broadcast* candidates. That enumeration is complete and it is also
+// not the whole answer, because the alert pipeline has a second kind of entry: a Binder call into
+// the Cell Broadcast service module. The previous pass stopped at the broadcast layer and therefore
+// reported the reachable set as "the telephony test receivers", which is true only of broadcasts.
+//
+// This section walks the classes the broadcast matrix does not cover -- shell commands, Binder
+// transactions, system_server services, content-provider calls, exported OEM components -- and
+// records each one's verdict with the reason. It is deliberately an enumeration rather than a
+// conclusion: the point is that each interface fails, or does not fail, for its own stated reason.
+
+/// What kind of interface a candidate is, so a reader can see the classes were covered exhaustively
+/// rather than only the ones that came to mind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InterfaceClass {
+    /// A `cmd <service> <verb>` shell command, i.e. a `ShellCommand` subclass on a system service.
+    ShellCommand,
+    /// An AIDL/Binder method on a system service, reachable by any process that can `getService`.
+    BinderService,
+    /// A `content://` provider `call()` or a write into a provider.
+    ContentProvider,
+    /// A Binder method on the platform's `ITelephony` (the `phone` service).
+    TelephonyBinder,
+    /// An OEM (Samsung) component: activity, service, receiver or provider.
+    OemComponent,
+    /// A property, dialer code or preference that only changes state.
+    StateOnly,
+}
+
+/// Why an interface cannot drive the alert pipeline. The variants are the *actual* mechanisms found
+/// in the A35 firmware and AOSP, not a generic taxonomy.
+///
+/// There is deliberately no `Reachable` variant: every non-broadcast interface class was walked and
+/// none of them can carry a message into the pipeline. Adding one back would require a row that
+/// proves it, and the survey's own test asserts the gated set is exactly the ICellBroadcastService
+/// handlers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InterfaceOutcome {
+    /// The method exists but is permission-gated to a signature/system UID that adb shell does not
+    /// hold, and no permission can be granted to shell to fix it.
+    SignatureGate,
+    /// Reachable, but its input can only configure, filter or read. It cannot construct a message.
+    ConfigOnly,
+    /// The interface does not exist in this build at all.
+    Absent,
+    /// The method *does* construct an `SmsCbMessage` and *does* feed the real alert service, and the
+    /// only thing standing in the way is a build property rather than a permission.
+    BuildPropertyGate,
+}
+
+impl InterfaceOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            InterfaceOutcome::SignatureGate => "SIGNATURE GATE",
+            InterfaceOutcome::ConfigOnly => "CONFIG ONLY",
+            InterfaceOutcome::Absent => "ABSENT",
+            InterfaceOutcome::BuildPropertyGate => "BUILD-PROPERTY GATE",
+        }
+    }
+}
+
+/// One non-broadcast interface into (or beside) the Cell Broadcast machinery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InterfaceCandidate {
+    pub class: InterfaceClass,
+    /// The concrete interface: a command verb, a Binder method, a component name.
+    pub interface: &'static str,
+    pub outcome: InterfaceOutcome,
+    /// The single most important fact about it, in one line.
+    pub note: &'static str,
+}
+
+/// Every non-broadcast interface class that could plausibly reach the alert pipeline, and its
+/// verdict. Ordered by class so the enumeration reads as a survey.
+///
+/// The reason this exists as data rather than prose is the same reason [`entry_points`] does: the
+/// summary is generated from it, so a claim cannot drift away from the row that supports it.
+pub fn interface_candidates() -> Vec<InterfaceCandidate> {
+    let row = |class, interface, outcome, note| InterfaceCandidate {
+        class,
+        interface,
+        outcome,
+        note,
+    };
+    vec![
+        // -- The shell-command layer ---------------------------------------------------------
+        row(
+            InterfaceClass::ShellCommand,
+            "cmd phone  (TelephonyShellCommand verbs)",
+            InterfaceOutcome::ConfigOnly,
+            "The full verb list was read out of TeleService.apk: ims, uce, cc, gba, src, d2d, \
+             data, radio, euicc, barring, emergency-number-test-mode, emergency-callback-mode, \
+             thermal-mitigation, restart-modem, unattended-reboot, get-imei, numverify. Not one \
+             verb constructs an SmsCbMessage or calls the alert service; they configure or query.",
+        ),
+        row(
+            InterfaceClass::ShellCommand,
+            "cmd phone radio set-modem-service <name>",
+            InterfaceOutcome::Absent,
+            "The only verb that could replay radio events, including broadcast SMS, through the \
+             real mCi path -- MockModemService replays RIL events. It is unusable here: selecting \
+             it calls ITelephony.setModemService, which is enforced on the signature permission \
+             android.permission.MODIFY_PHONE_STATE, and the com.android.telephony.mockmodem \
+             package that would implement the service is not present in the A35 image.",
+        ),
+        row(
+            InterfaceClass::ShellCommand,
+            "cmd phone carrier_restriction_status_test",
+            InterfaceOutcome::ConfigOnly,
+            "Present, but gated on the MockModem service being the active modem service, and it \
+             only rewrites the carrier allow-list JSON. Not an injector.",
+        ),
+        row(
+            InterfaceClass::ShellCommand,
+            "cmd cellbroadcast  (any verb)",
+            InterfaceOutcome::Absent,
+            "The Cell Broadcast service module implements no ShellCommand at all: \
+             DefaultCellBroadcastService has onGsmCellBroadcastSms / onCdmaCellBroadcastSms / \
+             onCdmaScpMessage / getCellBroadcastAreaInfo and a dump(), and nothing else. There is \
+             no command surface to find.",
+        ),
+        row(
+            InterfaceClass::ShellCommand,
+            "cmd activity / cmd package / cmd carrier_config",
+            InterfaceOutcome::ConfigOnly,
+            "Surveyed for test or injection verbs. carrier_config sets and reads carrier \
+             configuration; activity and package manipulate components. None produces telephony \
+             data.",
+        ),
+        // -- Binder services ------------------------------------------------------------------
+        row(
+            InterfaceClass::BinderService,
+            "android.telephony.ICellBroadcastService.handleGsmCellBroadcastSms(phoneId, byte[])",
+            InterfaceOutcome::BuildPropertyGate,
+            "This is the real thing: the method the framework calls with a raw GSM broadcast PDU, \
+             which decodes it into an SmsCbMessage and hands it to the genuine alert service. \
+             Two routes reach it. The first is the telephony test receiver, registered only when \
+             ro.debuggable=1. The second is mCi.setOnNewGsmBroadcastSms, the radio callback, and \
+             adb shell has no way to raise a radio event without the MockModem service above. \
+             Binding the service directly needs the signature permission \
+             android.permission.BIND_CELL_BROADCAST_SERVICE.",
+        ),
+        row(
+            InterfaceClass::BinderService,
+            "android.telephony.ICellBroadcastService.handleCdmaCellBroadcastSms / handleCdmaScpMessage",
+            InterfaceOutcome::BuildPropertyGate,
+            "Same shape as the GSM method and the same two routes, with the same gate.",
+        ),
+        row(
+            InterfaceClass::BinderService,
+            "DefaultCellBroadcastService.dump()",
+            InterfaceOutcome::ConfigOnly,
+            "Reachable via `dumpsys`, and read-only: it prints the default CB receiver package and \
+             the handlers' local logs.",
+        ),
+        row(
+            InterfaceClass::ContentProvider,
+            "com.android.cellbroadcastservice.CellBroadcastProvider (query/insert/update/delete)",
+            InterfaceOutcome::ConfigOnly,
+            "Implements query/insert/update/delete over the message history and no call(). \
+             A write would create a history row, not an alert — the row is written downstream of \
+             the alert path, by GsmCellBroadcastHandler.handleBroadcastSms.",
+        ),
+        // -- The platform ITelephony service --------------------------------------------------
+        row(
+            InterfaceClass::TelephonyBinder,
+            "ITelephony.getCellBroadcastIdRanges / setCellBroadcastIdRanges",
+            InterfaceOutcome::SignatureGate,
+            "The only Cell Broadcast methods on the phone service. Both enforce \
+             android.permission.MODIFY_CELL_BROADCASTS, a signature permission, and both only \
+             configure which channel ranges are enabled. They cannot carry a message.",
+        ),
+        row(
+            InterfaceClass::TelephonyBinder,
+            "ITelephony.updateEmergencyNumberListTestMode",
+            InterfaceOutcome::SignatureGate,
+            "A genuine test-mode setter, but it manipulates the emergency *number* database, not \
+             Cell Broadcast, and it is permission-gated.",
+        ),
+        row(
+            InterfaceClass::TelephonyBinder,
+            "ITelephony.getEmergencyCallbackMode / startEmergencyCallbackMode",
+            InterfaceOutcome::SignatureGate,
+            "Emergency-related, unrelated to Cell Broadcast, and signature-gated.",
+        ),
+        // -- system_server --------------------------------------------------------------------
+        row(
+            InterfaceClass::BinderService,
+            "system_server: CellBroadcastObserver (com.att.iqi)",
+            InterfaceOutcome::ConfigOnly,
+            "The one place services.jar touches SmsCbMessage. It is an observer that reports CB \
+             activity to the AT&T IQI diagnostics library; it consumes messages and cannot \
+             originate one.",
+        ),
+        row(
+            InterfaceClass::BinderService,
+            "system_server: any service publishing a CB injection method",
+            InterfaceOutcome::Absent,
+            "A sweep of services.jar for SmsCbMessage construction and for the alert actions found \
+             no producer. The single SmsCbMessage reference in services.jar is the AT&T observer \
+             above.",
+        ),
+        // -- OEM components -------------------------------------------------------------------
+        row(
+            InterfaceClass::OemComponent,
+            "com.sec.bcservice (BCService)",
+            InterfaceOutcome::ConfigOnly,
+            "Named BC, is not Cell Broadcast. A tcpdump/issue-tracker logging service on a unix \
+             socket; its only action is com.sec.android.ISSUE_TRACKER_ONOFF, signatureOrSystem.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "com.sec.android.app.parser (DRParser) *#*#2627#*#*",
+            InterfaceOutcome::ConfigOnly,
+            "The keystring router. It rewrites 2627 to the protected SECRET_CODE broadcast, whose \
+             handler only flips the testing-mode display filter. It never constructs a message.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "com.android.providers.telephony (SecTelephonyProvider) #CMAS# rows",
+            InterfaceOutcome::ConfigOnly,
+            "Samsung stores emergency alerts as SMS rows whose address is '#CMAS#' / '#CMAS#Test' / \
+             '#Emergency Alert#Amber', with the literal cmas table and address LIKE '#CMAS#%' \
+             cleanup. These are the SMS database's representation of an alert, written by the \
+             alert path. There is no exporter that turns a caller-supplied row into an alert.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "com.samsung.android.telephony.SemSmsCbMessage",
+            InterfaceOutcome::ConfigOnly,
+            "A read-only Parcelable wrapper over SmsCbMessage: every method is a getter.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "SecFactoryPhoneTest / ModemServiceMode / serviceModeApp_FB / FactoryTestProvider / SVCAgent",
+            InterfaceOutcome::ConfigOnly,
+            "Test activities, RMS and keystring interfaces, provider reads. None constructs an \
+             SmsCbMessage or calls CellBroadcastAlertService.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "com.sec.android.emergencylauncher (EmergencyLauncher)",
+            InterfaceOutcome::ConfigOnly,
+            "Listens for the ETWS state flag to raise the emergency UI. A consumer of an alert that \
+             already arrived, not a producer.",
+        ),
+        row(
+            InterfaceClass::OemComponent,
+            "com.samsung.rmt_exercise",
+            InterfaceOutcome::Absent,
+            "Does not exist in this build. It was the most plausible OEM remote-exercise injector \
+             and it is not shipped.",
+        ),
+        // -- State-only surfaces --------------------------------------------------------------
+        row(
+            InterfaceClass::StateOnly,
+            "persist.cellbroadcast.message_filter",
+            InterfaceOutcome::ConfigOnly,
+            "Documented 'for testing use' and it only removes messages from consideration. It \
+             cannot add one, and persist.* is not writable by shell.",
+        ),
+        row(
+            InterfaceClass::StateOnly,
+            "Settings.Global CELL_BROADCAST_TEST_ALERT_ENABLED / Samsung siminfo toggles",
+            InterfaceOutcome::ConfigOnly,
+            "enable_cmas_test_alerts and enable_etws_test_alerts are receive-side display \
+             preferences consulted when a message has already arrived.",
+        ),
+    ]
+}
+
+/// The candidates whose only obstacle is a build property rather than a permission.
+///
+/// This is the set that matters for the product: these are the interfaces that would work on a
+/// `userdebug` device, and they are the ones the trigger engine targets.
+pub fn property_gated_injectors() -> Vec<InterfaceCandidate> {
+    interface_candidates()
+        .into_iter()
+        .filter(|candidate| candidate.outcome == InterfaceOutcome::BuildPropertyGate)
+        .collect()
+}
+
+/// A sentence stating the non-broadcast surface, generated from [`interface_candidates`].
+pub fn interface_summary() -> String {
+    let all = interface_candidates();
+    let count = |outcome: InterfaceOutcome| all.iter().filter(|c| c.outcome == outcome).count();
+    let absent = count(InterfaceOutcome::Absent);
+    let gated = count(InterfaceOutcome::BuildPropertyGate);
+    let config = count(InterfaceOutcome::ConfigOnly);
+    let signature = count(InterfaceOutcome::SignatureGate);
+    format!(
+        "{} non-broadcast interfaces were enumerated across the shell-command layer, Binder \
+         services, the platform ITelephony service, system_server and the OEM components. {} are \
+         absent from the A35 build (including any `cmd cellbroadcast` verb and the MockModem \
+         service), {} are behind a signature permission, and {} only configure, filter or read. \
+         {} -- the ICellBroadcastService handlers -- do construct an SmsCbMessage and do feed the \
+         genuine alert service, and the only thing standing in front of them is ro.debuggable.",
+        all.len(),
+        absent,
+        signature,
+        config,
+        gated
     )
 }
 
@@ -1170,6 +1579,12 @@ pub struct PlatformEvidence {
     pub service_reached: bool,
     /// The Cell Broadcast receiver ran.
     pub receiver_processed: bool,
+    /// `CellBroadcastAlertService` started on a Cell-Broadcast action.
+    ///
+    /// Distinct from `alert_ui_requested`: the service starting means the message entered the alert
+    /// service, where the channel-range, testing-mode and language gates run. Claiming the UI from
+    /// this would skip exactly the step that most often drops a test alert.
+    pub alert_service_started: bool,
     /// Android requested its own alert UI.
     pub alert_ui_requested: bool,
     /// A log line shows the platform *deliberately dropped* the message, and why.
@@ -1228,14 +1643,27 @@ pub enum SuppressionGate {
 
 impl PlatformEvidence {
     /// The strongest stage this evidence supports, and nothing stronger.
+    ///
+    /// The ladder here is deliberately longer than the number of boolean fields: an alert service
+    /// that started on a Cell-Broadcast action is a stronger claim than the receiver running, and a
+    /// message the platform *deliberately dropped* is a different claim again. Reporting the drop as
+    /// "the UI was reached" would be the false-success shape this project exists to catch.
     pub fn stage(&self) -> CapabilityStage {
+        if self.was_suppressed() {
+            // The message reached the alert service and the platform then discarded it. That is
+            // strictly more than "the receiver ran" and strictly less than "the UI appeared", and
+            // since the platform told us which gate closed, it belongs at the alert-service rung.
+            return CapabilityStage::AlertServiceReached;
+        }
         if self.alert_ui_requested {
             CapabilityStage::SystemUiReached
+        } else if self.alert_service_started {
+            CapabilityStage::AlertServiceReached
         } else if self.receiver_processed {
             CapabilityStage::ReceiverProcessed
         } else if self.service_reached {
             CapabilityStage::CellBroadcastServiceReached
-        } else if self.test_receiver_accepted {
+        } else if self.message_constructed || self.test_receiver_accepted {
             CapabilityStage::TestEntryPointAccepted
         } else {
             CapabilityStage::TestEntryPointDiscovered
@@ -1248,6 +1676,7 @@ impl PlatformEvidence {
             || self.message_constructed
             || self.service_reached
             || self.receiver_processed
+            || self.alert_service_started
             || self.alert_ui_requested
     }
 
@@ -1258,6 +1687,30 @@ impl PlatformEvidence {
     /// device was most explicit about.
     pub fn was_suppressed(&self) -> bool {
         self.suppression.is_some()
+    }
+
+    /// The strongest rung of [`VerificationStage`] this capture proves, and nothing stronger.
+    ///
+    /// A suppressed run can never reach [`VerificationStage::Success`]: the platform told us the
+    /// message arrived and that it was then dropped, so the honest answer is that the alert
+    /// pipeline ran up to the gate and stopped there.
+    pub fn verification_stage(&self) -> VerificationStage {
+        if self.was_suppressed() {
+            return VerificationStage::AlertServiceDetected;
+        }
+        if self.alert_ui_requested {
+            VerificationStage::Success
+        } else if self.alert_service_started {
+            VerificationStage::AlertServiceDetected
+        } else if self.receiver_processed || self.service_reached || self.message_constructed {
+            VerificationStage::CellBroadcastProcessingDetected
+        } else if self.test_receiver_accepted {
+            VerificationStage::TelephonyActivityDetected
+        } else {
+            // The trigger was sent (this evidence only exists after a send) but nothing downstream
+            // was observed. That is UNKNOWN, not failure, and certainly not success.
+            VerificationStage::TriggerSent
+        }
     }
 }
 
@@ -1286,6 +1739,7 @@ pub fn scan_platform_logcat(logcat: &str) -> PlatformEvidence {
         message_constructed: matches(MARKER_MESSAGE_CONSTRUCTED),
         service_reached: matches(MARKER_SERVICE),
         receiver_processed: matches(MARKER_RECEIVER),
+        alert_service_started: matches(MARKER_ALERT_SERVICE),
         alert_ui_requested: matches(MARKER_ALERT_UI),
         suppression: first_suppression(logcat),
     }
@@ -1334,16 +1788,21 @@ const MARKER_RECEIVER: &[&str] = &[
     "CellBroadcastReceiver: onReceive Intent { act=android.provider.Telephony.SMS_CB_RECEIVED",
     "CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
 ];
-/// Evidence that Android moved from "the message exists" to "present this alert".
+/// Evidence that the message entered `CellBroadcastAlertService`.
 ///
-/// `CBAlertService: onStartCommand` is the service actually starting on a Cell-Broadcast action, and
-/// `openEmergencyAlertNotification` is the call that selects the presentation. The bare tag is not
-/// used: `CBAlertService: onStartCommand` is checked with its action suffix stripped for robustness
-/// across the two AOSP forms (`onStartCommand: <action>`), so the marker is the prefix only.
-const MARKER_ALERT_UI: &[&str] = &[
-    "CBAlertService: onStartCommand",
-    "openEmergencyAlertNotification",
-];
+/// `CBAlertService: onStartCommand` is emitted when the alert service is started on a
+/// Cell-Broadcast action, which is *before* its channel-range and testing-mode gates run. It is
+/// therefore the right marker for the "alert service reached" rung and the wrong one for "the alert
+/// was presented" -- that is [`MARKER_ALERT_UI`]'s job.
+const MARKER_ALERT_SERVICE: &[&str] = &["CBAlertService: onStartCommand"];
+
+/// Evidence that Android moved from "the alert service is running" to "present this alert".
+///
+/// `openEmergencyAlertNotification` is the call that selects the presentation, and it is the only
+/// marker here that survives the alert service's own gates. `CBAlertService: onStartCommand` is
+/// deliberately *not* in this list any more: it fires before the gates, so a run the platform then
+/// suppressed would otherwise be reported as a presented alert.
+const MARKER_ALERT_UI: &[&str] = &["openEmergencyAlertNotification"];
 
 /// The complete, honest capability picture for one device.
 #[derive(Debug, Clone, Serialize)]
@@ -2114,7 +2573,15 @@ Packages:
             CapabilityStage::CellBroadcastServiceReached
         );
 
-        let ui = format!("{service}I CBAlertService: onStartCommand: {action}\n", action="android.provider.Telephony.SMS_CB_RECEIVED");
+        let alert_service = format!("{service}I CBAlertService: onStartCommand: {action}\n", action="android.provider.Telephony.SMS_CB_RECEIVED");
+        // The alert service starting is *not* the UI. It fires before the channel-range and
+        // testing-mode gates, so it is its own rung and it must not claim presentation.
+        assert_eq!(
+            scan_platform_logcat(&alert_service).stage(),
+            CapabilityStage::AlertServiceReached
+        );
+
+        let ui = format!("{alert_service}D CBAlertService: openEmergencyAlertNotification\n");
         assert_eq!(scan_platform_logcat(&ui).stage(), CapabilityStage::SystemUiReached);
     }
 
@@ -2259,7 +2726,9 @@ D CBAlertService: ignoring the alert due to not in testing mode
     fn stage_labels_match_the_ui_contract() {
         assert_eq!(CapabilityStage::PackagePresent.label(), "PACKAGE PRESENT");
         assert_eq!(CapabilityStage::TestEntryPointDiscovered.label(), "TEST ENTRY POINT DISCOVERED");
-        assert_eq!(CapabilityStage::SystemUiReached.label(), "SYSTEM UI REACHED");
+        assert_eq!(CapabilityStage::SystemUiReached.label(), "NATIVE ALERT PRESENTED");
+        assert_eq!(CapabilityStage::AlertServiceReached.label(), "ALERT SERVICE REACHED");
+        assert_eq!(CapabilityStage::ReceiverProcessed.label(), "CB RECEIVER PROCESSED");
         assert_eq!(State::Granted.label(), "GRANTED");
         assert_eq!(State::Unknown.label(), "UNKNOWN");
     }
@@ -2345,5 +2814,188 @@ D CBAlertService: ignoring the alert due to not in testing mode
         assert_eq!(AlertMode::LocalUiSimulation.label(), "LOCAL UI SIMULATION");
         assert_eq!(AlertMode::Unavailable.label(), "UNAVAILABLE");
         assert!(AlertMode::GenuineCellBroadcastVerified.label().contains("VERIFIED"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The non-broadcast interface survey
+    // -----------------------------------------------------------------------------------------
+
+    /// The whole point of the survey is that the classes were actually covered, so the enumeration
+    /// must contain more than the broadcast layer: shell commands, Binder methods and OEM
+    /// components all have to be present.
+    #[test]
+    fn the_interface_survey_covers_every_class() {
+        let classes: Vec<InterfaceClass> =
+            interface_candidates().into_iter().map(|c| c.class).collect();
+        for expected in [
+            InterfaceClass::ShellCommand,
+            InterfaceClass::BinderService,
+            InterfaceClass::TelephonyBinder,
+            InterfaceClass::OemComponent,
+            InterfaceClass::StateOnly,
+        ] {
+            assert!(
+                classes.contains(&expected),
+                "the survey must include {expected:?}, or a whole interface class was skipped"
+            );
+        }
+    }
+
+    /// The interfaces that can actually feed the pipeline must be exactly the ICellBroadcastService
+    /// handlers, and they must be recorded as property-gated -- not reachable, and not
+    /// signature-gated. Getting this wrong either over- or under-claims the product.
+    #[test]
+    fn the_only_property_gated_injectors_are_the_cb_service_handlers() {
+        let gated = property_gated_injectors();
+        assert!(!gated.is_empty());
+        for candidate in &gated {
+            assert!(
+                candidate.interface.contains("ICellBroadcastService")
+                    || candidate.interface.contains("handle"),
+                "unexpected property-gated injector: {}",
+                candidate.interface
+            );
+            assert_eq!(candidate.outcome, InterfaceOutcome::BuildPropertyGate);
+        }
+    }
+
+    /// `cmd cellbroadcast` must be recorded as absent, because a reader who only sees "some shell
+    /// commands exist" would reasonably assume a Cell Broadcast command exists too. It does not.
+    #[test]
+    fn the_cellbroadcast_shell_command_is_recorded_as_absent() {
+        let missing = interface_candidates()
+            .into_iter()
+            .find(|c| c.interface.starts_with("cmd cellbroadcast"))
+            .expect("the absent `cmd cellbroadcast` must be enumerated");
+        assert_eq!(missing.outcome, InterfaceOutcome::Absent);
+    }
+
+    /// The MockModem route is the one that *would* replay broadcast SMS through the real radio
+    /// callback, so it must be present in the survey and marked unavailable, with the image's lack
+    /// of the package as the reason. Losing this row would lose the strongest near-miss.
+    #[test]
+    fn the_mock_modem_route_is_recorded_with_its_reason() {
+        let mock = interface_candidates()
+            .into_iter()
+            .find(|c| c.interface.contains("set-modem-service"))
+            .expect("the MockModem route must be enumerated");
+        assert_eq!(mock.outcome, InterfaceOutcome::Absent);
+        assert!(mock.note.contains("MODIFY_PHONE_STATE"));
+        assert!(mock.note.contains("not present"));
+    }
+
+    /// The Samsung CMAS database rows are real and they are *not* an injector. This is the row most
+    /// likely to be mistaken for one, so it is pinned.
+    #[test]
+    fn the_samsung_cmas_rows_are_not_an_injector() {
+        let cmas = interface_candidates()
+            .into_iter()
+            .find(|c| c.interface.contains("SecTelephonyProvider"))
+            .expect("the Samsung CMAS row must be enumerated");
+        assert_eq!(cmas.outcome, InterfaceOutcome::ConfigOnly);
+    }
+
+    #[test]
+    fn the_interface_summary_is_generated_from_the_rows() {
+        let summary = interface_summary();
+        let all = interface_candidates().len();
+        assert!(summary.contains(&format!("{all} non-broadcast interfaces")));
+        assert!(summary.contains("ro.debuggable"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The verification ladder
+    // -----------------------------------------------------------------------------------------
+
+    /// The ladder must be ordered from connection to success and it must be strictly longer than a
+    /// trivially correct `if exit_code == 0` check -- i.e. it must name the pipeline stages.
+    #[test]
+    fn the_verification_ladder_is_ordered_and_complete() {
+        let ladder = verification_ladder();
+        assert_eq!(ladder.first().unwrap().stage, VerificationStage::DeviceConnected);
+        assert_eq!(ladder.last().unwrap().stage, VerificationStage::Success);
+        assert!(ladder.len() >= 10);
+        assert!(ladder.iter().any(|r| r.stage == VerificationStage::TriggerSent));
+        assert!(ladder.iter().any(|r| r.stage == VerificationStage::NativeAlertDetected));
+    }
+
+    /// The ladder's success rung must require the native-alert evidence, and nothing weaker. This is
+    /// the assertion that stops the project regressing to "am exited 0".
+    #[test]
+    fn success_requires_the_native_alert_and_nothing_weaker() {
+        let ladder = verification_ladder();
+        let success = ladder
+            .iter()
+            .find(|r| r.stage == VerificationStage::Success)
+            .unwrap();
+        assert!(success.requires.contains("NATIVE_ALERT_DETECTED"));
+        assert!(success.requires.contains("no suppression"));
+    }
+
+    /// An empty capture after a send proves only that the trigger was sent. It must never be read as
+    /// a pipeline stage, let alone success.
+    #[test]
+    fn an_empty_capture_after_a_send_is_only_trigger_sent() {
+        let evidence = PlatformEvidence::default();
+        assert_eq!(evidence.verification_stage(), VerificationStage::TriggerSent);
+        assert_eq!(evidence.stage(), CapabilityStage::TestEntryPointDiscovered);
+    }
+
+    /// A suppressed run reaches the alert service and stops: it must never map to success, and it
+    /// must report the alert-service rung rather than the UI rung.
+    #[test]
+    fn a_suppressed_run_can_never_be_success() {
+        let evidence = PlatformEvidence {
+            alert_service_started: true,
+            suppression: Some(Suppression {
+                gate: SuppressionGate::ChannelDisabled,
+                sent: "ignoring the alert due to configured channels was marked".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert_ne!(evidence.verification_stage(), VerificationStage::Success);
+        assert_eq!(evidence.verification_stage(), VerificationStage::AlertServiceDetected);
+        assert_eq!(evidence.stage(), CapabilityStage::AlertServiceReached);
+        assert!(evidence.was_suppressed());
+    }
+
+    /// The alert service starting is *not* the UI being presented. This is the exact
+    /// conflation the marker split exists to prevent.
+    #[test]
+    fn the_alert_service_starting_is_not_the_ui() {
+        let evidence = PlatformEvidence {
+            alert_service_started: true,
+            ..Default::default()
+        };
+        assert_eq!(evidence.stage(), CapabilityStage::AlertServiceReached);
+        assert_eq!(evidence.verification_stage(), VerificationStage::AlertServiceDetected);
+        assert_ne!(evidence.verification_stage(), VerificationStage::Success);
+    }
+
+    /// Only a real presentation marker reaches the top rung.
+    #[test]
+    fn the_native_presentation_marker_reaches_success() {
+        let evidence = PlatformEvidence {
+            alert_service_started: true,
+            alert_ui_requested: true,
+            ..Default::default()
+        };
+        assert_eq!(evidence.stage(), CapabilityStage::SystemUiReached);
+        assert_eq!(evidence.verification_stage(), VerificationStage::Success);
+    }
+
+    /// The suppression strings are the exact AOSP text. If an upstream change rewrites them, this
+    /// fails loudly rather than silently turning a suppressed run into an unexplained one.
+    #[test]
+    fn the_suppression_markers_match_the_aosp_source_text() {
+        for (marker, _gate) in SUPPRESSION_MARKERS {
+            assert!(!marker.is_empty());
+        }
+        let capture = "07-01 CBAlertService: ignoring the alert due to not in testing mode";
+        let evidence = scan_platform_logcat(capture);
+        assert_eq!(
+            evidence.suppression.as_ref().unwrap().gate,
+            SuppressionGate::TestModeRequired
+        );
     }
 }

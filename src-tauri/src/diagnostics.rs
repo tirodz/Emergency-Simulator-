@@ -712,6 +712,55 @@ pub fn render_report(report: &DiagnosticReport) -> String {
     }
     out.push('\n');
 
+    // The interfaces that are not broadcasts. The broadcast matrix above is complete and it is not
+    // the whole surface: a Binder call into the Cell Broadcast service module is a different class of
+    // entry with a different gate, and reporting only the broadcast layer would imply the search
+    // ended there.
+    out.push_str("## Interfaces that are not broadcasts\n\n");
+    out.push_str(&format!("{}\n\n", crate::platform::interface_summary()));
+    out.push_str("| Class | Interface | Outcome | Note |\n| --- | --- | --- | --- |\n");
+    for candidate in crate::platform::interface_candidates() {
+        out.push_str(&format!(
+            "| {:?} | `{}` | {} | {} |\n",
+            candidate.class,
+            candidate.interface,
+            candidate.outcome.label(),
+            candidate.note.replace('|', "\\|")
+        ));
+    }
+    out.push('\n');
+
+    // The near-miss set called out explicitly: these are the interfaces that would work on a
+    // userdebug build, so a reader does not have to scan the table to find what the single build
+    // property is actually standing in front of.
+    let gated = crate::platform::property_gated_injectors();
+    if !gated.is_empty() {
+        out.push_str("Interfaces whose only obstacle is a build property, not a permission:\n\n");
+        for candidate in gated {
+            out.push_str(&format!("- `{}` — {}\n", candidate.interface, candidate.note));
+        }
+        out.push('\n');
+    }
+
+    // The ladder a single send is judged against, so the report says what would count as delivery
+    // rather than leaving the definition implicit in the code.
+    out.push_str("## What counts as delivery\n\n");
+    out.push_str(
+        "A run is walked down this ladder and stops at the first rung it cannot evidence. \
+         `SUCCESS` is the native alert presentation being observed in the device's own logs; an exit \
+         code is never a rung.\n\n",
+    );
+    out.push_str("| # | Stage | What must be observed |\n| --- | --- | --- |\n");
+    for (index, rung) in crate::platform::verification_ladder().iter().enumerate() {
+        out.push_str(&format!(
+            "| {} | `{}` | {} |\n",
+            index + 1,
+            rung.label,
+            rung.requires
+        ));
+    }
+    out.push('\n');
+
     // The Samsung-specific surface, read out of a firmware image rather than from the device. It is
     // printed with its provenance so a "PROVEN (firmware)" row can never be read as a device
     // observation — this report only reads state from the attached phone.

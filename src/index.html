@@ -408,7 +408,7 @@ async function runSend(dry){if(!validate())return;const d=selected();if(!d)retur
   if(platform&&!dry){
    log("Using the AOSP platform test path (ro.debuggable=1)");
    const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value,channel:state.channel});
-   if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:d.local_simulator,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
+   if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,verification_stage:r.verification_stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:d.local_simulator,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
    showResult(r);return;
   }
   const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:dry});showResult(r)
@@ -426,6 +426,7 @@ function renderDiagnostics(p){
   ["CellBroadcast package",p.cellbroadcast_package||"NOT FOUND"],
   ["Receiver declared",p.receiver_declared||"UNKNOWN"],
   ["Capability stage",(p.stage||"NONE").replace(/_/g," ")],
+  ["Verification rung",(""+(p.verification_stage||"UNKNOWN")).replace(/_/g," ")],
   ["Local simulator",p.local_simulator_installed?"installed":"not installed"],
   ["POST_NOTIFICATIONS",p.post_notifications||"UNKNOWN"],
   ["Full-screen intent",p.full_screen_intent||"UNKNOWN"],

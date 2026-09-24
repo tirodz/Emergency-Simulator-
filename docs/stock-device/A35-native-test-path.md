@@ -461,3 +461,108 @@ The facts above are encoded in `src-tauri/src/platform.rs` as `samsung_firmware_
 carrying its `FirmwareEvidence` label and the firmware path it was read from, and are rendered in the
 diagnostics report. That is deliberate: the claims live in code with tests, so a later edit cannot
 quietly upgrade a firmware fact to a device observation.
+
+---
+
+## 11. The non-broadcast surface, walked this session
+
+§10 answered "is the AOSP test receiver present" — it is not, because `ro.debuggable=0`. It did not
+answer "is there any *other* interface into the Cell Broadcast machinery", because §10 only looked at
+broadcasts. This section walks the classes a broadcast matrix cannot see: shell commands, Binder
+services, the platform `ITelephony` service, `system_server`, content providers and the exported OEM
+components. Each one is recorded with the reason it does or does not work, in
+`platform::interface_candidates()`.
+
+### 11.1 The pipeline has exactly one producer, and it is not a broadcast
+
+Reading Google's unmodified Cell Broadcast module
+(`/apex/com.android.cellbroadcast/.../GoogleCellBroadcastServiceModule@341410010`) end to end gives
+the complete data flow:
+
+```
+telephony radio callback  ─┬─►  ICellBroadcastService.handleGsmCellBroadcastSms(phoneId, byte[])
+telephony test receiver   ─┘              │
+                                          ▼
+                          DefaultCellBroadcastService.onGsmCellBroadcastSms
+                                          │  decodes the PDU into an SmsCbMessage
+                                          ▼
+                          GsmCellBroadcastHandler.handleBroadcastSms
+                                          │  inserts a row, then broadcasts
+                                          ▼
+                   CellBroadcastIntents.sendSmsCbReceivedBroadcast
+                                          │  act=android.provider.Telephony.SMS_CB_RECEIVED
+                                          │  pkg=com.android.cellbroadcastreceiver
+                                          ▼
+                          CellBroadcastReceiver ─► CellBroadcastAlertService
+                                          │  the channel-range / testing-mode / language gates
+                                          ▼
+                          CellBroadcastAlertDialog  (the native alert)
+```
+
+There are exactly two callers of `CellBroadcastServiceManager.sendGsmMessageToHandler` in the entire
+image: the GSM test receiver and the CDMA path. Both are inside the module, both are gated on
+`ro.debuggable`. Everything above `sendSmsCbReceivedBroadcast` is fed by one of those two, and
+everything below it is payload-neutral — each downstream hop only holds an `SmsCbMessage`, which has
+no public constructor. That is why no downstream component can be used as an injector: there is no
+way to hand one a message.
+
+### 11.2 `cmd cellbroadcast` does not exist
+
+The Cell Broadcast module implements no `ShellCommand` at all. `DefaultCellBroadcastService` has
+`onGsmCellBroadcastSms`, `onCdmaCellBroadcastSms`, `onCdmaScpMessage`, `getCellBroadcastAreaInfo`
+and a `dump()` — and nothing else. There is no verb surface to find. The full verb list of the one
+relevant command, `cmd phone` (read out of `TeleService.apk`), is: `ims`, `uce`, `cc`, `gba`, `src`,
+`d2d`, `data`, `radio`, `euicc`, `barring`, `emergency-number-test-mode`, `emergency-callback-mode`,
+`thermal-mitigation`, `restart-modem`, `unattended-reboot`, `get-imei`, `numverify`. Not one
+constructs an `SmsCbMessage` or calls the alert service.
+
+### 11.3 The MockModem route: the strongest near-miss, and why it fails twice
+
+`cmd phone radio set-modem-service mockmodem` is the one verb that *would* work: `MockModemService`
+replays RIL events, including broadcast SMS, through the real `mCi` callback, which is the radio arm
+of the diagram above. It fails for two independent reasons:
+
+* the `com.android.telephony.mockmodem` package is **not present in the A35 image** (`MOCKMODEM 0`),
+  so there is no service to select; and
+* selecting any modem service calls `ITelephony.setModemService`, enforced on the signature
+  permission `android.permission.MODIFY_PHONE_STATE`, which `shell` does not hold and cannot be
+  granted.
+
+`cmd phone carrier_restriction_status_test` is also gated on MockModem being the active service.
+
+### 11.4 The `phone` service has only configuration, not injection
+
+The only Cell Broadcast methods on `ITelephony` are `getCellBroadcastIdRanges` and
+`setCellBroadcastIdRanges`, both enforcing the signature permission `MODIFY_CELL_BROADCASTS`, and
+both only configure which channel ranges are enabled. `updateEmergencyNumberListTestMode` is a real
+test-mode setter for the emergency *number* database, not for Cell Broadcast.
+
+### 11.5 The Samsung CMAS rows are real, and they are storage, not an injector
+
+Samsung's telephony provider stores emergency alerts as SMS rows whose address is `#CMAS#`,
+`#CMAS#Test`, `#CMAS#Presidential`, `#Emergency Alert#Amber` and so on, with a literal `cmas` table
+and `address LIKE '#CMAS#%'` cleanup, and the comment `CMAS messages are not allowed by FCC rule`.
+These are the SMS database's representation of an alert the platform already produced. There is no
+exporter that turns a caller-supplied row back into an alert — the rows are written *by* the alert
+path, downstream of it.
+
+### 11.6 `system_server` has no producer
+
+A sweep of `services.jar` for `SmsCbMessage` construction and for the alert actions found exactly one
+touch: `com.att.iqi.libs.CellBroadcastObserver`, an observer that reports Cell Broadcast activity to
+the AT&T IQI diagnostics library. It consumes messages; it cannot originate one.
+
+### 11.7 The conclusion, restated honestly
+
+The real injector is `ICellBroadcastService.handleGsmCellBroadcastSms` — the method that decodes a
+raw broadcast PDU into an `SmsCbMessage` and hands it to the genuine alert service — and the only
+thing standing in front of it is `ro.debuggable`, not a permission. That is `RESULT B` again, arrived
+at from the Binder layer rather than the broadcast layer, but now it is *sharper*: the path is closed
+by one build property, and it is closed identically for every non-broadcast interface class. On a
+`userdebug` A35 the same trigger this tool already builds — the `pdu_string` broadcast — would reach
+`handleGsmCellBroadcastSms` and drive the real pipeline.
+
+That is the honest end state on a retail A35: no root-free path exists, the reason is a build
+property rather than a missing permission or a Samsung lockout, and the tool now proves that class by
+class rather than asserting it.
+

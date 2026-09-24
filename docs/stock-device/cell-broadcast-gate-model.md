@@ -254,10 +254,10 @@ a **definite negative result**, not an unknown, and re-running cannot change it.
 | Log line (verbatim) | Stage claimed |
 | --- | --- |
 | `GsmInboundSmsHandler: Received test intent action=` | `TEST ENTRY POINT ACCEPTED` |
-| `CBAlertService: onStartCommand` | `CB SERVICE REACHED` |
+| `CBAlertService: onStartCommand` | `ALERT SERVICE REACHED` |
 | `CellBroadcastReceiver: onReceive Intent { act=android.provider.Telephony.SMS_CB_RECEIVED` | `CB RECEIVER PROCESSED` |
 | `CellBroadcastReceiver: onReceive Intent { act=android.provider.action.SMS_EMERGENCY_CB_RECEIVED` | `CB RECEIVER PROCESSED` |
-| `openEmergencyAlertNotification` | `SYSTEM UI REACHED` |
+| `openEmergencyAlertNotification` | `NATIVE ALERT PRESENTED` |
 
 ### Two traps in these markers, both of which we fell into
 
@@ -276,9 +276,17 @@ would report a dropped message as delivered.
 
 ### Stage ordering
 
-`ReceiverProcessed` is a distinct stage between `CellBroadcastServiceReached` and `SystemUiReached`.
+`ReceiverProcessed` is a distinct stage between `CellBroadcastServiceReached` and `AlertServiceReached`.
 The receiver running re-dispatches into the alert service, but it is still before the alert service
-has looked at the message, so it must not be reported as `SYSTEM UI REACHED`.
+has looked at the message, so it must not be reported as `NATIVE ALERT PRESENTED`.
+
+There is a second, finer distinction on the other side of the same line. `AlertServiceReached` is its
+own stage because `CBAlertService: onStartCommand` fires *before* the service's channel-range and
+testing-mode gates run. Only `openEmergencyAlertNotification`, which the service emits after it has
+decided to present, reaches the top stage. The two were once one marker set, and that mapping would
+have reported a suppressed message as a presented alert; they were split this session and
+`PlatformEvidence::verification_stage()` walks the same ladder, with `SUCCESS` unreachable for a
+suppressed capture.
 
 | Claim | Label |
 | --- | --- |

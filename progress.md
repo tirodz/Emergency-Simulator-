@@ -3,6 +3,77 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
+## Current status — the non-broadcast surface, walked (2026-09-21, later)
+
+### What happened
+
+§10 of `docs/stock-device/A35-native-test-path.md` closed the *broadcast* question for the A35's
+shipped image. It left the larger question open: the broadcast matrix only enumerated actions sent to
+`CellBroadcastReceiver`, and a Binder call into the Cell Broadcast service module is a different class
+of entry with a different gate. This session read Google's unmodified Cell Broadcast module
+(`GoogleCellBroadcastServiceModule@341410010`) end to end and walked every non-broadcast interface
+class.
+
+The result is `RESULT B`, reached from the Binder layer rather than the broadcast layer, and now much
+sharper. The pipeline has exactly one producer — `ICellBroadcastService.handleGsmCellBroadcastSms`,
+which decodes a raw broadcast PDU into an `SmsCbMessage` and hands it to the genuine alert service —
+and it has exactly two callers: the GSM test receiver and the CDMA radio path. Both are gated on
+`ro.debuggable`, neither on a permission. Everything downstream of
+`CellBroadcastIntents.sendSmsCbReceivedBroadcast` only ever holds an `SmsCbMessage`, which has no
+public constructor, so no downstream component can be turned into an injector.
+
+The classes and why each fails:
+
+* **`cmd cellbroadcast` does not exist.** The Cell Broadcast module implements no `ShellCommand` at
+  all — only the four AIDL handlers and a read-only `dump()`.
+* **`cmd phone` has no injector verb.** The full verb list was read out of `TeleService.apk` and not
+  one verb constructs an `SmsCbMessage` or calls the alert service.
+* **`cmd phone radio set-modem-service mockmodem` is the strongest near-miss and fails twice.** It
+  would replay RIL events through the real `mCi` callback, i.e. the radio arm of the pipeline; but the
+  MockModem package is **absent from the A35 image** (`MOCKMODEM 0`), and selecting a modem service
+  needs the signature permission `MODIFY_PHONE_STATE`.
+* **`ITelephony` has only configuration.** `get/setCellBroadcastIdRanges` need the signature
+  permission `MODIFY_CELL_BROADCASTS` and only configure channel ranges.
+* **The Samsung `#CMAS#` rows are storage, not an injector.** They are the SMS database's
+  representation of an alert the platform already produced, written *by* the alert path.
+* **`system_server` has no producer.** The only `SmsCbMessage` touch in `services.jar` is the AT&T
+  IQI `CellBroadcastObserver`, which consumes messages.
+
+### What changed in code
+
+The survey is data, not prose, so the summary is generated from the rows and cannot drift:
+
+* `platform::interface_candidates()` / `InterfaceClass` / `InterfaceOutcome` — the non-broadcast
+  enumeration above, one row per interface with its verdict and reason.
+* `platform::property_gated_injectors()` / `interface_summary()` — the injectors whose only obstacle
+  is `ro.debuggable`, and the generated sentence.
+* `platform::verification_ladder()` / `VerificationStage` — the eleven-rung ladder a single send is
+  judged against, from `DEVICE_CONNECTED` to `SUCCESS`, where `SUCCESS` requires
+  `NATIVE_ALERT_DETECTED` and no suppression marker. `TriggerSent` is a rung; an exit code is not.
+* `CapabilityStage::AlertServiceReached` — a real overclaim was removed. `CBAlertService:
+  onStartCommand` fires *before* the channel-range and testing-mode gates run, so it can no longer be
+  read as the UI being reached. `SystemUiReached` now requires `openEmergencyAlertNotification`
+  alone, and its label is `NATIVE ALERT PRESENTED`.
+* `PlatformEvidence::verification_stage()` — maps a capture to a ladder rung; a suppressed run can
+  never be `SUCCESS`.
+* The diagnostics report now prints the interface survey and the ladder.
+
+### Tests
+
+`cargo test --lib --locked`: **125 passed, 0 failed** (was 112). The 13 new tests pin the survey
+classes, the MockModem and `cmd cellbroadcast` rows, the Samsung CMAS row, the ladder's ordering and
+its `SUCCESS` requirement, the empty-capture case (`TriggerSent`, not success), the suppression case
+(never `SUCCESS`), and the alert-service-vs-UI split. Two stale tests that encoded the old
+`onStartCommand` → `SYSTEM UI REACHED` overclaim were corrected, not deleted.
+
+### What is still open
+
+* The physical A35 has still never been queried by this environment. `RESULT B` is proven for the
+  shipped image, not for the operator's handset; if that phone has taken a different update the build
+  id differs and the facts must be re-read.
+* Nothing here demonstrates delivery even on `ro.debuggable=1`. The path is now known to be closed by
+  one build property rather than shown to work.
+
 ## Current status — the A35's own firmware, read (2026-09-21)
 
 ### What happened

@@ -1836,6 +1836,13 @@ pub struct PlatformSendResult {
     pub channel_enabled_by_default: bool,
     pub entrypoint_available: PlatformState,
     pub stage: CapabilityStage,
+    /// The rung of [`platform::VerificationStage`] this attempt actually reached.
+    ///
+    /// Distinct from `stage`: `stage` describes the strongest general capability observed, and this
+    /// describes how far *this* attempt got down the verification ladder. It is what the UI reports
+    /// as "reached / did not reach", so a send that exited 0 but left no downstream log lands on
+    /// `TRIGGER_SENT` and not on anything that reads as delivery.
+    pub verification_stage: platform::VerificationStage,
     pub state: String,
     pub message: String,
     pub failure: Option<String>,
@@ -2124,6 +2131,7 @@ fn send_platform_test_alert(
         channel_enabled_by_default: channel.enabled_by_default,
         entrypoint_available: PlatformState::Unknown,
         stage: CapabilityStage::None,
+        verification_stage: platform::VerificationStage::NativePathSelected,
         state: "UNKNOWN".to_string(),
         message: String::new(),
         failure: None,
@@ -2147,6 +2155,9 @@ fn send_platform_test_alert(
         result.state = "BLOCKED".to_string();
         result.message = entrypoint.reason.clone();
         result.failure = Some(entrypoint.available.label().to_string());
+        // The device and its capabilities were read, but the native path could not be selected for
+        // this build. That is the rung the attempt stopped on, and it is not a delivery claim.
+        result.verification_stage = platform::VerificationStage::CapabilitiesDetected;
         result.diagnostics = diagnostics;
         return Ok(result);
     }
@@ -2201,6 +2212,7 @@ fn send_platform_test_alert(
 
     let platform_evidence = platform::scan_platform_logcat(&logcat);
     result.stage = platform_evidence.stage();
+    result.verification_stage = platform_evidence.verification_stage();
     result.logcat_excerpt = truncate_for_log(&logcat, 3000);
 
     // 6. The verdict comes from downstream evidence, never from the exit code.
