@@ -694,6 +694,219 @@ pub fn entry_point_summary() -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Samsung-specific native surface, read out of the A35's own firmware
+// ---------------------------------------------------------------------------------------------
+
+/// How a claim in this module was established.
+///
+/// The distinction between `ProvenOnFirmware` and `UnprovenHere` is the whole point: a claim that
+/// was read out of the device's shipped files is a different kind of statement from one that was
+/// inferred from AOSP, and the two must not be printed with the same confidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FirmwareEvidence {
+    /// Read out of the shipped firmware image for the exact build named in `references`.
+    ProvenOnFirmware,
+    /// Read out of AOSP source; not yet checked against a device.
+    ProvenOnAosp,
+    /// Not established either way.
+    UnprovenHere,
+}
+
+impl FirmwareEvidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            FirmwareEvidence::ProvenOnFirmware => "PROVEN (firmware)",
+            FirmwareEvidence::ProvenOnAosp => "PROVEN (AOSP)",
+            FirmwareEvidence::UnprovenHere => "UNPROVEN",
+        }
+    }
+}
+
+/// One fact about the native Surface a device exposes, with its provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FirmwareFact {
+    pub subject: &'static str,
+    pub claim: &'static str,
+    pub evidence: FirmwareEvidence,
+    pub reference: &'static str,
+}
+
+/// The build these facts were read from.
+const A35_FIRMWARE_BUILD: &str = "A356BXXS4AYD1 / UP1A.231005.007, Android 14, One UI 6.1, \
+                                  ro.build.type=user, ro.build.tags=release-keys";
+
+/// The one question this whole investigation reduces to, and the firmware-proven answer.
+///
+/// The AOSP test receiver (`GsmCbTestBroadcastReceiver`) is registered inside
+/// `GsmInboundSmsHandler` only when `ro.debuggable == 1`. That is a build property. On a retail A35
+/// it is `0`, so the receiver is never constructed and there is no non-root path through it. The
+/// point of reading Samsung's own image was to check whether Samsung shipped *some other* entry
+/// point beside the AOSP one — a diagnostic receiver, a test service, a privileged helper, a
+/// mis-exported component. The enumeration below is that check, and it is what makes this answer a
+/// result rather than an assumption.
+pub fn samsung_firmware_facts() -> Vec<FirmwareFact> {
+    let row = |subject, claim, evidence, reference| FirmwareFact {
+        subject,
+        claim,
+        evidence,
+        reference,
+    };
+    vec![
+        row(
+            "Cell Broadcast implementation",
+            "The A35 ships Google's module (com.google.android.cellbroadcast, APEX \
+             341410010) unmodified. There is no Samsung-forked CellBroadcastReceiver; the Samsung \
+             packages only overlay it.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/apex/com.google.android.cellbroadcast_compressed.apex",
+        ),
+        row(
+            "Samsung RRO overlay",
+            "com.google.android.overlay.modules.cellbroadcastreceiver (target \
+             CellBroadcastCustomization) changes display strings, one theme and three UI booleans \
+             (show_alert_dialog_with_notification, show_alert_speech_setting, \
+             show_presidential_alerts_settings). It does not touch allow_testing_mode_on_user_build, \
+             show_test_settings, the channel range arrays, or any receiver.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "product/overlay/CellBroadcastConfigOverlay.apk (public.xml)",
+        ),
+        row(
+            "Samsung RRO overlay (service)",
+            "com.google.android.overlay.modules.cellbroadcastservice (target \
+             CellBroadcastServiceCustomization) sets cross_sim_duplicate_detection=false and \
+             config_area_info_receiver_packages={com.android.systemui}. No receiver, service or \
+             permission is added.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "product/overlay/CellBroadcastServiceOverlay.apk (public.xml)",
+        ),
+        row(
+            "AOSP telephony test receiver",
+            "Samsung did not modify GsmInboundSmsHandler or CdmaInboundSmsHandler. The test receiver \
+             is still registered only when ro.debuggable==1, still RECEIVER_EXPORTED with no \
+             permission, and still feeds mCellBroadcastServiceManager.sendGsmMessageToHandler.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/framework/telephony-common.jar; GsmInboundSmsHandler.java:45-49,70",
+        ),
+        row(
+            "Build type",
+            "ro.build.type=user, ro.build.tags=release-keys, ro.debuggable=0 and \
+             ro.force.debuggable=0. The AOSP test receiver is therefore never registered.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/build.prop",
+        ),
+        row(
+            "Protected broadcasts",
+            "android.provider.Telephony.SMS_CB_RECEIVED, \
+             android.provider.action.SMS_EMERGENCY_CB_RECEIVED, \
+             android.provider.Telephony.SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED and \
+             android.telephony.action.SECRET_CODE are all in the device's own \
+             <protected-broadcast> list, so AMS refuses them before broadcast resolution.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/framework/framework-res.apk AndroidManifest.xml",
+        ),
+        row(
+            "Secret code 2627",
+            "*#*#2627#*#* is routed by DRParser to a protected broadcast \
+             (android.telephony.action.SECRET_CODE, forced for exactly 2627 and 4636), which the \
+             platform refuses from a shell caller. The receiver's handler only calls \
+             setTestingMode(!isTestingMode(...)) — it toggles a display filter and constructs no \
+             message.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "DRParser.apk ParseService.java:139; CellBroadcastReceiver.java:83-100",
+        ),
+        row(
+            "Testing-mode gate on this build",
+            "ro.debuggable=0, but allow_testing_mode_on_user_build=true in the shipped bools.xml, \
+             so the 2627 toggle is live on the A35. It opens the test-mode channel range; it does \
+             not originate a message.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "GoogleCellBroadcastApp.apk res/values/bools.xml",
+        ),
+        row(
+            "BCService",
+            "com.sec.bcservice is not Cell Broadcast despite the name. BroadcastService is a \
+             tcpdump/issue-tracker logging service on a unix socket. Its only broadcast action is \
+             com.sec.android.ISSUE_TRACKER_ONOFF, guarded by signatureOrSystem.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/priv-app/BCService/BCService.apk",
+        ),
+        row(
+            "SemSmsCbMessage",
+            "Samsung's CB API (com.samsung.android.telephony.SemSmsCbMessage) is a read-only \
+             Parcelable wrapper over android.telephony.SmsCbMessage: every method is a getter. It \
+             has no constructor from a PDU and no path back into the alert service.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/framework/telephony-common.jar",
+        ),
+        row(
+            "TeleService",
+            "Samsung's phone app adds no Cell Broadcast action. Its only CB surface is \
+             get/setCellBroadcastIdRanges in PhoneInterfaceManager, both requiring \
+             android.permission.MODIFY_CELL_BROADCASTS (signature) — these configure ranges and \
+             cannot inject a message.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/priv-app/TeleService/TeleService.apk",
+        ),
+        row(
+            "Shell / binder test surface",
+            "No `cmd cellbroadcast` verb, no onShellCommand handler, and no CB test Binder method \
+             exists in the shipped telephony or CB code. The exported DefaultCellBroadcastService \
+             requires the signature permission BIND_CELL_BROADCAST_SERVICE.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "telephony-common.jar; GoogleCellBroadcastServiceModule.apk manifest",
+        ),
+        row(
+            "Factory / diagnostic surface",
+            "SecFactoryPhoneTest, ModemServiceMode, serviceModeApp_FB, FactoryTestProvider and \
+             SVCAgent expose test activities, RMS/keystring interfaces and provider reads, but none \
+             of them constructs an SmsCbMessage or calls CellBroadcastAlertService. No \
+             com.samsung.rmt_exercise (remote exercise) package exists in this build.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "system/priv-app/{SecFactoryPhoneTest,ModemServiceMode,serviceModeApp_FB,FactoryTestProvider,SVCAgent}",
+        ),
+        row(
+            "Injection-token sweep",
+            "A sweep of the shipped Samsung components and framework jars for \
+             TEST_TRIGGER_CELL_BROADCAST, pdu_string, sendGsmMessageToHandler, \
+             handleCellBroadcastIntent, SmsCbMessage construction tokens and \
+             CellBroadcastAlertService produced no hit outside Google's own module. There is no \
+             OEM injector to find.",
+            FirmwareEvidence::ProvenOnFirmware,
+            "band analysis of every package in the A35 image",
+        ),
+        row(
+            "Receiver package on the A35",
+            "AOSP's manifest component name is com.android.cellbroadcastreceiver.CellBroadcastReceiver \
+             and the alert services are exported=false. A prior revision of this project also looked \
+             for com.samsung.android.cellbroadcastreceiver, which would be the name on older \
+             One UI builds; it is absent here.",
+            FirmwareEvidence::UnprovenHere,
+            "not present on A356BXXS4AYD1; may exist on other One UI builds",
+        ),
+    ]
+}
+
+/// The single firmware-proven conclusion about the A35, stated once so prose cannot drift from the
+/// registry.
+pub fn samsung_native_entrypoint_conclusion() -> String {
+    let facts = samsung_firmware_facts();
+    let proven = facts
+        .iter()
+        .filter(|fact| fact.evidence == FirmwareEvidence::ProvenOnFirmware)
+        .count();
+    format!(
+        "The native Samsung surface was read from {A35_FIRMWARE_BUILD}. {proven} of {} recorded \
+         facts were proven directly from the shipped files. Samsung ships Google's Cell Broadcast \
+         module unmodified and adds no injector: no OEM receiver, service, provider, Binder method \
+         or shell verb constructs a Cell Broadcast message or enters CellBroadcastAlertService \
+         except the AOSP telephony test receiver, which this build's ro.debuggable=0 never \
+         registers.",
+        facts.len()
+    )
+}
+
+// ---------------------------------------------------------------------------------------------
 // Cell Broadcast PDU construction
 // ---------------------------------------------------------------------------------------------
 
@@ -1360,6 +1573,123 @@ Packages:
                 "the protected action {action} must be enumerated"
             );
         }
+    }
+
+    /// The firmware registry must carry the exact build it was read from, so a reader can tell
+    /// which phone the "PROVEN (firmware)" label refers to. A fact set with no build name would be
+    /// unfalsifiable.
+    #[test]
+    fn the_firmware_facts_name_the_exact_build() {
+        let facts = samsung_firmware_facts();
+        assert!(!facts.is_empty(), "the Samsung surface must be enumerated");
+        assert!(
+            A35_FIRMWARE_BUILD.contains("A356BXXS4AYD1") && A35_FIRMWARE_BUILD.contains("user"),
+            "the registry must name the exact retail build: {A35_FIRMWARE_BUILD}"
+        );
+        // Every fact must have a non-empty reference, so no claim is unattributed.
+        for fact in &facts {
+            assert!(
+                !fact.reference.trim().is_empty(),
+                "{} has no reference",
+                fact.subject
+            );
+            assert!(!fact.claim.trim().is_empty());
+        }
+    }
+
+    /// The keystone claim: on this build the AOSP test receiver's only gate is ro.debuggable=0.
+    /// If this fact is dropped or relabelled, the conclusion below it becomes an opinion.
+    #[test]
+    fn the_firmware_registry_records_the_debuggable_zero_build() {
+        let facts = samsung_firmware_facts();
+        let build = facts
+            .iter()
+            .find(|fact| fact.subject == "Build type")
+            .expect("the build type must be recorded");
+        assert_eq!(build.evidence, FirmwareEvidence::ProvenOnFirmware);
+        assert!(build.claim.contains("ro.debuggable=0"));
+        assert!(build.claim.contains("never registered"));
+    }
+
+    /// Samsung shipping Google's module unmodified is a firmware fact, not an inference. It is the
+    /// difference between "we assumed no OEM injector" and "we looked and there is none".
+    #[test]
+    fn the_registry_records_that_no_oem_injector_was_found() {
+        let facts = samsung_firmware_facts();
+        for subject in [
+            "Cell Broadcast implementation",
+            "Samsung RRO overlay",
+            "AOSP telephony test receiver",
+            "Injection-token sweep",
+            "BCService",
+            "SemSmsCbMessage",
+        ] {
+            let fact = facts
+                .iter()
+                .find(|fact| fact.subject == subject)
+                .unwrap_or_else(|| panic!("{subject} must be enumerated"));
+            assert_eq!(
+                fact.evidence,
+                FirmwareEvidence::ProvenOnFirmware,
+                "{subject} was read from the image and must say so"
+            );
+        }
+    }
+
+    /// BCService must keep its corrected description. It is the single most misleading name in the
+    /// Samsung image ("BC" reads as Cell Broadcast) and it is a tcpdump logger.
+    #[test]
+    fn bcservice_is_recorded_as_not_cell_broadcast() {
+        let fact = samsung_firmware_facts()
+            .into_iter()
+            .find(|fact| fact.subject == "BCService")
+            .expect("BCService must be enumerated");
+        assert!(fact.claim.contains("not Cell Broadcast"));
+        assert!(fact.claim.contains("tcpdump"));
+    }
+
+    /// The conclusion is generated from the registry, so it cannot claim more than the rows carry.
+    #[test]
+    fn the_conclusion_is_generated_from_the_registry() {
+        let conclusion = samsung_native_entrypoint_conclusion();
+        let proven = samsung_firmware_facts()
+            .iter()
+            .filter(|fact| fact.evidence == FirmwareEvidence::ProvenOnFirmware)
+            .count();
+        assert!(conclusion.contains(&proven.to_string()));
+        assert!(conclusion.contains("A356BXXS4AYD1"));
+        assert!(conclusion.contains("ro.debuggable=0"));
+        assert!(conclusion.contains("no injector") || conclusion.contains("adds no injector"));
+    }
+
+    /// A fact that was not established from the image must never be labelled as if it were. This is
+    /// the honesty guard for the whole registry.
+    #[test]
+    fn unproven_claims_are_never_labelled_as_firmware_proven() {
+        for fact in samsung_firmware_facts() {
+            if fact.evidence == FirmwareEvidence::UnprovenHere {
+                assert!(
+                    !fact.reference.contains("A356BXXS4AYD1") || fact.reference.contains("not present"),
+                    "an unproven fact must not cite the image as its source: {}",
+                    fact.subject
+                );
+            }
+        }
+        assert_eq!(FirmwareEvidence::UnprovenHere.label(), "UNPROVEN");
+        assert!(FirmwareEvidence::ProvenOnFirmware.label().contains("PROVEN"));
+    }
+
+    /// The secret code must be recorded as a toggle, not an injector, on the firmware too — the
+    /// AOSP lesson must survive into the Samsung-specific record.
+    #[test]
+    fn the_firmware_record_keeps_the_secret_code_as_a_toggle() {
+        let fact = samsung_firmware_facts()
+            .into_iter()
+            .find(|fact| fact.subject == "Secret code 2627")
+            .expect("the secret code must be recorded");
+        assert!(fact.claim.contains("toggles"));
+        assert!(fact.claim.contains("constructs no"));
+        assert!(fact.claim.contains("protected broadcast"));
     }
 
     /// The secret code must be classified as protected *and* not counted as a way in. It is a

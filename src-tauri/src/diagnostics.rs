@@ -712,6 +712,28 @@ pub fn render_report(report: &DiagnosticReport) -> String {
     }
     out.push('\n');
 
+    // The Samsung-specific surface, read out of a firmware image rather than from the device. It is
+    // printed with its provenance so a "PROVEN (firmware)" row can never be read as a device
+    // observation — this report only reads state from the attached phone.
+    out.push_str("## The native Samsung surface, read from firmware\n\n");
+    out.push_str(&format!("{}\n\n", crate::platform::samsung_native_entrypoint_conclusion()));
+    out.push_str("| Subject | Claim | Evidence | Reference |\n| --- | --- | --- | --- |\n");
+    for fact in crate::platform::samsung_firmware_facts() {
+        out.push_str(&format!(
+            "| {} | {} | {} | `{}` |\n",
+            fact.subject,
+            fact.claim,
+            fact.evidence.label(),
+            fact.reference
+        ));
+    }
+    out.push('\n');
+    out.push_str(
+        "This is an image analysis, not a reading of the attached phone. A row labelled \
+         `PROVEN (firmware)` refers to the named build and would need re-reading if the phone has \
+         taken a different update.\n\n",
+    );
+
     out.push_str("## What we could not verify\n\n");
     out.push_str(
         "- Whether a test broadcast actually reaches the telephony pipeline. That is an experiment \
@@ -719,8 +741,8 @@ pub fn render_report(report: &DiagnosticReport) -> String {
          that the path is closed.\n",
     );
     out.push_str(
-        "- Whether Samsung's firmware gates the test receiver the way AOSP does. The AOSP gate is \
-         verified against AOSP source; Samsung's implementation is not inspected by this report.\n",
+        "- Whether the attached phone's build matches the analyzed firmware. The firmware facts are \
+         labelled with the exact build they came from; matching this phone to it is a separate step.\n",
     );
     out.push_str(
         "- Carrier configuration: which Cell Broadcast channels are enabled and marked displayable. \

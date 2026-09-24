@@ -3,7 +3,78 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status — the receive-side channel gate, found and fixed (2026-09-21)
+## Current status — the A35's own firmware, read (2026-09-21)
+
+### What happened
+
+The question the stock-device branch keeps returning to — "is there a native, root-free path to make
+the A35 display an alert?" — had one half still open: every Samsung-firmware claim was `UNKNOWN`
+because the physical handset had never been queried. The physical handset still has not been
+queried, but its **shipped image** now has been. Build **A356BXXS4AYD1** (Android 14, One UI 6.1,
+`ro.build.type=user`, `release-keys`) was located in a public firmware dump and its Cell
+Broadcast-relevant files were read directly.
+
+The answer is `RESULT B`, now proven for the firmware rather than inferred:
+
+* `ro.debuggable=0` — read from the image's `build.prop`. The AOSP telephony test receiver
+  (`GsmCbTestBroadcastReceiver`) is registered only when `ro.debuggable==1`, so on this build it is
+  never constructed. `am broadcast` will still be accepted and print no error, and nothing happens.
+* Samsung ships Google's Cell Broadcast module **unmodified** (APEX `341410010`). There is no
+  Samsung-forked `CellBroadcastReceiver`, and Samsung did not modify `GsmInboundSmsHandler` or
+  `CdmaInboundSmsHandler` — the gate, the `RECEIVER_EXPORTED` flag and the call into
+  `sendGsmMessageToHandler` are byte-for-byte AOSP. The two Samsung RROs only change display strings
+  and three UI booleans; neither touches `allow_testing_mode_on_user_build`, `show_test_settings`, the
+  channel ranges, or any component.
+* The A35's own `framework-res.apk` lists `SMS_CB_RECEIVED`, `SMS_EMERGENCY_CB_RECEIVED`,
+  `SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED` and `SECRET_CODE` as protected broadcasts.
+* The secret code `*#*#2627#*#*` is rewritten by DRParser to the **protected** `SECRET_CODE`
+  broadcast, and the CB app's handler only calls `setTestingMode(!isTestingMode(...))`. The shipped
+  `bools.xml` has `allow_testing_mode_on_user_build=true`, so the toggle is live — and it still only
+  flips a display filter. It constructs no message.
+* Every Samsung candidate was read and none is an injector: `BCService` is a tcpdump logger despite
+  the "BC" in its name; `SemSmsCbMessage` is a read-only getter wrapper; `TeleService`'s only CB
+  surface is a signature-gated range setter; the factory/service-mode/diagnostic packages expose test
+  activities and RMS interfaces but none constructs an `SmsCbMessage`; `com.samsung.rmt_exercise`
+  does not exist in this build. A token sweep of every shipped Samsung component and framework jar
+  for the injection tokens returned **no hit outside Google's own module**.
+
+### What is now in the code
+
+* **`samsung_firmware_facts()`** in `platform.rs`: the Samsung native surface as a list of
+  `FirmwareFact` rows, each carrying a `FirmwareEvidence` label (`PROVEN (firmware)` /
+  `PROVEN (AOSP)` / `UNPROVEN`) and the exact firmware path it was read from. The build id is in the
+  registry, so a fact cannot be read without knowing which phone it describes.
+* **`samsung_native_entrypoint_conclusion()`** generates the prose from the registry, so the summary
+  cannot claim more than the rows carry.
+* **The diagnostics report** now renders the whole registry as a table under
+  "The native Samsung surface, read from firmware", and states plainly that this is image analysis,
+  not a reading of the attached phone. The old "we could not verify whether Samsung gates the test
+  receiver" bullet is replaced with the correct one: whether this handset matches the analyzed build.
+* **`docs/stock-device/A35-native-test-path.md` §10** records the firmware reading in full, upgrading
+  the `UNKNOWN` Samsung rows to `CONFIRMED (firmware)`.
+
+### Seven new tests now guard it
+
+`the_firmware_facts_name_the_exact_build`, `the_firmware_registry_records_the_debuggable_zero_build`,
+`the_registry_records_that_no_oem_injector_was_found`, `bcservice_is_recorded_as_not_cell_broadcast`,
+`the_conclusion_is_generated_from_the_registry`,
+`unproven_claims_are_never_labelled_as_firmware_proven`, and
+`the_firmware_record_keeps_the_secret_code_as_a_toggle` — on top of the channel gate's eight. The
+`platform.rs` module runs 74 tests, all passing (67 → 74), verified locally with `cargo test`.
+
+### What this does not change
+
+* The confusion the project exists to remove is untouched: stock mode still cannot raise an alert.
+  The firmware reading makes that a result rather than an assumption, and the local simulator is
+  still UI-only.
+* It does not prove anything about a *specific handset*. If the operator's phone has taken a
+  different update, the build id differs and the facts must be re-read for that build. The read-only
+  batch `A35-RO-001` remains the way to confirm the handset matches.
+* It does not demonstrate delivery even on `ro.debuggable=1` — that is still logcat evidence.
+
+---
+
+## Previous status — the receive-side channel gate, found and fixed (2026-09-21)
 
 ### What happened
 

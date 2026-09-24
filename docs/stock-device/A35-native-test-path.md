@@ -6,10 +6,18 @@ This document answers one question exhaustively:
 > Cell Broadcast machinery to process a test alert?
 
 It is written against the full AOSP Cell Broadcast surface, re-read from source during this session.
-Every claim about AOSP is `CONFIRMED` with the file and line it came from. Every claim that depends
-on Samsung's firmware is labelled `UNKNOWN`, because **the physical A35 has never been queried** —
-`evidence/` is empty and `ro.debuggable` has not been read. This document does not fill that gap with
-inference.
+Every claim about AOSP is `CONFIRMED` with the file and line it came from. It was originally written
+with every Samsung-firmware claim labelled `UNKNOWN`, because the physical A35 had not been queried.
+
+That gap is now closed for the firmware, though not for the physical handset. On 2026-09-21 the A35's
+shipped image for build **A356BXXS4AYD1** (Android 14, One UI 6.1, `ro.build.type=user`,
+`release-keys`) was obtained and read directly — the Cell Broadcast APEX, both Samsung RRO overlays,
+the telephony and framework jars, the framework-res manifest, `build.prop`, the secret-code parser
+and the candidate Samsung packages. §10 records what that reading settled, and the `UNKNOWN`
+Samsung rows in §5, §7 and §9 are upgraded to `CONFIRMED (firmware)` there. The physical handset
+still has not been queried; the firmware reading answers the *build-level* questions the batch was
+built to answer, and the read-only batch remains the way to confirm that a given handset's build
+matches the image that was read.
 
 It supersedes nothing. It is the complete candidate enumeration the earlier
 `why-adb-cannot-send-sms-cb-received.md` did not attempt: that document settled one path, this one
@@ -274,8 +282,8 @@ Nothing in this document upgrades those to `CONFIRMED`.
 
 ## 8. Final classification
 
-**`RESULT B — NO NATIVE ROOT-FREE TEST PATH FOUND`**, for the AOSP stack, with the device-specific
-half still open.
+**`RESULT B — NO NATIVE ROOT-FREE TEST PATH FOUND`**, previously for the AOSP stack with the
+device-specific half open; now for the A35's shipped firmware as well, per §10.
 
 The proof is not "`SMS_CB_RECEIVED` is protected." The proof is that **every** entry point was
 enumerated and each fails for its own reason: twelve of them are protected broadcasts reachable only
@@ -285,7 +293,8 @@ and three exported providers read state and cannot inject; the one system proper
 a protected broadcast that opens a display filter rather than originating a message.
 
 The only root-free injection surface is `TEST_TRIGGER_CELL_BROADCAST`, and its single gate is
-`ro.debuggable`, which is a build property and cannot be granted.
+`ro.debuggable`, which is a build property and cannot be granted. Section 10 confirms that Samsung
+adds no second surface and does not remove this gate.
 
 ### Strongest legitimate fallback
 
@@ -318,8 +327,137 @@ are read-only reads away.
 | `persist.cellbroadcast.message_filter` only filters | `CONFIRMED` | `CellBroadcastAlertService.java` lines 148–151, 328–333 |
 | CMAS secret code is OEM-gated and dialer-handled | `CONFIRMED` (official docs) | https://source.android.com/docs/core/ota/modular-system/cellbroadcast |
 | "Test alerts" is a user toggle, not a sender | `CONFIRMED` (official docs) | https://support.google.com/android/answer/9319337 |
-| The A35's `ro.debuggable`, package names, manifests and carrier config | `UNKNOWN` | not read; `evidence/` is empty |
-| Whether Samsung kept the 2627 filter or the test receiver | `UNKNOWN` | requires task 15 / task 14 output |
+| The A35's `ro.debuggable`, package names, manifests and carrier config | `CONFIRMED (firmware)` | §10; image build A356BXXS4AYD1 |
+| Whether Samsung kept the 2627 filter or the test receiver | `CONFIRMED (firmware)` | §10; `CellBroadcastReceiver.java` and DRParser in the image |
 
-Prior device evidence in this repository: **none for the physical A35.** Batch `A35-RO-001` is
-served but has never been posted back.
+Prior device evidence from a physical A35 in this repository: **none.** Batch `A35-RO-001` is served
+but has never been posted back. The §10 findings are from the *image*, not from a handset, and they
+answer the build-level questions that batch was designed to read.
+
+---
+
+## 10. The A35 firmware, read directly (2026-09-21)
+
+The physical handset was never attached, but the shipped image was. Build **A356BXXS4AYD1**
+(`UP1A.231005.007`, Android 14, One UI 6.1) was located in a public firmware dump and its Cell
+Broadcast-relevant files were read directly: the CB APEX, both Samsung RRO overlays, `build.prop`,
+`framework-res.apk`, `telephony-common.jar`, `framework.jar`, `services.jar`, the CB app and service
+module, and the candidate Samsung packages (`BCService`, `DRParser`, `ModemServiceMode`,
+`serviceModeApp_FB`, `FactoryTestProvider`, `SecFactoryPhoneTest`, `SVCAgent`, `CSC`,
+`SecTelephonyProvider`, `EmergencyLauncher`, `EmergencySOS`, `SamsungDialer`, …).
+
+### 10.1 The build gate, `CONFIRMED (firmware)`
+
+```
+ro.build.type            = user
+ro.build.tags            = release-keys
+ro.debuggable            = 0
+ro.force.debuggable      = 0
+ro.build.version.oneui   = 60100
+```
+
+This settles §7's open read. `ro.debuggable=0`, so the AOSP test receiver is never registered. The
+`am broadcast` command will still be accepted and print no error, and nothing will happen — the
+false-success shape this project exists to catch.
+
+### 10.2 Samsung ships Google's module unmodified, `CONFIRMED (firmware)`
+
+`system/apex/com.google.android.cellbroadcast_compressed.apex` unpacks to Google's stock
+`GoogleCellBroadcastApp@341410010` and `GoogleCellBroadcastServiceModule@341410010`. There is no
+Samsung-forked Cell Broadcast receiver in the image. The A35's receiver package is
+`com.google.android.cellbroadcastreceiver` — the `com.samsung.android.cellbroadcastreceiver` name the
+earlier batch looked for is **absent from this build** (it may exist on older One UI versions; that
+remains `UNKNOWN` and is recorded as such).
+
+The two Samsung RRO overlays only change presentation:
+
+* `com.google.android.overlay.modules.cellbroadcastreceiver` (target `CellBroadcastCustomization`)
+  overrides display strings, one theme, and three UI booleans
+  (`show_alert_dialog_with_notification`, `show_alert_speech_setting`,
+  `show_presidential_alerts_settings`). It does **not** touch `allow_testing_mode_on_user_build`,
+  `show_test_settings`, the channel range arrays, or any receiver.
+* `com.google.android.overlay.modules.cellbroadcastservice` (target
+  `CellBroadcastServiceCustomization`) sets `cross_sim_duplicate_detection=false` and
+  `config_area_info_receiver_packages={com.android.systemui}`. It adds no component.
+
+This is the single most important negative result: a Samsung receiver *fork* would have been the
+most likely place for a native trigger to hide, and there is none to hide in.
+
+### 10.3 Samsung did not modify the telephony handlers, `CONFIRMED (firmware)`
+
+`system/framework/telephony-common.jar` decompiles to `GsmInboundSmsHandler` and
+`CdmaInboundSmsHandler` with the identical AOSP gate:
+
+```java
+TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1;
+...
+if (TEST_MODE && this.mTestBroadcastReceiver == null) {
+    this.mTestBroadcastReceiver = new GsmInboundSmsHandler.GsmCbTestBroadcastReceiver();
+    intentFilter.addAction("com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST");
+    context.registerReceiver(this.mTestBroadcastReceiver, intentFilter, 2); // RECEIVER_EXPORTED
+}
+```
+
+`RECEIVER_EXPORTED` (flag value 2), no permission, action unchanged, and the receiver still calls
+`mCellBroadcastServiceManager.sendGsmMessageToHandler(...)`. The AOSP analysis in §3 applies to the
+A35 verbatim.
+
+### 10.4 The protected-broadcast list on the A35, `CONFIRMED (firmware)`
+
+The device's own `framework-res.apk` manifest lists, under `<protected-broadcast>`:
+`android.provider.Telephony.SMS_CB_RECEIVED`,
+`android.provider.action.SMS_EMERGENCY_CB_RECEIVED`,
+`android.provider.Telephony.SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED` and
+`android.telephony.action.SECRET_CODE`. §2's rows 1–9 hold on this build: AMS refuses these before
+broadcast resolution.
+
+### 10.5 The secret code on the A35, `CONFIRMED (firmware)`
+
+Two files settle it. In `DRParser.apk` (`ParseService.java`), `*#*#2627#*#*` is rewritten to the
+**protected** `android.telephony.action.SECRET_CODE` (the rewrite is forced for exactly `2627` and
+`4636`) and sent as a broadcast — so the platform, not Samsung, is what refuses it. In the CB app
+(`CellBroadcastReceiver.java`), the handler is exactly the AOSP one:
+
+```java
+if ("android.telephony.action.SECRET_CODE".equals(action)) {
+    if (SystemProperties.getInt("ro.debuggable", 0) == 1
+            || resources.getBoolean(R.bool.allow_testing_mode_on_user_build)) {
+        setTestingMode(!isTestingMode(this.mContext));
+        ...
+```
+
+And the shipped `res/values/bools.xml` reads `<bool name="allow_testing_mode_on_user_build">true</bool>`
+(not overridden by the RRO). So on the A35 the 2627 toggle *is* live on a `user` build — and it still
+only flips a display filter. It never constructs a message. §4 is confirmed for the A35, gate and
+all.
+
+### 10.6 What each Samsung candidate turned out to be, `CONFIRMED (firmware)`
+
+| Package | Looked like | Is |
+|---|---|---|
+| `com.sec.bcservice` (BCService) | "BC" = Cell Broadcast | A tcpdump/issue-tracker logging service on a unix socket; its only action is `com.sec.android.ISSUE_TRACKER_ONOFF`, `signatureOrSystem` |
+| `com.sec.android.app.parser` (DRParser) | a secret-code injector | The keystring router; routes to broadcast actions and `com.samsung.android.cmd`-style handoffs, never constructs a CB message |
+| `com.samsung.android.telephony.SemSmsCbMessage` | a Samsung CB API | A read-only `Parcelable` wrapper over `SmsCbMessage`; every method a getter |
+| `com.android.phone` (TeleService) | could send CB | Only `get/setCellBroadcastIdRanges`, both requiring signature `MODIFY_CELL_BROADCASTS`; configure ranges, cannot inject |
+| `SecFactoryPhoneTest`, `ModemServiceMode`, `serviceModeApp_FB`, `FactoryTestProvider`, `SVCAgent` | factory test injectors | Test activities, RMS/keystring interfaces, provider reads; none constructs a CB message or calls the alert service |
+| `EmergencyLauncher` | ETWS handler | Reacts to an ETWS *state flag* for the emergency UI; a consumer, not an injector |
+| `com.samsung.rmt_exercise` | a remote-exercise injector | **does not exist in this build** |
+
+A token sweep of every shipped Samsung component and framework jar for
+`TEST_TRIGGER_CELL_BROADCAST`, `pdu_string`, `sendGsmMessageToHandler`, `handleCellBroadcastIntent`,
+`SmsCbMessage` construction and `CellBroadcastAlertService` returned **no hit outside Google's own
+module**. There is no OEM injector in this image to find.
+
+### 10.7 What §10 does not do
+
+It does not prove anything about a *specific handset*. If the operator's A35 has taken a different
+update, the build id differs and these facts must be re-read for that build. It also does not
+demonstrate delivery even on `ro.debuggable=1`: the firmware reading closes the "does a gate exist"
+question, not the "does an alert appear" question, which is still logcat evidence on a device.
+
+### 10.8 Reproducibility
+
+The facts above are encoded in `src-tauri/src/platform.rs` as `samsung_firmware_facts()`, each row
+carrying its `FirmwareEvidence` label and the firmware path it was read from, and are rendered in the
+diagnostics report. That is deliberate: the claims live in code with tests, so a later edit cannot
+quietly upgrade a firmware fact to a device observation.
