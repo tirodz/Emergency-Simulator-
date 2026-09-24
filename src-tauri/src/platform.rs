@@ -789,6 +789,15 @@ pub fn samsung_firmware_facts() -> Vec<FirmwareFact> {
             "system/framework/telephony-common.jar; GsmInboundSmsHandler.java:45-49,70",
         ),
         row(
+            "AOSP gate stability (context)",
+            "The gate Samsung carried unmodified is stable across AOSP android14/15/16: the test \
+             receiver is registered on ro.debuggable==1, RECEIVER_EXPORTED, no permission. This is \
+             the yardstick the A35 was compared against, and it is AOSP-derived rather than read \
+             from the image.",
+            FirmwareEvidence::ProvenOnAosp,
+            "frameworks/opt/telephony GsmInboundSmsHandler (android14/15/16-release)",
+        ),
+        row(
             "Build type",
             "ro.build.type=user, ro.build.tags=release-keys, ro.debuggable=0 and \
              ro.force.debuggable=0. The AOSP test receiver is therefore never registered.",
@@ -1690,6 +1699,25 @@ Packages:
         assert!(fact.claim.contains("toggles"));
         assert!(fact.claim.contains("constructs no"));
         assert!(fact.claim.contains("protected broadcast"));
+    }
+
+    /// An AOSP-derived row must not be counted among the firmware-proven rows, or the "N of M
+    /// proven from the image" number would overstate what was actually read from the phone.
+    #[test]
+    fn aosp_proven_rows_are_not_counted_as_firmware_proven() {
+        let facts = samsung_firmware_facts();
+        let aosp = facts
+            .iter()
+            .filter(|fact| fact.evidence == FirmwareEvidence::ProvenOnAosp)
+            .count();
+        let firmware = facts
+            .iter()
+            .filter(|fact| fact.evidence == FirmwareEvidence::ProvenOnFirmware)
+            .count();
+        assert!(aosp >= 1, "the AOSP yardstick row must exist");
+        assert!(firmware >= 1);
+        assert!(aosp + firmware <= facts.len());
+        assert_eq!(FirmwareEvidence::ProvenOnAosp.label(), "PROVEN (AOSP)");
     }
 
     /// The secret code must be classified as protected *and* not counted as a way in. It is a

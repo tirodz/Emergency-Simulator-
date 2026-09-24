@@ -53,14 +53,16 @@ The answer is `RESULT B`, now proven for the firmware rather than inferred:
 * **`docs/stock-device/A35-native-test-path.md` §10** records the firmware reading in full, upgrading
   the `UNKNOWN` Samsung rows to `CONFIRMED (firmware)`.
 
-### Seven new tests now guard it
+### Eight new tests now guard it
 
 `the_firmware_facts_name_the_exact_build`, `the_firmware_registry_records_the_debuggable_zero_build`,
 `the_registry_records_that_no_oem_injector_was_found`, `bcservice_is_recorded_as_not_cell_broadcast`,
 `the_conclusion_is_generated_from_the_registry`,
-`unproven_claims_are_never_labelled_as_firmware_proven`, and
-`the_firmware_record_keeps_the_secret_code_as_a_toggle` — on top of the channel gate's eight. The
-`platform.rs` module runs 74 tests, all passing (67 → 74), verified locally with `cargo test`.
+`unproven_claims_are_never_labelled_as_firmware_proven`,
+`the_firmware_record_keeps_the_secret_code_as_a_toggle`, and
+`aosp_proven_rows_are_not_counted_as_firmware_proven` — on top of the channel gate's eight. The
+`platform.rs` module runs 75 tests, all passing (67 → 75), and the whole library 112 (104 → 112),
+verified locally with `cargo test` and confirmed green on the Windows CI runner.
 
 ### What this does not change
 
