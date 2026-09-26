@@ -320,7 +320,7 @@ function update(d){
  $("settingsDeviceBtn").disabled=state.sending;
   $("targetHint").textContent=d.state==="READY"?"Native target":(d.state==="UNAUTHORIZED"?"Authorize USB debugging first":"Native path will be probed");
 $("settingsDeviceBtn").style.display="none";
- $("settingsDeviceBtn").textContent=d.local_simulator?"INSTALLED":"INSTALL LOCAL SIMULATOR";}
+ }
 function renderDevices(){
  const list=$("deviceList"),sel=$("targetSelect");if(!state.devices.length){list.innerHTML='<div class="empty"><strong>No Android devices found</strong><span>Connect a phone with USB debugging enabled, then press Refresh.</span></div>';sel.innerHTML='<option value="">No devices detected</option>';state.selected=null;renderDetail(null);update(null);return}
  if(!state.selected||!state.devices.some(d=>d.serial===state.selected))state.selected=state.devices[0].serial;
