@@ -47,7 +47,7 @@ pub fn discover_runtime_test_actions(dumpsys: &str) -> Vec<String> {
 
         if line.starts_with("app=") {
             let lower = line.to_ascii_lowercase();
-            receiver_relevant = ["cellbroadcast", "telephony", "samsung"]
+            receiver_relevant = ["cellbroadcast", "telephony", "phone", "samsung"]
                 .iter()
                 .any(|token| lower.contains(token));
             continue;
