@@ -281,10 +281,7 @@ function renderPreview(d){
  if(!samsung){e.classList.remove("show");return}
  e.classList.add("show");
  $("previewTitle").textContent=d.model||"Samsung Galaxy";
-$("previewCopy").textContent="Samsung hardware reference render. Device identity comes from ADB inspection; alert delivery is native-only.";
-   ?"Samsung device detected. Root-free local alert simulator is installed and ready."
-   :d.state==="NO_ROOT"
-   ?"Samsung device detected. Install the bundled local simulator to test the alert UI without root."
+  $("previewCopy").textContent="Samsung hardware reference render. Device identity comes from ADB inspection; alert delivery is native-only.";
    :"Samsung hardware reference render. Device identity comes from ADB inspection.";
 }
 function cbTarget(d){
