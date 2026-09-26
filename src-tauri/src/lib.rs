@@ -652,6 +652,69 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 ///   lacks the receiver. Omitting the extra uses the default `phoneId`, so the handler for whichever
 ///   phone is active accepts it. On a dual-SIM device both handlers may run, which is a visible,
 ///   diagnosable outcome rather than silence, so it is the safer default.
+fn ui_bounds_for_resource(xml: &str, suffix: &str) -> Option<(i32, i32)> {
+    let needle = format!(r#"resource-id=\"{}\""#, suffix);
+    let start = xml.find(&needle)?;
+    let node_start = xml[..start].rfind("<node")?;
+    let node_end = xml[start..].find('>')? + start;
+    let node = &xml[node_start..=node_end];
+    let key = r#"bounds=\""#;
+    let b = node.find(key)? + key.len();
+    let rest = &node[b..];
+    let e = rest.find('"')?;
+    let vals: Vec<i32> = rest[..e]
+        .replace('[', " ").replace(']', " ").replace(',', " ")
+        .split_whitespace().filter_map(|v| v.parse().ok()).collect();
+    if vals.len() != 4 { return None; }
+    Some(((vals[0] + vals[2]) / 2, (vals[1] + vals[3]) / 2))
+}
+
+fn official_cellbroadcast_harness_present(app: &tauri::AppHandle, serial: &str) -> bool {
+    shell_captured(app, serial, &["pm", "path", "com.android.cellbroadcastreceiver.tests"])
+        .0.lines().any(|line| line.trim().starts_with("package:"))
+}
+
+fn send_via_official_test_harness(
+    app: &tauri::AppHandle,
+    serial: &str,
+    diagnostics: &mut Vec<ProbeEvidence>,
+) -> Result<bool, String> {
+    if !official_cellbroadcast_harness_present(app, serial) {
+        return Ok(false);
+    }
+
+    let (_ignored, rec) = shell_captured(app, serial, &["logcat", "-c"]);
+    diagnostics.push(rec);
+
+    let (_out, rec) = shell_captured(app, serial, &[
+        "am", "start", "-n",
+        "com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity",
+    ]);
+    diagnostics.push(rec);
+    thread::sleep(Duration::from_millis(900));
+
+    let (_out, rec) = shell_captured(app, serial, &[
+        "uiautomator", "dump", "/sdcard/emergency-simulator-window.xml",
+    ]);
+    diagnostics.push(rec);
+
+    let (xml, rec) = shell_captured(app, serial, &["cat", "/sdcard/emergency-simulator-window.xml"]);
+    diagnostics.push(rec);
+
+    let Some((x, y)) = ui_bounds_for_resource(
+        &xml,
+        "com.android.cellbroadcastreceiver.tests:id/button_etws_test_type",
+    ) else {
+        return Err("Official CellBroadcast test harness is installed, but its ETWS TEST button was not found.".to_string());
+    };
+
+    let x_arg = x.to_string();
+    let y_arg = y.to_string();
+    let (_out, rec) = shell_captured(app, serial, &["input", "tap", &x_arg, &y_arg]);
+    diagnostics.push(rec);
+    Ok(true)
+}
+
 fn platform_test_alert_args<'a>(serial: &'a str, action: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
     vec![
         "-s",
