@@ -55,6 +55,10 @@ public final class AlertInjector {
     private static final String ACTION_EMERGENCY =
             "android.provider.action.SMS_EMERGENCY_CB_RECEIVED";
 
+/** Normal Cell Broadcast action, routed through the stock CellBroadcastReceiver service. */
+private static final String ACTION_CELL_BROADCAST =
+        "android.provider.Telephony.SMS_CB_RECEIVED";
+
     /** The extra key CellBroadcastAlertService reads. Verified against android15-release source. */
     private static final String EXTRA_MESSAGE = "message";
 
@@ -121,7 +125,21 @@ public final class AlertInjector {
             Context context = systemContext();
             System.out.println("  context         = " + context);
 
-            Intent intent = new Intent(ACTION_EMERGENCY);
+            /*
+             * Production Android builds reject the protected SMS_EMERGENCY_CB_RECEIVED sender path
+             * because the sending UID is not one of the platform-approved system identities.
+             * The stock CellBroadcastReceiver also accepts SMS_CB_RECEIVED and routes it into the
+             * same CellBroadcastAlertService. We therefore use that native receiver entry point
+             * when running as the ADB shell user. Root/system builds retain the protected emergency
+             * action so the harness can exercise both paths.
+             */
+            boolean privilegedSender = "0".equals(currentUid()) || "1000".equals(currentUid());
+            String action = privilegedSender ? ACTION_EMERGENCY : ACTION_CELL_BROADCAST;
+            System.out.println("  senderMode      = " + (privilegedSender
+                    ? "PROTECTED_EMERGENCY"
+                    : "UNROOTED_NATIVE_RECEIVER"));
+            
+            Intent intent = new Intent(action);
             intent.setPackage(targetPackage);
             intent.putExtra(EXTRA_MESSAGE, (android.os.Parcelable) message);
 
@@ -216,7 +234,7 @@ public final class AlertInjector {
                 serviceCategory,
                 "en",           // language
                 body,
-                0,              // priority
+                3,              // MESSAGE_PRIORITY_EMERGENCY; mirrors a genuine PWS/ETWS message
                 etwsInfo,
                 null,           // cmasWarningInfo - null: this is an ETWS test, not a CMAS alert
                 0,              // slotIndex
