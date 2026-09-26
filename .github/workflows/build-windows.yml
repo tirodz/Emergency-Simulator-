@@ -2,7 +2,7 @@ name: Build Emergency Simulator Windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/platform-diagnostics]
   pull_request:
     branches: [main]
   workflow_dispatch:
