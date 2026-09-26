@@ -2610,238 +2610,63 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
-            diag(
-                &app,
-                &mut result,
-                stage::LOCAL_SIMULATOR_CHECK,
-                "pm path",
-                Some("not installed; installing the bundled local simulator".to_string()),
-                None,
-                None,
-                "info",
-            );
-            match install_local_simulator(&app, &serial) {
-                Ok(message) => {
-                    device.local_simulator = true;
-                    device.state = DeviceState::SimulatorReady;
-                    device.support_level = SupportLevel::LocalSimulator;
-                    diag(
-                        &app,
-                        &mut result,
-                        stage::LOCAL_SIMULATOR_INSTALL,
-                        "adb install",
-                        Some(message),
-                        None,
-                        None,
-                        "ok",
-                    );
-                }
-                Err(error) => {
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::LOCAL_SIMULATOR_INSTALL,
-                        "LOCAL_SIMULATOR_INSTALL_FAILED",
-                        "adb install",
-                        error,
-                        None,
-                        None,
-                    );
-                    return Ok(result);
-                }
-            }
-        }
-
-        if matches!(device.state, DeviceState::SimulatorReady) {
-            let mut probe_evidence = Vec::new();
-            let capabilities = simulator_capabilities(&app, &serial, &mut probe_evidence);
-            diag(
-                &app,
-                &mut result,
-                stage::CAPABILITY_CHECK,
-                "simulator capability probe",
-                Some(format!(
-                    "installed={} post_notifications={} ({}) full_screen_intent={} ({}) notifications_enabled={}",
-                    capabilities.installed,
-                    capabilities.post_notifications.label(),
-                    capabilities.post_notifications_detail,
-                    capabilities.full_screen_intent.label(),
-                    capabilities.full_screen_intent_detail,
-                    capabilities.notifications_enabled.label(),
-                )),
-                None,
-                None,
-                if capabilities.installed { "info" } else { "warn" },
-            );
-
-            for entry in &probe_evidence {
-                diag(
-                    &app,
-                    &mut result,
-                    stage::CAPABILITY_CHECK,
-                    format!("probe: {}", entry.command),
-                    Some(format!(
-                        "exit={:?} parsed={}",
-                        entry.exit_code,
-                        if entry.parsed.is_empty() { "-" } else { &entry.parsed }
-                    )),
-                    (!entry.stdout.trim().is_empty()).then(|| truncate_for_log(&entry.stdout, 1200)),
-                    (!entry.stderr.trim().is_empty()).then(|| truncate_for_log(&entry.stderr, 600)),
-                    "info",
-                );
-            }
-
-            // Only an explicit denial blocks the send. An UNKNOWN result means the probe could not
-            // read the grant state, which is a reason to warn, not a reason to refuse: refusing on
-            // unknown is how this tool previously told operators to grant a permission that was
-            // already granted.
-            if capabilities.post_notifications == PlatformState::Denied {
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::CAPABILITY_CHECK,
-                    "NOTIFICATION_PERMISSION_DENIED",
-                    "POST_NOTIFICATIONS",
-                    "Notification permission is explicitly denied for Emergency Simulator Local. \
-                     Android will run the receiver and then drop the notification silently. Grant \
-                     notifications for that app on the phone, then retry.",
-                    None,
-                    None,
-                );
-                return Ok(result);
-            }
-
-            if capabilities.post_notifications == PlatformState::Unknown {
-                diag(
-                    &app,
-                    &mut result,
-                    stage::CAPABILITY_CHECK,
-                    "notification permission state is unknown",
-                    Some(
-                        "The probe could not read an explicit grant state. Continuing, but a \
-                         denied notification permission would silently suppress the alert."
-                            .to_string(),
-                    ),
-                    None,
-                    None,
-                    "warn",
-                );
-            }
-
-            if capabilities.full_screen_intent == PlatformState::Denied {
-                diag(
-                    &app,
-                    &mut result,
-                    stage::CAPABILITY_CHECK,
-                    "full-screen intent is denied",
-                    Some(
-                        "USE_FULL_SCREEN_INTENT is denied, so Android will show a heads-up \
-                         notification instead of a full-screen alert. The alert still posts; only \
-                         the presentation differs."
-                            .to_string(),
-                    ),
-                    None,
-                    None,
-                    "warn",
-                );
-            }
-
-            let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-
-            let script = local_simulator_command_script(
-                "EMERGENCY SIMULATOR TEST",
-                &normalized_body,
-                "TEST",
-                SERVICE_CATEGORY,
-            );
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_DISPATCH,
-                format!("adb -s {serial} shell {script}"),
-                Some("explicit component com.tirodz.emergencysimulator/.AlertReceiver".to_string()),
-                None,
-                None,
-                "info",
-            );
-
-            let broadcast_started = Instant::now();
-            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
-                Ok(output) => output,
-                Err(error) => {
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::ADB_BROADCAST_RESULT,
-                        "ADB_TRANSPORT",
-                        "adb shell am broadcast",
-                        error,
-                        None,
-                        None,
-                    );
-                    return Ok(result);
-                }
+        // Production Send Test Alert is native-only. Never install or invoke the local
+        // notification simulator from this action.
+        if matches!(device.state, DeviceState::Unauthorized | DeviceState::Offline | DeviceState::Unknown) {
+            let _ = set_tx(&app, &tx_store, &serial, None);
+            let (failure_code, message) = match device.state {
+                DeviceState::Unauthorized => ("DEVICE_UNAUTHORIZED", "Accept the USB debugging authorization prompt on the phone first."),
+                DeviceState::Offline => ("DEVICE_OFFLINE", "ADB reports this device as offline."),
+                DeviceState::Unknown => ("DEVICE_UNKNOWN", "The device is not in a known ADB-ready state."),
+                _ => ("DEVICE_NOT_READY", "The selected device is not ready for an ADB operation."),
             };
-
-
-            result.injector_exit_code = output.status.code();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let combined = output_text(&output).trim().to_string();
-
-            let broadcast_ms = broadcast_started.elapsed().as_millis() as u64;
-
-            diag_timed(
+            fail_stage(
                 &app,
                 &mut result,
-                stage::ADB_BROADCAST_RESULT,
-                "adb shell am broadcast",
-                Some(format!("exit={:?}", output.status.code())),
-                Some(stdout.clone()).filter(|s| !s.is_empty()),
-                Some(stderr.clone()).filter(|s| !s.is_empty()),
-                broadcast_ms,
-                if output.status.success() { "info" } else { "error" },
+                stage::DEVICE_CHECK,
+                failure_code,
+                "adb device state",
+                message,
+                None,
+                None,
             );
-
-            // The exit status of `am broadcast` is deliberately not treated as delivery evidence.
-            // It only means the command was accepted, so a failure here is reported and a success
-            // still has to be proved by the stage lines below.
-            if !output.status.success() {
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::ADB_BROADCAST_RESULT,
-                    "LOCAL_BROADCAST_FAILED",
-                    "adb shell am broadcast",
-                    if combined.is_empty() {
-                        "The broadcast command was rejected and produced no output.".to_string()
-                    } else {
-                        combined
-                    },
-                    Some(stdout).filter(|s| !s.is_empty()),
-                    Some(stderr).filter(|s| !s.is_empty()),
-                );
-                return Ok(result);
-            }
-
-            collect_local_simulator_evidence(
-                &app,
-                &serial,
-                &cancel_store,
-                &mut result,
-                &tx_store,
-            )?;
-            clear_cancel(&cancel_store, &serial);
-            result.duration_ms = Some(send_started.elapsed().as_millis() as u64);
-            let _ = persist_transactions(&app, &tx_store);
             return Ok(result);
         }
+
+        if dry_run {
+            let test_entrypoint = platform::assess_test_entrypoint(
+                &device.debuggable.clone().unwrap_or_default(),
+                device.cellbroadcast_package.as_deref(),
+            );
+            result.state = "READY_TO_SEND".to_string();
+            result.message = format!(
+                "Native-only dry run. AOSP test entry point: {}. No simulator will be installed and no device state will be changed.",
+                test_entrypoint.available.label()
+            );
+            return Ok(result);
+        }
+
+        // The native platform receiver is the only production send path. It may be the standard
+        // AOSP test receiver or a narrowly-qualified exported OEM test action discovered live by
+        // send_platform_test_alert; either way, downstream Cell Broadcast evidence is required.
+        set_tx(&app, &tx_store, &serial, Some(TxState::Busy))?;
+        let platform_result = send_platform_test_alert(
+            app.clone(),
+            serial.clone(),
+            normalized_body.clone(),
+            Some(platform::default_alert_channel().message_id),
+        )?;
+        let mapped = platform_send_to_legacy_result(platform_result, send_started);
+        match mapped.state.as_str() {
+            "ALERT_DISPLAYED" => set_tx(&app, &tx_store, &serial, Some(TxState::Delivered))?,
+            "UNCERTAIN" => set_tx(&app, &tx_store, &serial, Some(TxState::Uncertain))?,
+            _ => {
+                tx_store.map.lock().unwrap().remove(&serial);
+            }
+        }
+        let _ = persist_transactions(&app, &tx_store);
+        clear_cancel(&cancel_store, &serial);
+        return Ok(mapped);
 
         // The native platform receiver is the real root-free development path. It is an
         // exported, dynamically registered AOSP test receiver on debuggable builds, so there is
