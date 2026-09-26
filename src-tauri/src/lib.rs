@@ -653,12 +653,12 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 ///   phone is active accepts it. On a dual-SIM device both handlers may run, which is a visible,
 ///   diagnosable outcome rather than silence, so it is the safer default.
 fn ui_bounds_for_resource(xml: &str, suffix: &str) -> Option<(i32, i32)> {
-    let needle = format!(r#"resource-id=\"{}\""#, suffix);
+    let needle = format!(r#"resource-id="{}""#, suffix);
     let start = xml.find(&needle)?;
     let node_start = xml[..start].rfind("<node")?;
     let node_end = xml[start..].find('>')? + start;
     let node = &xml[node_start..=node_end];
-    let key = r#"bounds=\""#;
+    let key = r#"bounds=""#;
     let b = node.find(key)? + key.len();
     let rest = &node[b..];
     let e = rest.find('"')?;
