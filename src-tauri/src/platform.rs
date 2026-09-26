@@ -28,6 +28,45 @@ pub const ETWS_TEST_SERVICE_CATEGORY: u32 = 4355;
 /// The property whose value decides whether the AOSP test receiver exists at all.
 pub const DEBUGGABLE_PROPERTY: &str = "ro.debuggable";
 
+/// Discover exported diagnostic receiver actions from package-manager output.
+/// Only actions explicitly named as TEST plus a broadcast/emergency token are returned.
+pub fn discover_test_actions(dumpsys: &str) -> Vec<String> {
+    let mut in_receiver = false;
+    let mut exported = false;
+    let mut out = Vec::new();
+    for raw in dumpsys.lines() {
+        let line = raw.trim();
+        if line.starts_with("Package [") {
+            in_receiver = false;
+            exported = false;
+        } else if line.contains("Receiver{") {
+            in_receiver = true;
+            exported = false;
+        } else if !in_receiver {
+            continue;
+        } else if line.contains("exported=true") {
+            exported = true;
+        } else if line.starts_with("Action:") || line.starts_with("action=") {
+            let action = line.split_once('"')
+                .and_then(|(_, r)| r.split_once('"').map(|(a, _)| a))
+                .or_else(|| line.split_once('=').map(|(_, a)| a.trim_matches('"').trim()));
+            if let Some(action) = action {
+                let u = action.to_ascii_uppercase();
+                let eligible = exported
+                    && u.contains("TEST")
+                    && ["CELL", "BROADCAST", "EMERGENCY", "ALERT", "CMAS", "ETWS"]
+                        .iter().any(|token| u.contains(token));
+                if eligible && !out.iter().any(|x| x == action) {
+                    out.push(action.to_string());
+                }
+            }
+        }
+    }
+    out.truncate(12);
+    out
+}
+
+
 /// One alert channel this tool can address, together with the receive-side gate that decides
 /// whether `/packages/apps/CellBroadcastReceiver` will actually raise it.
 ///
@@ -1840,6 +1879,23 @@ pub struct ProbeEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_exported_test_actions() {
+        let dump = r#"
+Package [com.vendor.test] (123):
+  Receiver{abc com.vendor.test/.Receiver}
+    exported=true
+    Action: "com.vendor.TEST_CELL_BROADCAST"
+  Receiver{def com.vendor.test/.Private}
+    exported=false
+    Action: "com.vendor.TEST_EMERGENCY_ALERT"
+"#;
+        assert_eq!(
+            discover_test_actions(dump),
+            vec!["com.vendor.TEST_CELL_BROADCAST".to_string()]
+        );
+    }
 
     // -----------------------------------------------------------------------------------------
     // Permission parsing: the bug the operator actually hit
