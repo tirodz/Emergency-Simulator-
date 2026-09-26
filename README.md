@@ -2,7 +2,7 @@
 
 A Windows desktop laboratory console for controlled Android CellBroadcast testing.
 
-> This application does not transmit cellular signals, inject RF, impersonate a carrier, or operate a cellular network. The controlled test path uses Android's own protected CellBroadcast machinery on a rooted/userdebug development target.
+> This application does not transmit cellular signals, inject RF, impersonate a carrier, or operate a cellular network. The controlled test path uses Android's own CellBroadcast machinery on a debuggable userdebug/eng development target; the AOSP test receiver itself does not require root.
 
 ## v2.0 desktop rebuild
 
