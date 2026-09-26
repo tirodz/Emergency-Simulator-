@@ -2748,6 +2748,9 @@ mod tests {
                 "--es",
                 "pdu_string",
                 "00001100",
+                "--es",
+                "pdu",
+                "00001100",
             ]
         );
         // The regressions, stated directly so the reason survives a refactor of the vector.
