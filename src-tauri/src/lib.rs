@@ -652,7 +652,7 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 ///   lacks the receiver. Omitting the extra uses the default `phoneId`, so the handler for whichever
 ///   phone is active accepts it. On a dual-SIM device both handlers may run, which is a visible,
 ///   diagnosable outcome rather than silence, so it is the safer default.
-fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
+fn platform_test_alert_args<'a>(serial: &'a str, action: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
     vec![
         "-s",
         serial,
@@ -660,7 +660,7 @@ fn platform_test_alert_args<'a>(serial: &'a str, pdu_hex: &'a str) -> Vec<&'a st
         "am",
         "broadcast",
         "-a",
-        platform::TEST_TRIGGER_ACTION,
+        action,
         "--es",
         "pdu_string",
         pdu_hex,
@@ -2151,17 +2151,33 @@ fn send_platform_test_alert(
     let entrypoint = platform::assess_test_entrypoint(&debuggable, receiver.as_deref());
     result.entrypoint_available = entrypoint.available;
 
-    if entrypoint.available != PlatformState::Granted {
+    // AOSP is preferred. If it is unavailable, inspect the live package registry for a
+    // narrowly-qualified exported diagnostic action. The parser only accepts TEST actions
+    // containing a Cell Broadcast/emergency token; arbitrary OEM actions are never guessed.
+    let package_dump = shell_captured(&app, &serial, &["dumpsys", "package"]);
+    diagnostics.push(package_dump.1);
+    let discovered_actions = platform::discover_test_actions(&package_dump.0);
+    if !discovered_actions.is_empty() {
+        result.evidence.push(format!(
+            "Discovered exported diagnostic test actions: {}",
+            discovered_actions.join(", ")
+        ));
+    }
+
+    let native_action = if entrypoint.available == PlatformState::Granted {
+        Some(platform::TEST_TRIGGER_ACTION.to_string())
+    } else {
+        discovered_actions.first().cloned()
+    };
+
+    if native_action.is_none() {
         result.state = "BLOCKED".to_string();
         result.message = entrypoint.reason.clone();
         result.failure = Some(entrypoint.available.label().to_string());
-        // The device and its capabilities were read, but the native path could not be selected for
-        // this build. That is the rung the attempt stopped on, and it is not a delivery claim.
         result.verification_stage = platform::VerificationStage::CapabilitiesDetected;
         result.diagnostics = diagnostics;
         return Ok(result);
     }
-
     // 2. Build the PDU here, from validated input, so the device receives a checked message.
     let serial_number = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2194,7 +2210,7 @@ fn send_platform_test_alert(
     diagnostics.push(record);
 
     // 4. Send. Every argument is a separate argv element: no shell string is ever constructed.
-    let args = platform_test_alert_args(&serial, &pdu_hex);
+    let args = platform_test_alert_args(&serial, native_action.as_deref().unwrap_or(platform::TEST_TRIGGER_ACTION), &pdu_hex);
     let (stdout, record) = run_captured(&app, &args);
     // `am` reports a missing receiver on stdout while still exiting 0 on some builds, so the
     // wording is checked as well as the exit code.
