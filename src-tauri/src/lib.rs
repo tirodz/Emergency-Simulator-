@@ -678,34 +678,67 @@ fn platform_test_alert_args<'a>(serial: &'a str, action: &'a str, pdu_hex: &'a s
 /// handling alerts is not decidable from the package list, so the controller carries them in
 /// preference order and lets the device decide.
 fn cellbroadcast_candidates(app: &tauri::AppHandle, serial: &str) -> Vec<String> {
-    let text = match shell(app, serial, &["pm", "list", "packages"]) {
-        Ok(text) => text,
-        Err(_) => return Vec::new(),
-    };
+    // Resolve the actual receiver for the Cell Broadcast actions first. The Android module is
+    // shipped inside the com.android.cellbroadcast APEX on modern builds, so package-name
+    // substring matching is not reliable.
+    let actions = [
+        "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+        "android.provider.Telephony.SMS_CB_RECEIVED",
+    ];
 
-    let mut packages = text.lines()
-        .map(str::trim)
-        .filter_map(|line| line.strip_prefix("package:"))
-        .filter(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let mut packages = Vec::<String>::new();
+    for action in actions {
+        if let Ok(text) = shell(
+            app,
+            serial,
+            &["cmd", "package", "query-receivers", "--components", "-a", action],
+        ) {
+            for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                let token = line.split_whitespace().last().unwrap_or(line);
+                if let Some((package, class_name)) = token.split_once('/') {
+                    if !package.is_empty() && !class_name.is_empty()
+                        && package.contains('.')
+                        && !package.starts_with("No ")
+                        && !package.starts_with("Error")
+                    {
+                        if !packages.iter().any(|p| p == package) {
+                            packages.push(package.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    // Rank by how specifically the name identifies a receiver module, then alphabetically so the
-    // order is stable across runs rather than dependent on `pm list` output order.
+    // Fallback for vendor builds that restrict query-receivers.
+    if packages.is_empty() {
+        if let Ok(text) = shell(app, serial, &["pm", "list", "packages"]) {
+            packages.extend(
+                text.lines()
+                    .map(str::trim)
+                    .filter_map(|line| line.strip_prefix("package:"))
+                    .filter(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
+                    .map(str::to_string),
+            );
+        }
+    }
+
     packages.sort_by_key(|package| {
         let lower = package.to_ascii_lowercase();
         let rank = if lower.contains("cellbroadcastreceiver") {
             0
         } else if lower.contains("cellbroadcast") {
             1
-        } else {
+        } else if lower.contains("google") {
             2
+        } else {
+            3
         };
         (rank, lower)
     });
     packages.dedup();
-
     packages
+}
 }
 
 /// Read whether the device is already running adbd as root, without changing anything.
@@ -1836,6 +1869,15 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
 
     let (build_type, record) = shell_captured(&app, &serial, &["getprop", "ro.build.type"]);
     evidence.push(record);
+
+    let (harness_path, mut harness_record) =
+        shell_captured(&app, &serial, &["pm", "path", "com.android.cellbroadcastreceiver.tests"]);
+    harness_record.parsed = if harness_path.trim().is_empty() {
+        "AOSP CellBroadcast test harness package is not installed.".to_string()
+    } else {
+        format!("AOSP CellBroadcast test harness installed: {}", harness_path.trim())
+    };
+    evidence.push(harness_record);
 
     let candidates = cellbroadcast_candidates(&app, &serial);
     let cellbroadcast_package = candidates.first().cloned();
