@@ -2397,11 +2397,12 @@ fn request_cancel(
 
 
 fn platform_send_to_legacy_result(platform: PlatformSendResult, started: Instant) -> SendResult {
+    let device_serial = platform.device_serial.clone();
     let success = platform.state == "ALERT_DISPLAYED";
     let uncertain = platform.state == "ACCEPTED_NO_EVIDENCE";
     let failure = platform.failure.clone();
     SendResult {
-        device_serial: platform.device_serial,
+        device_serial,
         category: platform.channel_id as u32,
         body: platform.body,
         state: if success { "ALERT_DISPLAYED".to_string() } else if uncertain {
@@ -2417,7 +2418,7 @@ fn platform_send_to_legacy_result(platform: PlatformSendResult, started: Instant
             .and_then(|p| p.exit_code),
         diagnostics: platform.diagnostics.into_iter().map(|p| DiagEvent {
             stage: "NATIVE_PLATFORM_PROBE".to_string(),
-            serial: platform.device_serial.clone(),
+            serial: device_serial.clone(),
             action: p.command,
             detail: Some(p.parsed),
             stdout: (!p.stdout.is_empty()).then_some(p.stdout),
@@ -2888,7 +2889,7 @@ async fn send_test_alert(
             normalized_body.clone(),
             Some(platform::default_alert_channel().message_id),
         )?;
-        let mut mapped = platform_send_to_legacy_result(platform_result, send_started);
+        let mapped = platform_send_to_legacy_result(platform_result, send_started);
         if mapped.state == "ALERT_DISPLAYED" {
             set_tx(&app, &tx_store, &serial, Some(TxState::Delivered))?;
         } else {
