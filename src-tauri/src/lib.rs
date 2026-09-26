@@ -2668,60 +2668,9 @@ async fn send_test_alert(
         clear_cancel(&cancel_store, &serial);
         return Ok(mapped);
 
-        // The native platform receiver is the real root-free development path. It is an
-        // exported, dynamically registered AOSP test receiver on debuggable builds, so there is
-        // no reason to manufacture a system-UID process or write CellBroadcast preferences.
-        //
-        // Retail/user builds never reach this branch: parse_devices() marks them NO_ROOT because
-        // ro.debuggable=0, and the stock path above remains the explicitly-labelled local UI
-        // simulator. This keeps the physical phone path honest while making userdebug/eng targets
-        // genuinely root-free.
-        if !matches!(device.state, DeviceState::Ready) {
-            let (failure_code, message) = match device.state {
-                DeviceState::Unauthorized => (
-                    "DEVICE_UNAUTHORIZED",
-                    "Accept the USB debugging authorization prompt on the phone first.",
-                ),
-                DeviceState::Offline => ("DEVICE_OFFLINE", "ADB reports this device as offline."),
-                DeviceState::NoRoot => (
-                    "NATIVE_PATH_UNAVAILABLE",
-                    "This production/user build has no AOSP Cell Broadcast test receiver. The native root-free path is unavailable.",
-                ),
-                DeviceState::Unsupported => (
-                    "CELLBROADCAST_MISSING",
-                    "No CellBroadcast receiver package was detected.",
-                ),
-                DeviceState::Unknown => (
-                    "DEVICE_UNKNOWN",
-                    "The device is not in a known ADB-ready state.",
-                ),
-                DeviceState::Ready => ("UNKNOWN", "Device is ready."),
-                DeviceState::SimulatorReady => (
-                    "LOCAL_SIMULATOR",
-                    "Local Android simulator is ready.",
-                ),
-            };
-
-            fail_stage(
-                &app,
-                &mut result,
-                stage::DEVICE_CHECK,
-                failure_code,
-                "device state gate",
-                message,
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
-        if dry_run {
-            result.state = "READY_TO_SEND".to_string();
-            result.message =
-                "Native AOSP test receiver is available. Dry run made no device changes."
-                    .to_string();
-            return Ok(result);
-        }
+        // Native-only send reaches the platform sender below. NO_ROOT does not block
+        // this call because send_platform_test_alert performs the live OEM test-surface discovery.
+        // Only non-device states were rejected above.
 
         set_tx(&app, &tx_store, &serial, Some(TxState::Busy))?;
         let platform_result = send_platform_test_alert(
