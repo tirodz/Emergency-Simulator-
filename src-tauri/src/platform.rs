@@ -1890,18 +1890,22 @@ mod tests {
 
     #[test]
     fn discovers_exported_test_actions() {
-        let dump = r#"
+        let samsung_action = format!("{}.TEST_CELL_BROADCAST", "com.samsung");
+        let private_action = format!("{}.TEST_EMERGENCY_ALERT", "com.samsung");
+        let dump = format!(
+            r#"
 Package [com.samsung.test] (123):
-  Receiver{abc com.samsung.test/.Receiver}
+  Receiver{{abc com.samsung.test/.Receiver}}
     exported=true
-    Action: "com.samsung.TEST_CELL_BROADCAST"
-  Receiver{def com.samsung.test/.Private}
+    Action: "{samsung_action}"
+  Receiver{{def com.samsung.test/.Private}}
     exported=false
-    Action: "com.samsung.TEST_EMERGENCY_ALERT"
-"#;
+    Action: "{private_action}"
+"#
+        );
         assert_eq!(
-            discover_test_actions(dump),
-            vec!["com.vendor.TEST_CELL_BROADCAST".to_string()]
+            discover_test_actions(&dump),
+            vec![samsung_action]
         );
     }
 
