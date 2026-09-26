@@ -1867,9 +1867,6 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
     let test_entrypoint =
         platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
 
-    let local_simulator_installed = local_simulator_installed(&app, &serial);
-    let capabilities = simulator_capabilities(&app, &serial, &mut evidence);
-
     // Capability is the *lowest* honest stage: what the device is, not what we hope it is.
     let stage = if receiver_declared == PlatformState::Granted
         && test_entrypoint.available == PlatformState::Granted
@@ -1905,10 +1902,11 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
         cellbroadcast_candidates: candidates,
         cellbroadcast_package,
         receiver_declared,
-        local_simulator_installed,
-        post_notifications: capabilities.post_notifications,
-        full_screen_intent: capabilities.full_screen_intent,
-        notifications_enabled: capabilities.notifications_enabled,
+        // Native-only release: an old companion app on the phone is intentionally ignored.
+        local_simulator_installed: false,
+        post_notifications: PlatformState::Unknown,
+        full_screen_intent: PlatformState::Unknown,
+        notifications_enabled: PlatformState::Unknown,
         stage,
         summary,
         evidence,
