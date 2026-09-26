@@ -13,7 +13,7 @@ The Windows application has been rebuilt around:
 - HTML / CSS / JavaScript
 - WebView2
 - bundled adb.exe
-- a bundled development-only Android test injector
+- Android's exported AOSP Cell Broadcast test receiver on debuggable development targets
 
 The previous Tkinter/Python window is retired from the product path.
 
@@ -40,18 +40,24 @@ Windows Tauri console
         |
        ADB
         |
-root/userdebug Android device
+userdebug / eng Android device (ro.debuggable=1)
         |
-AlertInjector
+AOSP TEST_TRIGGER_CELL_BROADCAST
         |
-protected Android CellBroadcast receiver
+GsmInboundSmsHandler -> CellBroadcastServiceManager
         |
-CellBroadcast service
+CellBroadcastService -> CellBroadcastReceiver
         |
-system alert audio + UI
+native alert audio + UI
 ~~~
 
-The only message class exposed by the controller is AOSP ETWS TEST channel 4355 (0x1103), and the controller rejects message bodies that do not begin with TEST.
+The controller now uses the **exported AOSP telephony test receiver directly**. It does not create a
+system-UID process, does not call `adb root`, and does not rewrite Cell Broadcast preferences.
+The default payload uses ETWS primary channel `0x1100`, which AOSP enables by default; the old
+`0x1103` test channel required additional testing-mode state and was a poor default.
+
+The message body is still required to begin with `TEST`, and the backend requires downstream
+Cell Broadcast evidence before reporting delivery.
 
 ## Stock-device boundary
 
@@ -94,14 +100,14 @@ npm install
 npx tauri build --ci
 ~~~
 
-The released desktop bundle is self-contained for ADB and the development injector. Rebuilding the injector source still requires an Android SDK/JDK.
+The released desktop bundle is self-contained for ADB and the local simulator. No Android injector JAR is bundled.
 
 ## Project layout
 
 ~~~text
 src/                       Tauri frontend
 src-tauri/                 Rust/Tauri backend
-android/alertinject/       controlled Android test injector
+android/alertinject/       historical injector research (not bundled or used)
 android/local-simulator/   root-free local alert simulator (Android app)
 packaging/                 Windows packaging notes
 docs/                      research + design notes
