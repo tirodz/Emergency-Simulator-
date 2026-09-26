@@ -10,9 +10,8 @@
  *     collapsed badly below ~1180px. Neither is visible in a diff.
  *
  *  2. Honesty. The fake device payloads below include the exact state that used to be misreported:
- *     a stock Samsung with no root. The assertions require the word "not a Cell Broadcast" (or an
- *     equivalent explicit disclaimer) to be present wherever the UI describes the local simulator,
- *     and require no element to claim the stock device is READY.
+ *     a stock Samsung with no root. The assertions require native-only wording and require no element
+ *     to claim the stock device is READY. An old local-simulator installation is intentionally ignored.
  *
  * Run: node tools/check_ui.mjs
  */
@@ -101,12 +100,12 @@ const PROBE = {
   cellbroadcast_candidates: STOCK_A35.cellbroadcast_candidates,
   cellbroadcast_package: STOCK_A35.cellbroadcast_package,
   receiver_declared: "GRANTED",
-  local_simulator_installed: true,
+  local_simulator_installed: false,
   post_notifications: "UNKNOWN",
   full_screen_intent: "DENIED",
   notifications_enabled: "UNKNOWN",
   stage: "RECEIVER_DISCOVERED",
-  summary: "ro.debuggable=0. Use the local simulator command instead.",
+  summary: "ro.debuggable=0. Native Cell Broadcast test entry point unavailable; no local simulator fallback is used.",
   evidence: [
     {
       label: "getprop ro.debuggable",
@@ -176,7 +175,7 @@ for (const width of WIDTHS) {
     "</head>",
     `<script>${BRIDGE}</script><script>window.__FIXTURES__=${JSON.stringify({
       devices: DEVICES,
-      all: { stock: STOCK_A35, sim: SIMULATOR_READY, dbg: DEBUGGABLE },
+      all: { stock: STOCK_A35, dbg: DEBUGGABLE },
       probe: PROBE,
       platformSend: {
         device_serial: "emulator-5554",
@@ -192,16 +191,7 @@ for (const width of WIDTHS) {
         logcat_excerpt: "",
         diagnostics: PROBE.evidence,
       },
-      localSend: {
-        device_serial: "R5CXA1B2C3D",
-        category: 4355,
-        body: "TEST ALERT",
-        state: "NOTIFICATION_POSTED",
-        failure: null,
-        message: "Local notification posted.",
-        evidence: [],
-        diagnostics: [],
-      },
+      localSend: null,
     })};</script></head>`
   );
 
