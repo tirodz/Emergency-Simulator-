@@ -2307,7 +2307,8 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     Ok(AppInfo {
         version: "1.0.0".to_string(),
         adb_source: source,
-        // The shipped controller no longer bundles or uses the old system-UID injector.\n        injector: false,
+        // The shipped controller no longer bundles or uses the old system-UID injector.
+        injector: false,
     })
 }
 
@@ -2439,7 +2440,7 @@ fn platform_send_to_legacy_result(platform: PlatformSendResult, started: Instant
     let uncertain = platform.state == "ACCEPTED_NO_EVIDENCE";
     let failure = platform.failure.clone();
     SendResult {
-        device_serial,
+        device_serial: device_serial.clone(),
         category: platform.channel_id as u32,
         body: platform.body,
         state: if success { "ALERT_DISPLAYED".to_string() } else if uncertain {
@@ -2572,7 +2573,7 @@ async fn send_test_alert(
             "info",
         );
 
-        let mut device = parse_devices(&app)?
+        let device = parse_devices(&app)?
             .into_iter()
             .find(|device| device.serial == serial)
             .ok_or_else(|| "The selected device is no longer attached.".to_string())?;
@@ -2684,27 +2685,6 @@ async fn send_test_alert(
             _ => {
                 tx_store.map.lock().unwrap().remove(&serial);
             }
-        }
-        let _ = persist_transactions(&app, &tx_store);
-        clear_cancel(&cancel_store, &serial);
-        return Ok(mapped);
-
-        // Native-only send reaches the platform sender below. NO_ROOT does not block
-        // this call because send_platform_test_alert performs the live OEM test-surface discovery.
-        // Only non-device states were rejected above.
-
-        set_tx(&app, &tx_store, &serial, Some(TxState::Busy))?;
-        let platform_result = send_platform_test_alert(
-            app.clone(),
-            serial.clone(),
-            normalized_body.clone(),
-            Some(platform::default_alert_channel().message_id),
-        )?;
-        let mapped = platform_send_to_legacy_result(platform_result, send_started);
-        if mapped.state == "ALERT_DISPLAYED" {
-            set_tx(&app, &tx_store, &serial, Some(TxState::Delivered))?;
-        } else {
-            set_tx(&app, &tx_store, &serial, Some(TxState::Uncertain))?;
         }
         let _ = persist_transactions(&app, &tx_store);
         clear_cancel(&cancel_store, &serial);
