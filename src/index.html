@@ -394,21 +394,22 @@ function renderChannel(){
 }
 function openConfirm(){const d=selected();if(!d||!(d.state==="READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED"))return;const c=selectedChannel();const ch=c?`0x${c.message_id.toString(16).toUpperCase().padStart(4,"0")} (${c.label})`:"the default channel";const gate=c?(c.enabled_by_default?"This channel is enabled by default.":`This channel is disabled by default: ${c.requirement}`):"";$("confirmText").textContent=`The desktop will send one 3GPP TS 23.041 Cell Broadcast test PDU to ${deviceLabel(d)} through a native Android test interface discovered on the device. ${ch}. ${gate} If no proven native injection interface exists, the operation stops. No local notification simulator, RF transmission, or cellular-network operation is used.`;$("backdrop").classList.add("show");$("confirmModal").classList.add("show");$("modalYes").onclick=()=>{closeConfirm();runSend(false)};$("modalNo").onclick=closeConfirm}
 function closeConfirm(){$("confirmModal").classList.remove("show");if(!$("settingsPanel").classList.contains("show"))$("backdrop").classList.remove("show")}
-async function runSend(dry){if(!validate())return;const d=selected();if(!d)return;if(!dry&&!(d.state==="READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED")){toast("Authorize the device before sending.","error");return}
-  state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing native Cell Broadcast test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));try{
-   /* Native-only release path. The desktop never installs or invokes the local notification simulator. */
-   if(!dry){
-    log("Using the native Android Cell Broadcast test path");
-    const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value,channel:state.channel});
-    if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,verification_stage:r.verification_stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:false,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
-    showResult(r);return;
-   }
-   const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:true});showResult(r)
-   if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,verification_stage:r.verification_stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:d.local_simulator,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
+async function runSend(dry){
+ if(!validate())return;const d=selected();if(!d)return;
+ if(!dry&&!(d.state==="READY"||d.state==="NO_ROOT"||d.state==="UNSUPPORTED")){toast("Authorize the device before sending.","error");return}
+ state.sending=true;$("sendBtn").disabled=true;$("dryBtn").disabled=true;$("cancelBtn").disabled=false;$("statusDot").className="dot amber";$("statusTitle").textContent=dry?"Validating dry run…":"Preparing native Cell Broadcast test…";log((dry?"Dry run":"Send")+": "+deviceLabel(d));
+ try{
+  if(!dry){
+   log("Using the native Android Cell Broadcast test path");
+   const r=await invoke("send_platform_test_alert",{serial:d.serial,body:$("message").value,channel:state.channel});
+   if(r&&r.diagnostics)renderDiagnostics({test_entrypoint:{available:r.entrypoint_available,reason:r.message},stage:r.stage,verification_stage:r.verification_stage,evidence:r.diagnostics,summary:r.message,cellbroadcast_candidates:[],cellbroadcast_package:null,receiver_declared:"UNKNOWN",local_simulator_installed:false,post_notifications:"UNKNOWN",full_screen_intent:"UNKNOWN",notifications_enabled:"UNKNOWN",build_type:d.build_type,debuggable:d.debuggable});
    showResult(r);return;
   }
-  const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:dry});showResult(r)
- }catch(e){const m=String(e?.message||e);toast(m,"error");uiClick(false);log("Controller error · "+m,"error")}finally{state.sending=false;$("cancelBtn").disabled=true;renderDevices();update(selected())}}
+  const r=await invoke("send_test_alert",{serial:d.serial,body:$("message").value,dryRun:true});
+  showResult(r);
+ }catch(e){const m=String(e?.message||e);toast(m,"error");uiClick(false);log("Controller error · "+m,"error")}
+ finally{state.sending=false;$("cancelBtn").disabled=true;renderDevices();update(selected())}
+}
 /* Renders the platform probe's own evidence: the command, its exit code and its raw output.
    The point is that the operator can check the parsing rather than trust the summary. */
 function renderDiagnostics(p){
