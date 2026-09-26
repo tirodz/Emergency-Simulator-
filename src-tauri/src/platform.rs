@@ -1891,13 +1891,13 @@ mod tests {
     #[test]
     fn discovers_exported_test_actions() {
         let dump = r#"
-Package [com.vendor.test] (123):
-  Receiver{abc com.vendor.test/.Receiver}
+Package [com.samsung.test] (123):
+  Receiver{abc com.samsung.test/.Receiver}
     exported=true
-    Action: "com.vendor.TEST_CELL_BROADCAST"
-  Receiver{def com.vendor.test/.Private}
+    Action: "com.samsung.TEST_CELL_BROADCAST"
+  Receiver{def com.samsung.test/.Private}
     exported=false
-    Action: "com.vendor.TEST_EMERGENCY_ALERT"
+    Action: "com.samsung.TEST_EMERGENCY_ALERT"
 "#;
         assert_eq!(
             discover_test_actions(dump),
