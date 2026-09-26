@@ -1997,15 +1997,19 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
         CapabilityStage::None
     };
 
-    let summary = if test_entrypoint.available == PlatformState::Granted {
+    let summary = if !runtime_actions.is_empty() {
+        format!(
+            "Runtime native test action discovered: {}.",
+            runtime_actions.join(", ")
+        )
+    } else if test_entrypoint.available == PlatformState::Granted {
         format!(
             "{} The platform Cell Broadcast test path is available on this build.",
             test_entrypoint.reason
         )
     } else if test_entrypoint.available == PlatformState::Denied {
         format!(
-            "{} Use the local simulator command instead: it posts a local app alert and needs no \
-             root, but it is not a Cell Broadcast.",
+            "{} No shell-accessible native test receiver is exposed by this production build.",
             test_entrypoint.reason
         )
     } else {
