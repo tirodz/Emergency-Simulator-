@@ -256,21 +256,21 @@ function selected(){return state.devices.find(d=>d.serial===state.selected)||nul
    must not look like a passing check. */
 function visual(d){
  if(!d)return{label:"WAITING",kind:"warn",dot:"amber"};
- if(d.state==="SIMULATOR_READY")return{label:"LOCAL READY",kind:"ok",dot:"green"};
+  if(d.state==="SIMULATOR_READY")return{label:"NATIVE PATH UNKNOWN",kind:"warn",dot:"amber"};
  if(d.state==="READY")return{label:"READY",kind:"ok",dot:"green"};
  if(d.state==="UNAUTHORIZED")return{label:"UNAUTHORIZED",kind:"bad",dot:"red"};
- if(d.state==="NO_ROOT")return{label:"ROOT REQUIRED",kind:"warn",dot:"amber"};
+  if(d.state==="NO_ROOT")return{label:"NATIVE PATH UNKNOWN",kind:"warn",dot:"amber"};
  if(d.state==="UNSUPPORTED")return{label:"UNSUPPORTED",kind:"bad",dot:"red"};
  if(d.state==="OFFLINE")return{label:"OFFLINE",kind:"bad",dot:"red"};
  return{label:d.state||"UNKNOWN",kind:"warn",dot:"amber"}
 }
 function stateKind(v){return v==="GRANTED"?"ok":v==="DENIED"||v==="ERROR"?"bad":v==="NOT_PRESENT"?"warn":"info"}
 function stageLabel(d){return (d&&d.capability_stage||"NONE").replace(/_/g," ")}
-/* The alert path is decided by the backend, which knows the device's build properties. The UI must
-   not re-derive it: three separate copies of this condition is how a local notification ends up
-   being called a Cell Broadcast. The fallback exists only for an older backend that predates
-   `alert_mode`, and it errs toward the local simulation, which is the weaker claim. */
-function alertModeOf(d){return (d&&d.alert_mode)||((d&&d.test_entrypoint_available==="GRANTED")?"PLATFORM_CELL_BROADCAST_TEST":"UNAVAILABLE")}
+ /* The desktop release is native-only. The backend owns path selection and the frontend never
+    substitutes a local notification for Cell Broadcast delivery. */
+ function alertModeOf(d){return (d&&d.alert_mode)||((d&&d.test_entrypoint_available==="GRANTED")?"PLATFORM_CELL_BROADCAST_TEST":"UNAVAILABLE")}
+ function modeLabel(d){return alertModeOf(d).replace(/_/g," ")}
+ function modeIsCellBroadcast(d){return alertModeOf(d)==="PLATFORM_CELL_BROADCAST_TEST"||alertModeOf(d)==="GENUINE_CELL_BROADCAST_VERIFIED"}
 function modeLabel(d){return alertModeOf(d).replace(/_/g," ")}
 function modeIsCellBroadcast(d){return alertModeOf(d)==="PLATFORM_CELL_BROADCAST_TEST"||alertModeOf(d)==="GENUINE_CELL_BROADCAST_VERIFIED"}
 function deviceLabel(d){return (d?.model||d?.product||"Android device")+" · "+d.serial}
