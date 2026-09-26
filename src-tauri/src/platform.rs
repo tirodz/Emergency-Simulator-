@@ -28,6 +28,55 @@ pub const ETWS_TEST_SERVICE_CATEGORY: u32 = 4355;
 /// The property whose value decides whether the AOSP test receiver exists at all.
 pub const DEBUGGABLE_PROPERTY: &str = "ro.debuggable";
 
+/// Discover runtime-registered test receiver actions from ActivityManager's live receiver table.
+///
+/// Dynamic receivers do not appear in the static package resolver table. The AOSP GSM test
+/// receiver is a runtime registration, so this second discovery surface can catch an OEM/vendor
+/// test receiver that is active on a retail build.
+pub fn discover_runtime_test_actions(dumpsys: &str) -> Vec<String> {
+    let mut receiver_relevant = false;
+    let mut out = Vec::new();
+
+    for raw in dumpsys.lines() {
+        let line = raw.trim();
+
+        if line.starts_with('*') && line.contains("ReceiverList{") {
+            receiver_relevant = false;
+            continue;
+        }
+
+        if line.starts_with("app=") {
+            let lower = line.to_ascii_lowercase();
+            receiver_relevant = ["cellbroadcast", "telephony", "samsung"]
+                .iter()
+                .any(|token| lower.contains(token));
+            continue;
+        }
+
+        if !receiver_relevant || !line.starts_with("Action:") {
+            continue;
+        }
+
+        let action = line
+            .split_once('"')
+            .and_then(|(_, rest)| rest.split_once('"').map(|(value, _)| value));
+
+        let Some(action) = action else { continue };
+        let upper = action.to_ascii_uppercase();
+        let eligible = upper.contains("TEST")
+            && ["CELL", "BROADCAST", "EMERGENCY", "ALERT", "CMAS", "ETWS"]
+                .iter()
+                .any(|token| upper.contains(token));
+
+        if eligible && !out.iter().any(|value| value == action) {
+            out.push(action.to_string());
+        }
+    }
+
+    out.truncate(12);
+    out
+}
+
 /// Discover exported diagnostic receiver actions from package-manager output.
 /// Only actions explicitly named as TEST plus a broadcast/emergency token are returned.
 pub fn discover_test_actions(dumpsys: &str) -> Vec<String> {
@@ -74,6 +123,20 @@ pub fn discover_test_actions(dumpsys: &str) -> Vec<String> {
     out.truncate(12);
     out
 }
+    #[test]
+    fn discovers_runtime_registered_cellbroadcast_test_action() {
+        let dump = r#"
+          * ReceiverList{123 456 com.android.internal.telephony/1001/u0 remote:789}
+            app=456:com.android.internal.telephony/u0a123 pid=456 uid=1001 user=0
+            Filter #0: BroadcastFilter{abc}
+              Action: "com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST"
+        "#;
+        assert_eq!(
+            discover_runtime_test_actions(dump),
+            vec!["com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST".to_string()]
+        );
+    }
+
 
 /// One alert channel this tool can address, together with the receive-side gate that decides
 /// whether `/packages/apps/CellBroadcastReceiver` will actually raise it.
