@@ -55,33 +55,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  build-injector:
-    name: Build Android test injector
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platforms;android-35 build-tools;35.0.0"
-      - name: Build injector from source
-        shell: bash
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
-        run: bash android/alertinject/build.sh
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Emergency-Simulator-alertinject
-          path: android/alertinject/out/alertinject.jar
-          if-no-files-found: error
-          retention-days: 7
-
   verify:
     name: Verify desktop contract
     runs-on: ubuntu-latest
@@ -106,10 +79,10 @@ jobs:
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
           grep -q "send_test_alert" src-tauri/src/lib.rs
-          grep -q "injector_command_script" src-tauri/src/lib.rs
+          grep -q "platform_test_alert_args" src-tauri/src/lib.rs
+          grep -q "send_platform_test_alert" src-tauri/src/lib.rs
           grep -q "cellbroadcast_candidates" src-tauri/src/lib.rs
           grep -q "sh_quote" src-tauri/src/lib.rs
-          grep -q "targetPackage" android/alertinject/org/emergencysim/alertinject/AlertInjector.java
       - name: Validate embedded JavaScript syntax
         shell: bash
         run: |
