@@ -75,18 +75,6 @@ const STOCK_A35 = {
   ],
 };
 
-const SIMULATOR_READY = {
-  ...STOCK_A35,
-  local_simulator: true,
-  state: "SIMULATOR_READY",
-  support_level: "LOCAL_SIMULATOR",
-  notes: [
-    "Root-free local simulator is installed.",
-    "Notification permission could not be read. The simulator may still work; the state is " +
-      "unknown rather than denied.",
-  ],
-};
-
 const DEBUGGABLE = {
   ...STOCK_A35,
   serial: "emulator-5554",
@@ -104,7 +92,7 @@ const DEBUGGABLE = {
   notes: ["Rooted/userdebug controlled target. AOSP test entry point: GRANTED."],
 };
 
-const DEVICES = [STOCK_A35, SIMULATOR_READY, DEBUGGABLE];
+const DEVICES = [STOCK_A35, DEBUGGABLE];
 
 const PROBE = {
   build_type: "user",
@@ -244,7 +232,6 @@ for (const width of WIDTHS) {
 
   for (const [name, payload] of [
     ["stock-a35", STOCK_A35],
-    ["simulator-ready", SIMULATOR_READY],
     ["debuggable", DEBUGGABLE],
   ]) {
     await page.evaluate(async (device) => {
@@ -349,10 +336,10 @@ for (const width of WIDTHS) {
   } else {
     fail(`[${width}px] stock-device wording missing`);
   }
-  if (/not a Cell Broadcast/i.test(stockText)) {
-    pass(`[${width}px] local simulator is explicitly labelled as not a Cell Broadcast`);
+  if (/native-only|native Cell Broadcast|does not substitute a local notification/i.test(stockText)) {
+    pass(`[${width}px] stock device is described as native-only`);
   } else {
-    fail(`[${width}px] the "not a Cell Broadcast" disclaimer is absent`);
+    fail(`[${width}px] native-only wording is absent`);
   }
 
   // 4. The accepted-but-silent broadcast must not read as a delivery.
