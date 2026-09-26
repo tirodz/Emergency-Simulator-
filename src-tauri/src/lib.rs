@@ -2196,6 +2196,7 @@ fn send_platform_test_alert(
 
     let mut diagnostics = Vec::new();
     let mut harness_triggered = false;
+    let mut accepted = false;
     let mut result = PlatformSendResult {
         device_serial: serial.clone(),
         body: body.clone(),
@@ -2331,7 +2332,7 @@ fn send_platform_test_alert(
     let (stdout, record) = run_captured(&app, &args);
     // `am` reports a missing receiver on stdout while still exiting 0 on some builds, so the
     // wording is checked as well as the exit code.
-    let accepted = record.exit_code == Some(0) && !stdout.contains("Broadcast failed");
+    accepted = record.exit_code == Some(0) && !stdout.contains("Broadcast failed");
     result.evidence.push(format!(
         "am broadcast exit={:?} accepted_by_am={accepted}",
         record.exit_code
