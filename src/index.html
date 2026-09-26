@@ -225,7 +225,9 @@ html[data-theme="light"]{--bg:#d9e1dc;--bg2:#ccd6d0;--glass:rgba(246,249,247,.62
 "use strict";
 const unavailable=()=>Promise.reject(new Error("Tauri runtime is not available. Launch the packaged desktop application."));
 const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke)?window.__TAURI__.core.invoke:unavailable;
-const state={devices:[],selected:null,sending:false,channels:[],channel:Number(localStorage.getItem("es-channel"))||0x1100,theme:localStorage.getItem("es-theme")||"oled",accent:"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
+const storedChannel=Number(localStorage.getItem("es-channel"));
+const defaultChannel=0x1103;
+const state={devices:[],selected:null,sending:false,channels:[],channel:storedChannel===0x1100?defaultChannel:(storedChannel||defaultChannel),theme:localStorage.getItem("es-theme")||"oled",accent:"green",glow:localStorage.getItem("es-glow")!=="off",reduced:localStorage.getItem("es-motion")==="reduced",log:[]};
 const $=id=>document.getElementById(id);
 function now(){return new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"})}
 function esc(s){return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;")}
