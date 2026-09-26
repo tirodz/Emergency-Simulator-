@@ -2115,19 +2115,40 @@ fn send_platform_test_alert(
     // containing a Cell Broadcast/emergency token; arbitrary OEM actions are never guessed.
     let package_dump = shell_captured(&app, &serial, &["dumpsys", "package"]);
     diagnostics.push(package_dump.1);
-    let discovered_actions = platform::discover_test_actions(&package_dump.0);
+    let static_actions = platform::discover_test_actions(&package_dump.0);
+
+    // Dynamic receivers are invisible to the package resolver table. Inspect ActivityManager's
+    // live ReceiverList as a second, independent discovery surface before declaring the phone
+    // unsupported. This can catch a Samsung/vendor test receiver registered only at runtime.
+    let runtime_dump = shell_captured(&app, &serial, &["dumpsys", "activity", "broadcasts"]);
+    diagnostics.push(runtime_dump.1);
+    let runtime_actions = platform::discover_runtime_test_actions(&runtime_dump.0);
+
+    let mut discovered_actions = runtime_actions.clone();
+    for action in static_actions {
+        if !discovered_actions.iter().any(|existing| existing == &action) {
+            discovered_actions.push(action);
+        }
+    }
+
     if !discovered_actions.is_empty() {
         result.evidence.push(format!(
-            "Discovered exported diagnostic test actions: {}",
+            "Discovered native diagnostic test actions: {}",
             discovered_actions.join(", ")
         ));
     }
 
-    let native_action = if entrypoint.available == PlatformState::Granted {
-        Some(platform::TEST_TRIGGER_ACTION.to_string())
-    } else {
-        discovered_actions.first().cloned()
-    };
+    // Prefer a runtime-discovered native action over property-only AOSP inference.
+    let native_action = runtime_actions
+        .first()
+        .cloned()
+        .or_else(|| {
+            if entrypoint.available == PlatformState::Granted {
+                Some(platform::TEST_TRIGGER_ACTION.to_string())
+            } else {
+                discovered_actions.first().cloned()
+            }
+        });
 
     if native_action.is_none() {
         result.state = "BLOCKED".to_string();
