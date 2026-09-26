@@ -2395,6 +2395,43 @@ fn request_cancel(
     Ok(())
 }
 
+
+fn platform_send_to_legacy_result(platform: PlatformSendResult, started: Instant) -> SendResult {
+    let success = platform.state == "ALERT_DISPLAYED";
+    let uncertain = platform.state == "ACCEPTED_NO_EVIDENCE";
+    let failure = platform.failure.clone();
+    SendResult {
+        device_serial: platform.device_serial,
+        category: platform.channel_id as u32,
+        body: platform.body,
+        state: if success { "ALERT_DISPLAYED".to_string() } else if uncertain {
+            "UNCERTAIN".to_string()
+        } else {
+            "FAILED".to_string()
+        },
+        failure,
+        message: platform.message,
+        evidence: platform.evidence,
+        injector_exit_code: platform.diagnostics.iter()
+            .find(|p| p.command.contains("am broadcast"))
+            .and_then(|p| p.exit_code),
+        diagnostics: platform.diagnostics.into_iter().map(|p| DiagEvent {
+            stage: "NATIVE_PLATFORM_PROBE".to_string(),
+            serial: platform.device_serial.clone(),
+            action: p.command,
+            detail: Some(p.parsed),
+            stdout: (!p.stdout.is_empty()).then_some(p.stdout),
+            stderr: (!p.stderr.is_empty()).then_some(p.stderr),
+            duration_ms: None,
+            timestamp: now_timestamp(),
+        }).collect(),
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        failed_stage: if success { None } else {
+            Some(format!("{:?}", platform.verification_stage))
+        },
+    }
+}
+
 #[tauri::command]
 async fn send_test_alert(
     app: tauri::AppHandle,
@@ -2789,6 +2826,14 @@ async fn send_test_alert(
             return Ok(result);
         }
 
+        // The native platform receiver is the real root-free development path. It is an
+        // exported, dynamically registered AOSP test receiver on debuggable builds, so there is
+        // no reason to manufacture a system-UID process or write CellBroadcast preferences.
+        //
+        // Retail/user builds never reach this branch: parse_devices() marks them NO_ROOT because
+        // ro.debuggable=0, and the stock path above remains the explicitly-labelled local UI
+        // simulator. This keeps the physical phone path honest while making userdebug/eng targets
+        // genuinely root-free.
         if !matches!(device.state, DeviceState::Ready) {
             let (failure_code, message) = match device.state {
                 DeviceState::Unauthorized => (
@@ -2797,8 +2842,8 @@ async fn send_test_alert(
                 ),
                 DeviceState::Offline => ("DEVICE_OFFLINE", "ADB reports this device as offline."),
                 DeviceState::NoRoot => (
-                    "NO_ROOT",
-                    "This stock/non-root device cannot use the controlled protected test path.",
+                    "NATIVE_PATH_UNAVAILABLE",
+                    "This production/user build has no AOSP Cell Broadcast test receiver. The native root-free path is unavailable.",
                 ),
                 DeviceState::Unsupported => (
                     "CELLBROADCAST_MISSING",
@@ -2809,9 +2854,10 @@ async fn send_test_alert(
                     "The device is not in a known ADB-ready state.",
                 ),
                 DeviceState::Ready => ("UNKNOWN", "Device is ready."),
-                DeviceState::SimulatorReady => {
-                    ("LOCAL_SIMULATOR", "Local Android simulator is ready.")
-                }
+                DeviceState::SimulatorReady => (
+                    "LOCAL_SIMULATOR",
+                    "Local Android simulator is ready.",
+                ),
             };
 
             fail_stage(
@@ -2827,300 +2873,30 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        let candidates = if device.cellbroadcast_candidates.is_empty() {
-            device
-                .cellbroadcast_package
-                .clone()
-                .into_iter()
-                .collect::<Vec<_>>()
-        } else {
-            device.cellbroadcast_candidates.clone()
-        };
-
-        if candidates.is_empty() {
-            fail_stage(
-                &app,
-                &mut result,
-                stage::DEVICE_CHECK,
-                "CELLBROADCAST_MISSING",
-                "cellbroadcast discovery",
-                "No CellBroadcast receiver package was detected.",
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
-        diag(
-            &app,
-            &mut result,
-            stage::DEVICE_CHECK,
-            "cellbroadcast candidates",
-            Some(candidates.join(", ")),
-            None,
-            None,
-            "ok",
-        );
-
-        let test_mode = prepare_test_mode(
-            &app,
-            &serial,
-            &candidates[0],
-            false,
-            &|message| emit_log(&app, message, "info"),
-        )?;
-
-        if !test_mode {
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "TEST_MODE_DISABLED",
-                "prepare_test_mode",
-                "The controlled test-alert preferences could not be established.",
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
-        if cancel_requested(&cancel_store, &serial) {
-            clear_cancel(&cancel_store, &serial);
-            result.state = "CANCELLED".to_string();
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "USER_CANCELLED",
-                "cancel requested",
-                "Operation cancelled before delivery.",
-                None,
-                None,
-            );
+        if dry_run {
+            result.state = "READY_TO_SEND".to_string();
+            result.message =
+                "Native AOSP test receiver is available. Dry run made no device changes."
+                    .to_string();
             return Ok(result);
         }
 
         set_tx(&app, &tx_store, &serial, Some(TxState::Busy))?;
-
-        let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-
-        if let Err(error) = push_injector(&app, &serial) {
-            let _ = set_tx(&app, &tx_store, &serial, None);
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "INJECTOR_FAILURE",
-                "adb push alertinject.jar",
-                error,
-                None,
-                None,
-            );
-            return Ok(result);
+        let platform_result = send_platform_test_alert(
+            app.clone(),
+            serial.clone(),
+            normalized_body.clone(),
+            Some(platform::default_alert_channel().message_id),
+        )?;
+        let mut mapped = platform_send_to_legacy_result(platform_result, send_started);
+        if mapped.state == "ALERT_DISPLAYED" {
+            set_tx(&app, &tx_store, &serial, Some(TxState::Delivered))?;
+        } else {
+            set_tx(&app, &tx_store, &serial, Some(TxState::Uncertain))?;
         }
-
-        emit_log(&app, "Injector pushed to the controlled device", "ok");
-
-        emit_log(
-            &app,
-            format!("Sending ETWS TEST; category {SERVICE_CATEGORY}"),
-            "info",
-        );
-
-        // One pre-quoted string, passed as a single `adb shell` argument. Handing adb separate
-        // argv elements would let it join them unquoted and let the device shell re-split the
-        // body on whitespace and act on metacharacters.
-        //
-        // Each candidate is tried in the same, already-prepared test-mode context. The next
-        // candidate is attempted *only* when the platform explicitly rejected the broadcast for
-        // the one just tried -- never on a timeout or a plain absence of evidence, because that
-        // would risk stacking a second alert on a device that may already be showing the first.
-        let mut last_detail: Option<String> = None;
-
-        for (index, package) in candidates.iter().enumerate() {
-            if cancel_requested(&cancel_store, &serial) {
-                clear_cancel(&cancel_store, &serial);
-                result.state = "CANCELLED".to_string();
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::TEST_FAILED,
-                    "USER_CANCELLED",
-                    "cancel requested",
-                    "Operation cancelled before delivery.",
-                    None,
-                    None,
-                );
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                return Ok(result);
-            }
-
-            if index > 0 {
-                emit_log(
-                    &app,
-                    format!("Retrying with alternate receiver: {package}"),
-                    "warn",
-                );
-                let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-            }
-
-            let script = injector_command_script(package, &normalized_body);
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_DISPATCH,
-                format!("adb -s {serial} shell {script}"),
-                Some(format!("cellbroadcast receiver {package}")),
-                None,
-                None,
-                "info",
-            );
-
-            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
-                Ok(output) => output,
-                Err(error) => {
-                    // adb could not be started at all, so no broadcast was sent. Clearing the
-                    // gate lets the operator retry; leaving it Busy would lock the device out
-                    // until the safety state was reset by hand.
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    result.state = "FAILED".to_string();
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::ADB_BROADCAST_RESULT,
-                        "ADB_TRANSPORT",
-                        "adb shell app_process",
-                        error,
-                        None,
-                        None,
-                    );
-                    clear_cancel(&cancel_store, &serial);
-                    return Ok(result);
-                }
-            };
-
-            result.injector_exit_code = output.status.code();
-
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let injector_text = output_text(&output);
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_RESULT,
-                "adb shell app_process",
-                Some(format!("exit={:?}", output.status.code())),
-                Some(stdout).filter(|s| !s.is_empty()),
-                Some(stderr).filter(|s| !s.is_empty()),
-                if output.status.success() { "info" } else { "error" },
-            );
-
-            // An injector that never ran as root cannot have produced an alert, and saying so is
-            // more useful than reporting "no evidence". `app_process` exits 0 either way, so the
-            // exit code alone cannot distinguish this; only the injector's own refusal text can.
-            if !output.status.success() || injector_text.contains("Permission Denial") {
-                let detail = injector_text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("the injector produced no output")
-                    .trim()
-                    .to_string();
-
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                result.state = "FAILED".to_string();
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::ADB_BROADCAST_RESULT,
-                    "INJECTOR_FAILURE",
-                    "on-device injector identity",
-                    format!("The on-device injector did not run as a system identity. {detail}"),
-                    None,
-                    None,
-                );
-                clear_cancel(&cancel_store, &serial);
-                return Ok(result);
-            }
-
-            collect_evidence(
-                &app,
-                &serial,
-                &cancel_store,
-                &mut result,
-                &tx_store,
-            )?;
-
-            if result.state == "CANCELLED" {
-                clear_cancel(&cancel_store, &serial);
-                return Ok(result);
-            }
-
-            let rejected = result.state == "FAILED"
-                && result.failure.as_deref() == Some("BROADCAST_REJECTED");
-
-            if !rejected {
-                break;
-            }
-
-            last_detail = Some(format!(
-                "Android rejected the protected broadcast for {package}."
-            ));
-            let _ = set_tx(&app, &tx_store, &serial, None);
-
-            // A rejection produced no downstream evidence, so nothing is on screen and trying the
-            // next candidate cannot stack an alert.
-            if index + 1 >= candidates.len() {
-                break;
-            }
-
-            result.evidence.clear();
-            result.state = "FAILED".to_string();
-            result.failure = Some("BROADCAST_REJECTED".to_string());
-        }
-
-        if result.state == "FAILED" && result.failure.as_deref() == Some("BROADCAST_REJECTED") {
-            if let Some(detail) = last_detail {
-                result.message = if candidates.len() > 1 {
-                    format!("{detail} No alternate CellBroadcast receiver on this device accepted it.")
-                } else {
-                    detail
-                };
-            }
-        }
-
         let _ = persist_transactions(&app, &tx_store);
         clear_cancel(&cancel_store, &serial);
-
-        if result.state == "ALERT_DISPLAYED" {
-            diag(
-                &app,
-                &mut result,
-                stage::TEST_COMPLETE,
-                "delivery verdict",
-                Some("ALERT_DISPLAYED".to_string()),
-                None,
-                None,
-                "ok",
-            );
-        } else if result.failure.is_none() {
-            // Reached the end without a verdict and without an explicit failure. Recorded so an
-            // unexplained outcome is never silently reported as a success.
-            let unfinished = result.state.clone();
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "NO_VERDICT",
-                "delivery verdict",
-                format!("The pipeline finished in state {unfinished} without downstream evidence."),
-                None,
-                None,
-            );
-        }
-
-        Ok(result)
+        Ok(mapped)
     })
     .await
     .map_err(|error| format!("Controller worker failed: {error}"))?
