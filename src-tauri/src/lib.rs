@@ -1866,6 +1866,17 @@ fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platfor
 
     let test_entrypoint =
         platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
+    // Runtime receiver discovery is important after the operator enables Cell Broadcast test mode.
+    // A vendor build may register a native test receiver even though ro.debuggable remains 0.
+    let runtime_dump = shell_captured(&app, &serial, &["dumpsys", "activity", "broadcasts"]);
+    let runtime_actions = platform::discover_runtime_test_actions(&runtime_dump.0);
+    let mut runtime_record = runtime_dump.1;
+    runtime_record.parsed = if runtime_actions.is_empty() {
+        "No qualifying runtime native test receiver was discovered.".to_string()
+    } else {
+        format!("Runtime native test actions: {}", runtime_actions.join(", "))
+    };
+    evidence.push(runtime_record);
 
     // Capability is the *lowest* honest stage: what the device is, not what we hope it is.
     let stage = if receiver_declared == PlatformState::Granted
