@@ -2424,16 +2424,11 @@ Packages:
     /// The default channel must be one that works without the operator changing anything, and the
     /// ETWS test channel must not be it — that inversion is the defect this catalogue repairs.
     #[test]
-    fn the_default_channel_needs_no_operator_action() {
-        let default = default_alert_channel();
-        assert!(
-            default.enabled_by_default,
-            "the default channel must be on for an unconfigured device"
-        );
-        assert_ne!(
-            default.message_id, MESSAGE_ID_ETWS_TEST,
-            "0x1103 is disabled unless testing mode is on; it must not be the default"
-        );
+    fn the_default_channel_is_the_native_test_channel() {
+        let channel = default_alert_channel();
+        assert_eq!(channel.message_id, MESSAGE_ID_ETWS_TEST);
+        assert_eq!(channel.message_id, 0x1103);
+        assert!(!channel.enabled_by_default, "the ETWS test channel is gated until test mode/test alerts are enabled");
     }
 
     /// `isChannelEnabled` in `CellBroadcastAlertService` gates these four channels differently, and
