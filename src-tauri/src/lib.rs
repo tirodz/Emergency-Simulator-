@@ -2221,15 +2221,32 @@ fn send_platform_test_alert(
     ));
     diagnostics.push(record);
 
-    // 5. Wait for the pipeline, then read what actually happened.
-    thread::sleep(Duration::from_millis(2500));
-    let (logcat, record) = shell_captured(&app, &serial, &["logcat", "-d", "-t", "800"]);
-    diagnostics.push(record);
+    // 5. Poll for downstream native evidence. A real phone can take several seconds to traverse
+    // telephony -> CellBroadcastService -> CellBroadcastAlertService -> native presentation.
+    const NATIVE_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
+    const NATIVE_EVIDENCE_POLL: Duration = Duration::from_millis(500);
+    let evidence_started = Instant::now();
+    let mut latest_logcat = String::new();
+    let mut platform_evidence = platform::PlatformEvidence::default();
 
-    let platform_evidence = platform::scan_platform_logcat(&logcat);
+    loop {
+        thread::sleep(NATIVE_EVIDENCE_POLL);
+        let (logcat, record) = shell_captured(&app, &serial, &["logcat", "-d", "-t", "1200"]);
+        diagnostics.push(record);
+        latest_logcat = logcat;
+        platform_evidence = platform::scan_platform_logcat(&latest_logcat);
+
+        if platform_evidence.was_suppressed() || platform_evidence.alert_ui_requested {
+            break;
+        }
+        if evidence_started.elapsed() >= NATIVE_EVIDENCE_TIMEOUT {
+            break;
+        }
+    }
+
     result.stage = platform_evidence.stage();
     result.verification_stage = platform_evidence.verification_stage();
-    result.logcat_excerpt = truncate_for_log(&logcat, 3000);
+    result.logcat_excerpt = truncate_for_log(&latest_logcat, 3000);
 
     // 6. The verdict comes from downstream evidence, never from the exit code.
     //
@@ -2253,12 +2270,16 @@ fn send_platform_test_alert(
         );
         result.failure = Some("SUPPRESSED_BY_PLATFORM".to_string());
         result.suppression = Some(suppression.clone());
-    } else if platform_evidence.pipeline_ran() {
+    } else if platform_evidence.alert_ui_requested {
         result.state = "ALERT_DISPLAYED".to_string();
+        result.message = "Android's native Cell Broadcast alert presentation was requested by the platform.".to_string();
+    } else if platform_evidence.pipeline_ran() {
+        result.state = "ACCEPTED_NO_EVIDENCE".to_string();
         result.message = format!(
-            "Platform Cell Broadcast pipeline evidence found: reached stage {}.",
+            "The native Cell Broadcast pipeline produced evidence through {}, but the native alert presentation was not observed.",
             result.stage.label()
         );
+        result.failure = Some("NATIVE_ALERT_NOT_OBSERVED".to_string());
     } else if accepted {
         result.state = "ACCEPTED_NO_EVIDENCE".to_string();
         result.message = "`am broadcast` was accepted, but no downstream Cell Broadcast log line \
