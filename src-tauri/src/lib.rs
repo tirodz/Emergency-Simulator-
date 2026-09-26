@@ -2270,7 +2270,7 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     Ok(AppInfo {
         version: "1.0.0".to_string(),
         adb_source: source,
-        injector: injector_path(&app).is_some(),
+        // The shipped controller no longer bundles or uses the old system-UID injector.\n        injector: false,
     })
 }
 
