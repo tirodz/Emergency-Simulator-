@@ -19,7 +19,7 @@ use platform::{CapabilityStage, ProbeEvidence, State as PlatformState};
 
 const SERVICE_CATEGORY: u32 = 4355;
 const REQUIRED_PREFIX: &str = "TEST";
-const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
+const DEFAULT_BODY: &str = "TEST ALERT";
 const INJECTOR_CLASS: &str = "org.emergencysim.alertinject.AlertInjector";
 const INJECTOR_REMOTE: &str = "/data/local/tmp/alertinject.jar";
 const EVIDENCE_TIMEOUT_SECS: u64 = 45;
@@ -1320,7 +1320,9 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let root = adbd_uid(app, &serial) == Some(0);
         let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
         let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
-        let local_simulator = local_simulator_installed(app, &serial);
+        // Native-only release path: an old copy of the optional local simulator may still exist on a
+        // phone from an earlier build, but its presence must never affect capability, state, or mode.
+        let local_simulator = false;
 
         let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356")
             || model.to_ascii_lowercase().contains("galaxy a35");
@@ -1342,48 +1344,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         // broadcast that reported success and produced nothing.
         let test_entrypoint =
             platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
-        let capabilities = if local_simulator {
-            Some(simulator_capabilities(app, &serial, &mut Vec::new()))
-        } else {
-            None
-        };
-
-        let (state, support_level) = if local_simulator {
-            notes.push(
-                "Root-free local simulator is installed. Send uses our explicit test receiver and \
-                 the notification/full-screen pipeline. This is a local app notification, not a \
-                 Cell Broadcast."
-                    .to_string(),
-            );
-            match &capabilities {
-                Some(capabilities) if capabilities.post_notifications == PlatformState::Denied => {
-                    notes.push(
-                        "Notifications are denied for the local simulator, so Android will run the \
-                         receiver and drop the alert silently. Grant notifications for that app."
-                            .to_string(),
-                    );
-                }
-                Some(capabilities) if capabilities.post_notifications == PlatformState::Unknown => {
-                    notes.push(
-                        "Notification permission could not be read. The simulator may still work; \
-                         the state is unknown rather than denied."
-                            .to_string(),
-                    );
-                }
-                _ => {}
-            }
-            if matches!(
-                capabilities.as_ref().map(|c| c.full_screen_intent),
-                Some(PlatformState::Denied)
-            ) {
-                notes.push(
-                    "USE_FULL_SCREEN_INTENT is denied, so the alert will be a heads-up notification \
-                     rather than a full-screen takeover."
-                        .to_string(),
-                );
-            }
-            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
-        } else if test_entrypoint.available == PlatformState::Granted {
+        let (state, support_level) = if test_entrypoint.available == PlatformState::Granted {
             // The controlled path is gated on the build permitting the AOSP test receiver, which is
             // the thing that actually decides whether the broadcast can be delivered. Root is not
             // part of this condition: a rooted `user` build still has no test receiver, and a
@@ -1396,16 +1357,16 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             (DeviceState::Ready, SupportLevel::Supported)
         } else if cellbroadcast_package.is_none() {
             notes.push(
-                "No CellBroadcast receiver package was detected. Install the local simulator to \
-                 test the alert UI on a stock device."
+                "No CellBroadcast receiver package was detected. No native Cell Broadcast test path is \
+                 available on this device."
                     .to_string(),
             );
             (DeviceState::Unsupported, SupportLevel::Unsupported)
         } else {
             notes.push(test_entrypoint.reason.clone());
             notes.push(
-                "Stock/non-root device. The local simulator provides a root-free alert UI path; it \
-                 produces a local app notification, not a Cell Broadcast."
+                "Stock/non-root device. The AOSP test entry point is unavailable on this production build; \
+                 the release does not substitute a local notification path."
                     .to_string(),
             );
             (DeviceState::NoRoot, SupportLevel::RootRequired)
@@ -1435,7 +1396,7 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             // observation, and this is a device profile built before any send happened.
             alert_mode: platform::alert_mode(
                 test_entrypoint.available,
-                local_simulator,
+                false,
                 false,
             ),
             state,
