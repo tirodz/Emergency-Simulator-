@@ -2964,7 +2964,7 @@ mod tests {
     /// active subscription is not phone 0, which is indistinguishable from a missing receiver.
     #[test]
     fn platform_test_injection_matches_the_aosp_contract() {
-        let args = platform_test_alert_args("R5CXA1B2C3D", "00001100");
+        let args = platform_test_alert_args("R5CXA1B2C3D", platform::TEST_TRIGGER_ACTION, "00001100");
         assert_eq!(
             args,
             vec![
