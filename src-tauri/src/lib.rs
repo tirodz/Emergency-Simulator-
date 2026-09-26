@@ -2393,6 +2393,10 @@ fn send_platform_test_alert(
     } else if platform_evidence.alert_ui_requested {
         result.state = "ALERT_DISPLAYED".to_string();
         result.message = "Android's native Cell Broadcast alert presentation was requested by the platform.".to_string();
+    } else if harness_triggered {
+        result.state = "TRIGGER_SENT_NO_EVIDENCE".to_string();
+        result.message = "The privileged Cell Broadcast test harness was launched and its ETWS TEST control was tapped, but no native alert-pipeline evidence was observed.".to_string();
+        result.failure = Some("NO_NATIVE_ALERT_EVIDENCE_AFTER_HARNESS_TRIGGER".to_string());
     } else if platform_evidence.pipeline_ran() {
         result.state = "ACCEPTED_NO_EVIDENCE".to_string();
         result.message = format!(
