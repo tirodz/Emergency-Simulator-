@@ -664,6 +664,10 @@ fn platform_test_alert_args<'a>(serial: &'a str, action: &'a str, pdu_hex: &'a s
         "--es",
         "pdu_string",
         pdu_hex,
+        // AOSP consumes pdu_string; some OEM test receivers use the shorter pdu key.
+        "--es",
+        "pdu",
+        pdu_hex,
     ]
 }
 
