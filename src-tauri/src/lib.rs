@@ -799,7 +799,6 @@ fn cellbroadcast_candidates(app: &tauri::AppHandle, serial: &str) -> Vec<String>
     packages.dedup();
     packages
 }
-}
 
 /// Read whether the device is already running adbd as root, without changing anything.
 ///
