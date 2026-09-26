@@ -194,11 +194,6 @@ jobs:
           Copy-Item "$env:TEMP\pt\platform-tools\AdbWinUsbApi.dll" -Destination "$stage\AdbWinUsbApi.dll" -Force
           & "$stage\adb.exe" start-server
           & "$stage\adb.exe" devices -l
-      - name: Download Android injector
-        uses: actions/download-artifact@v8
-        with:
-          name: Emergency-Simulator-alertinject
-          path: android/alertinject/out
       - name: Download local simulator APK
         uses: actions/download-artifact@v8
         with:
@@ -207,7 +202,6 @@ jobs:
       - name: Verify packaged Android test components
         shell: pwsh
         run: |
-          if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing Android injector JAR." }
           if (-not (Test-Path "android/local-simulator/app/build/outputs/apk/debug/app-debug.apk")) { throw "Missing root-free local simulator APK." }
       - name: Run desktop controller unit tests
         shell: pwsh
