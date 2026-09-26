@@ -41,7 +41,10 @@ pub fn discover_runtime_test_actions(dumpsys: &str) -> Vec<String> {
         let line = raw.trim();
 
         if line.starts_with('*') && line.contains("ReceiverList{") {
-            receiver_relevant = false;
+            let lower = line.to_ascii_lowercase();
+            receiver_relevant = ["cellbroadcast", "telephony", "phone", "samsung"]
+                .iter()
+                .any(|token| lower.contains(token));
             continue;
         }
 
@@ -175,7 +178,8 @@ pub struct AlertChannel {
     pub requirement: &'static str,
 }
 
-/// The channels worth addressing, ordered best-first by how little they need from the operator.
+/// The channels worth addressing. The ETWS test channel is the native test target used by the
+/// Android Cell Broadcast test tooling and is the appropriate default after testing mode is enabled.
 ///
 /// The ordering is the point: the first entry needs nothing switched on, so it is the one to try
 /// before asking anyone to change a setting. The list is deliberately short — these are the
@@ -233,7 +237,10 @@ pub fn alert_channel(message_id: u16) -> Option<&'static AlertChannel> {
 
 /// The channel to try first: the one that needs nothing changed on a default device.
 pub fn default_alert_channel() -> &'static AlertChannel {
-    &ALERT_CHANNELS[0]
+    ALERT_CHANNELS
+        .iter()
+        .find(|c| c.message_id == MESSAGE_ID_ETWS_TEST)
+        .unwrap_or(&ALERT_CHANNELS[0])
 }
 
 const POST_NOTIFICATIONS: &str = "android.permission.POST_NOTIFICATIONS";
