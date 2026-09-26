@@ -3,7 +3,677 @@
 > This file is the live state of the project. A future session must be able to continue from here
 > without reading the whole repository. Never leave it describing an outdated state.
 
-## Current status
+## Current status — the non-broadcast surface, walked (2026-09-21, later)
+
+### What happened
+
+§10 of `docs/stock-device/A35-native-test-path.md` closed the *broadcast* question for the A35's
+shipped image. It left the larger question open: the broadcast matrix only enumerated actions sent to
+`CellBroadcastReceiver`, and a Binder call into the Cell Broadcast service module is a different class
+of entry with a different gate. This session read Google's unmodified Cell Broadcast module
+(`GoogleCellBroadcastServiceModule@341410010`) end to end and walked every non-broadcast interface
+class.
+
+The result is `RESULT B`, reached from the Binder layer rather than the broadcast layer, and now much
+sharper. The pipeline has exactly one producer — `ICellBroadcastService.handleGsmCellBroadcastSms`,
+which decodes a raw broadcast PDU into an `SmsCbMessage` and hands it to the genuine alert service —
+and it has exactly two callers: the GSM test receiver and the CDMA radio path. Both are gated on
+`ro.debuggable`, neither on a permission. Everything downstream of
+`CellBroadcastIntents.sendSmsCbReceivedBroadcast` only ever holds an `SmsCbMessage`, which has no
+public constructor, so no downstream component can be turned into an injector.
+
+The classes and why each fails:
+
+* **`cmd cellbroadcast` does not exist.** The Cell Broadcast module implements no `ShellCommand` at
+  all — only the four AIDL handlers and a read-only `dump()`.
+* **`cmd phone` has no injector verb.** The full verb list was read out of `TeleService.apk` and not
+  one verb constructs an `SmsCbMessage` or calls the alert service.
+* **`cmd phone radio set-modem-service mockmodem` is the strongest near-miss and fails twice.** It
+  would replay RIL events through the real `mCi` callback, i.e. the radio arm of the pipeline; but the
+  MockModem package is **absent from the A35 image** (`MOCKMODEM 0`), and selecting a modem service
+  needs the signature permission `MODIFY_PHONE_STATE`.
+* **`ITelephony` has only configuration.** `get/setCellBroadcastIdRanges` need the signature
+  permission `MODIFY_CELL_BROADCASTS` and only configure channel ranges.
+* **The Samsung `#CMAS#` rows are storage, not an injector.** They are the SMS database's
+  representation of an alert the platform already produced, written *by* the alert path.
+* **`system_server` has no producer.** The only `SmsCbMessage` touch in `services.jar` is the AT&T
+  IQI `CellBroadcastObserver`, which consumes messages.
+
+### What changed in code
+
+The survey is data, not prose, so the summary is generated from the rows and cannot drift:
+
+* `platform::interface_candidates()` / `InterfaceClass` / `InterfaceOutcome` — the non-broadcast
+  enumeration above, one row per interface with its verdict and reason.
+* `platform::property_gated_injectors()` / `interface_summary()` — the injectors whose only obstacle
+  is `ro.debuggable`, and the generated sentence.
+* `platform::verification_ladder()` / `VerificationStage` — the eleven-rung ladder a single send is
+  judged against, from `DEVICE_CONNECTED` to `SUCCESS`, where `SUCCESS` requires
+  `NATIVE_ALERT_DETECTED` and no suppression marker. `TriggerSent` is a rung; an exit code is not.
+* `CapabilityStage::AlertServiceReached` — a real overclaim was removed. `CBAlertService:
+  onStartCommand` fires *before* the channel-range and testing-mode gates run, so it can no longer be
+  read as the UI being reached. `SystemUiReached` now requires `openEmergencyAlertNotification`
+  alone, and its label is `NATIVE ALERT PRESENTED`.
+* `PlatformEvidence::verification_stage()` — maps a capture to a ladder rung; a suppressed run can
+  never be `SUCCESS`.
+* The diagnostics report now prints the interface survey and the ladder.
+
+### Tests
+
+`cargo test --lib --locked`: **125 passed, 0 failed** (was 112). The 13 new tests pin the survey
+classes, the MockModem and `cmd cellbroadcast` rows, the Samsung CMAS row, the ladder's ordering and
+its `SUCCESS` requirement, the empty-capture case (`TriggerSent`, not success), the suppression case
+(never `SUCCESS`), and the alert-service-vs-UI split. Two stale tests that encoded the old
+`onStartCommand` → `SYSTEM UI REACHED` overclaim were corrected, not deleted.
+
+### What is still open
+
+* The physical A35 has still never been queried by this environment. `RESULT B` is proven for the
+  shipped image, not for the operator's handset; if that phone has taken a different update the build
+  id differs and the facts must be re-read.
+* Nothing here demonstrates delivery even on `ro.debuggable=1`. The path is now known to be closed by
+  one build property rather than shown to work.
+
+## Current status — the A35's own firmware, read (2026-09-21)
+
+### What happened
+
+The question the stock-device branch keeps returning to — "is there a native, root-free path to make
+the A35 display an alert?" — had one half still open: every Samsung-firmware claim was `UNKNOWN`
+because the physical handset had never been queried. The physical handset still has not been
+queried, but its **shipped image** now has been. Build **A356BXXS4AYD1** (Android 14, One UI 6.1,
+`ro.build.type=user`, `release-keys`) was located in a public firmware dump and its Cell
+Broadcast-relevant files were read directly.
+
+The answer is `RESULT B`, now proven for the firmware rather than inferred:
+
+* `ro.debuggable=0` — read from the image's `build.prop`. The AOSP telephony test receiver
+  (`GsmCbTestBroadcastReceiver`) is registered only when `ro.debuggable==1`, so on this build it is
+  never constructed. `am broadcast` will still be accepted and print no error, and nothing happens.
+* Samsung ships Google's Cell Broadcast module **unmodified** (APEX `341410010`). There is no
+  Samsung-forked `CellBroadcastReceiver`, and Samsung did not modify `GsmInboundSmsHandler` or
+  `CdmaInboundSmsHandler` — the gate, the `RECEIVER_EXPORTED` flag and the call into
+  `sendGsmMessageToHandler` are byte-for-byte AOSP. The two Samsung RROs only change display strings
+  and three UI booleans; neither touches `allow_testing_mode_on_user_build`, `show_test_settings`, the
+  channel ranges, or any component.
+* The A35's own `framework-res.apk` lists `SMS_CB_RECEIVED`, `SMS_EMERGENCY_CB_RECEIVED`,
+  `SMS_SERVICE_CATEGORY_PROGRAM_DATA_RECEIVED` and `SECRET_CODE` as protected broadcasts.
+* The secret code `*#*#2627#*#*` is rewritten by DRParser to the **protected** `SECRET_CODE`
+  broadcast, and the CB app's handler only calls `setTestingMode(!isTestingMode(...))`. The shipped
+  `bools.xml` has `allow_testing_mode_on_user_build=true`, so the toggle is live — and it still only
+  flips a display filter. It constructs no message.
+* Every Samsung candidate was read and none is an injector: `BCService` is a tcpdump logger despite
+  the "BC" in its name; `SemSmsCbMessage` is a read-only getter wrapper; `TeleService`'s only CB
+  surface is a signature-gated range setter; the factory/service-mode/diagnostic packages expose test
+  activities and RMS interfaces but none constructs an `SmsCbMessage`; `com.samsung.rmt_exercise`
+  does not exist in this build. A token sweep of every shipped Samsung component and framework jar
+  for the injection tokens returned **no hit outside Google's own module**.
+
+### What is now in the code
+
+* **`samsung_firmware_facts()`** in `platform.rs`: the Samsung native surface as a list of
+  `FirmwareFact` rows, each carrying a `FirmwareEvidence` label (`PROVEN (firmware)` /
+  `PROVEN (AOSP)` / `UNPROVEN`) and the exact firmware path it was read from. The build id is in the
+  registry, so a fact cannot be read without knowing which phone it describes.
+* **`samsung_native_entrypoint_conclusion()`** generates the prose from the registry, so the summary
+  cannot claim more than the rows carry.
+* **The diagnostics report** now renders the whole registry as a table under
+  "The native Samsung surface, read from firmware", and states plainly that this is image analysis,
+  not a reading of the attached phone. The old "we could not verify whether Samsung gates the test
+  receiver" bullet is replaced with the correct one: whether this handset matches the analyzed build.
+* **`docs/stock-device/A35-native-test-path.md` §10** records the firmware reading in full, upgrading
+  the `UNKNOWN` Samsung rows to `CONFIRMED (firmware)`.
+
+### Eight new tests now guard it
+
+`the_firmware_facts_name_the_exact_build`, `the_firmware_registry_records_the_debuggable_zero_build`,
+`the_registry_records_that_no_oem_injector_was_found`, `bcservice_is_recorded_as_not_cell_broadcast`,
+`the_conclusion_is_generated_from_the_registry`,
+`unproven_claims_are_never_labelled_as_firmware_proven`,
+`the_firmware_record_keeps_the_secret_code_as_a_toggle`, and
+`aosp_proven_rows_are_not_counted_as_firmware_proven` — on top of the channel gate's eight. The
+`platform.rs` module runs 75 tests, all passing (67 → 75), and the whole library 112 (104 → 112),
+verified locally with `cargo test` and confirmed green on the Windows CI runner.
+
+### What this does not change
+
+* The confusion the project exists to remove is untouched: stock mode still cannot raise an alert.
+  The firmware reading makes that a result rather than an assumption, and the local simulator is
+  still UI-only.
+* It does not prove anything about a *specific handset*. If the operator's phone has taken a
+  different update, the build id differs and the facts must be re-read for that build. The read-only
+  batch `A35-RO-001` remains the way to confirm the handset matches.
+* It does not demonstrate delivery even on `ro.debuggable=1` — that is still logcat evidence.
+
+---
+
+## Previous status — the receive-side channel gate, found and fixed (2026-09-21)
+
+### What happened
+
+The controller always emitted message identifier `0x1103`, the ETWS test channel, and the interface
+presented it as locked. Checking the *receive* side of AOSP — which this project had never done,
+because the injection entry point was the whole of the send path — showed that
+`CellBroadcastAlertService.isChannelEnabled` consults a **different user preference per channel**, and
+that `0x1103` is off on a device nobody has configured.
+
+The failure was therefore the quiet instance of the project's recurring pattern: a well-formed PDU, an
+`am` exit of 0, a receiver that really fires, a message that really reaches the alert service — and
+then a filter that discards it. The tool was not lying (it reported `UNCERTAIN`), but it pointed the
+operator at the one channel that could not work until they found a settings toggle it never named.
+
+### What is now in the code
+
+* **`ALERT_CHANNELS`** in `platform.rs`: each channel carries its identifier, the AOSP gate it is
+  subject to, whether it is on by default, and what the operator must change. Five entries:
+  `0x1100`, `0x1101`, `0x1113`, `0x111C`, `0x1103`.
+* **`cb_pdu(message_id, body, serial)`** refuses any identifier not in the catalogue, so a PDU cannot
+  be built for a channel whose gating nobody has checked. `etws_test_pdu` is kept as the `0x1103`
+  case with an identical byte output.
+* **Default is now `0x1100`** (ETWS primary), which needs no setup, instead of `0x1103`.
+* **`list_alert_channels`** exposes the catalogue to the interface, which renders a channel selector
+  and states the gate for the selected channel in the confirmation dialog. One table, one owner.
+
+### Eight new tests now guard it
+
+`every_channel_is_self_describing`, `the_requirement_text_matches_the_default_state`,
+`channel_identifiers_are_unique`, `the_default_channel_needs_no_operator_action`,
+`the_catalogue_records_the_as_p_is_channel_enabled_gates`, `an_uncatalogued_channel_cannot_be_encoded`,
+`a_non_default_channel_encodes_into_the_header`, `the_refactor_preserved_the_etws_test_encoding` —
+on top of the pre-existing PDU vectors. `platform.rs` alone runs 67 tests, all passing.
+
+`docs/stock-device/alert-channel-gating.md` is the full write-up. `docs/bugs/BUG-026` records it as a
+defect.
+
+### The honest boundary, unchanged
+
+This does **not** create a stock-device path. `0x1100` is reachable only through the telephony test
+receiver, gated on `ro.debuggable=1`, exactly as before. Two things remain `UNKNOWN` and are recorded
+as such rather than guessed:
+
+1. **Whether the A35 is in testing mode.** `CellBroadcastReceiver:195` admits the `2627` code when
+   `ro.debuggable=1` **or** `allow_testing_mode_on_user_build` is set. The flag defaults to `true` in
+   `config.xml`, but it is **not** in `overlayable.xml` (count 0), so there is no basis for claiming
+   Samsung overlays it. Only `dumpsys activity broadcasts` on the handset can settle it.
+2. **Whether the A35 provides Cell Broadcast from a Samsung package.** If
+   `com.samsung.android.cellbroadcastreceiver` is the provider rather than the Google one, the
+   catalogue's gating claim does not automatically transfer. The read-only probe reports which package
+   exists; no name is assumed.
+
+### Gates
+
+All green: `check_actions` (+ `--self-test`), `check_read_only`, `check_paste_ps1`, the UI layout
+gate (`npm run test:ui`), embedded-JavaScript syntax, and 67/67 `platform.rs` unit tests.
+
+---
+
+## Prior status — proposed native trigger sequence, tested and refused (2026-09-23, later)
+
+### What happened
+
+A task brief proposed a four-step native injection engine. Four of its five commands are inoperative,
+and each fails *silently* — the exact failure shape this project exists to catch. Rather than
+implement them, they were tested against AOSP source and the reason the failure is invisible was
+fixed structurally.
+
+`docs/stock-device/proposed-native-actions-tested.md` records the whole analysis.
+
+| Proposed command | Verdict |
+|---|---|
+| `settings put global cell_broadcast_test_alerts 1` | **no effect** — key does not exist; the real preferences are per-SIM `SharedPreferences`, not global settings |
+| `settings put global show_option_to_opt_out_notifications 1` | **no effect** — same |
+| `am broadcast -a com.android.cellbroadcastreceiver.SHOW_TEST_MESSAGE` | **does not exist** — no such action in any branch; nothing handles it |
+| `am start -n .../.CellBroadcastListActivity` | launches; **injects nothing** — it is the history list, correct only as a verification aid |
+| `am broadcast -a android.provider.Telephony.SMS_CB_RECEIVED` | **refused** — protected broadcast |
+
+A `settings put global` for a key no code reads is the purest version of the recurring defect: it
+exits 0, it shows up in `settings list global`, and it *persists*, so a later session reads it back
+and believes test alerts are on.
+
+### Implemented instead
+
+**`tools/check_actions.py`** — a gate over `src-tauri/src/**/*.rs` and `docs/**/*.md`:
+
+* a registry of every broadcast action the project may emit, each with its AOSP file and line and a
+  `reaches_pipeline` flag;
+* names `SHOW_TEST_MESSAGE` explicitly as fabricated, rather than reporting a generic unknown action;
+* refuses any action whose `reaches_pipeline` is false — the protected broadcasts and the
+  non-exported internal actions;
+* requires any new action to be registered with provenance first, so "does this exist?" is answered
+  before the command is written;
+* `--self-test` proves it catches the three real mistakes and accepts the one real action.
+
+When first run it found two actions in the code that were real but unregistered
+(`cdma.TEST_TRIGGER_SCP_MESSAGE`, `cellbroadcastreceiver.SHOW_NEW_ALERT`) — the check working as
+intended. Wired into CI as the step after the read-only gate.
+
+### STEP 1 and STEP 3 responses, stated plainly
+
+* **All 25 bug records are `FIXED`.** BUG-001 through BUG-025; none is open. The brief's "BUG-001
+  through BUG-019" are the older half of a journal that already continues to BUG-025.
+* **No URI or hostname parsing error remains.** `tools/bridge.py` was reviewed; host parsing is
+  fine and the bridge was verified reachable from outside this container, not by self-check.
+* **CLI argument parsing**: the controller takes no CLI arguments — it is a Tauri GUI app. There is
+  no argument parser to fix.
+* **`src/index.html` state handling**: the UI already renders each probe's command, `exit_code`,
+  `stdout` and `stderr` (`src/index.html` lines 400–403), which is exactly what STEP 3 asks for. No
+  change needed.
+* **`cargo check --locked`**: passes, 0 errors. The 6 warnings are all pre-existing `never used`
+  items in `platform.rs`, unchanged by this session.
+* **CI workflow**: `.github/workflows/build-windows.yml` now runs the new action gate; no path or
+  build error.
+
+### Verified this session
+
+| Gate | Result |
+|---|---|
+| `cargo check --locked` | **exit 0**, no errors |
+| `cargo test --lib --locked` | **96 passed, 0 failed** |
+| `python3 tools/check_actions.py --self-test` | passed — catches the fabricated and the two protected actions, accepts the real one |
+| `python3 tools/check_actions.py` | OK — every action in 64 files registered or provably fabricated |
+| `python3 tools/check_read_only.py` | OK |
+| `python3 tools/check_paste_ps1.py` | OK |
+| `npm run test:ui` | all layout and honesty assertions passed |
+
+### Still the same gap
+
+**The A35 has never been queried; `evidence/` is empty.** No hardware test was performed and none is
+claimed. The environment reset three times during this session, each time removing the Rust
+toolchain and the GTK/WebKit libraries; they were reinstalled to run the checks above, and the
+results are real but the container is not durable.
+
+`adb shell getprop ro.debuggable` still decides the final result.
+
+## Prior status — native-test-surface enumeration session (2026-09-23)
+
+### What this session did
+
+The brief was to stop retrying the already-blocked `SMS_CB_RECEIVED` broadcast and instead enumerate
+the **entire** native test surface. That is now done, and it is in code, not only prose.
+
+**`docs/stock-device/A35-native-test-path.md` is the definitive answer.** It walks 23 candidate entry
+points across `packages/apps/CellBroadcastReceiver`, `packages/modules/CellBroadcastService` and
+`frameworks/opt/telephony`, each with its exported state, protected-broadcast state, whether shell can
+send it, whether it reaches the alert pipeline, and a verdict. Every AOSP claim is `CONFIRMED` with
+file and line.
+
+**The finding, stated precisely.** "`SMS_CB_RECEIVED` is protected" was never the whole answer. The
+whole answer is that every entry point fails for its own reason:
+
+| Class | Count | Why it fails |
+|---|---|---|
+| Protected broadcasts | 9 | refused before the receiver is resolved; `exported="true"` is irrelevant |
+| `exported="false"` / signature / build gate | 5 | not addressable, or behind a signature permission |
+| Reachable but not injectors | 4 | activities, providers and a system property that read or filter state |
+| **Reachable injectors** | **3** | the telephony test receivers; gated on `ro.debuggable` |
+
+**The one new mechanism confirmed this session** (it was not previously documented as a route): the
+*CDMA* and *SCP* test receivers —
+`com.android.internal.telephony.cdma.TEST_TRIGGER_CELL_BROADCAST` and `...TEST_TRIGGER_SCP_MESSAGE`
+— are unprotected, `RECEIVER_EXPORTED`, and feed the genuine pipeline exactly as the GSM one does.
+They do not change the device verdict (same `ro.debuggable` gate) but they were missing from the
+earlier account, and "we checked everywhere" is only true with them included.
+
+**The secret code 2627 was re-derived and its role corrected.** It is a protected broadcast
+(`android.telephony.action.SECRET_CODE`, line 564) so `am broadcast` cannot set it, **and** it is a
+gate-opener rather than an injector — it flips a display filter consulted downstream in
+`CellBroadcastAlertService`, and never constructs a message. This means **BUG-002's reproduction
+command was impossible** and has been corrected in place. The bug's fix and lesson survive.
+
+**The "Test alerts" setting is a receive preference, not a trigger.** `KEY_ENABLE_TEST_ALERTS` is
+documented in source as *"Whether to display monthly test messages (default is disabled)"*, and
+`isTestAlertsToggleVisible` gates its visibility on carrier channel ranges. Turning it on does not
+send anything. This is the item the brief flagged as potentially most important; it is now settled
+against source rather than left as a hope.
+
+### Implemented in code
+
+* `src-tauri/src/platform.rs`: `EntryPointOutcome` + `EntryPoint` + `entry_points()`,
+  `reachable_entry_points()`, `entry_point_summary()`. The 16-row enumeration lives in code, and the
+  summary sentence is *derived* from it so prose cannot drift from the list.
+* `src-tauri/src/diagnostics.rs`: the report now renders a "The native test surface, enumerated"
+  table in the verified section, so a reader sees every route and why it fails.
+* 6 new Rust tests, including one that **fails if a fourth reachable entry point is ever added
+  without a stated reason**, and one asserting the secret code is never reported reachable.
+* `docs/bugs/BUG-002-secret-code-toggle.md`: correction section recording that its reproduction is
+  refused by the platform.
+* `docs/stock-device/A35-native-test-path.md`: new, the full enumeration and version matrix.
+
+`cargo test --lib --locked`: **96 passed, 0 failed** (was 90; +6).
+
+### The device is still unread — and that is the whole remaining gap
+
+**The physical A35 has never been queried.** `evidence/` is empty; `bridge-tasks.json` batch
+`A35-RO-001` has been served for several sessions and never posted back. Every device-specific claim
+in every document is `UNKNOWN`, and this session did not change that.
+
+The bridge is live and externally reachable this session (verified with an external fetcher, not a
+self-check):
+
+* `https://work-1-dmmvzcgjktgnjiaf.prod-runtime.all-hands.dev/health` returns
+  `{"ok": true, "service": "emergency-simulator-bridge", ...}`.
+
+**One read decides the project's final result:**
+
+```
+adb shell getprop ro.debuggable
+```
+
+`1` → the telephony test receivers exist; Path A is available; the controlled send can be attempted
+with logcat as the sole verdict. `0` → they are never registered, `am` still accepts the command and
+nothing happens, and the answer is `RESULT B` with the local simulator as a separately-named
+UI-only fallback. Unreadable → `UNKNOWN`, and absence must not be assumed.
+
+What this session **could not** do, stated plainly rather than glossed: it had no adb, no USB, no
+Bluetooth adapter and no route to the operator's laptop. `cargo test` and the docs are real; no
+hardware test was performed and none is claimed. Missions 25 and 28 (test on the real A35; build and
+verify the Windows release) remain blocked on the operator pasting the connection block, and no
+release artifact was published.
+
+### Prior session status — deep platform investigation (2026-09-22)
+
+### Continuation — re-verified, and the ADB route closed with citations
+
+This continuation re-derived the above from first principles and then closed the remaining
+alternative route, so that no future session has to retry it.
+
+**The `am broadcast` to `SMS_CB_RECEIVED` idea is now refuted with source, not argument.**
+`docs/stock-device/why-adb-cannot-send-sms-cb-received.md` records three gates, all verified
+against `android14-release`:
+
+1. `<protected-broadcast android:name="android.provider.Telephony.SMS_CB_RECEIVED" />` in
+   `frameworks/base/core/res/AndroidManifest.xml` (lines 749-750).
+2. `ActivityManagerService.broadcastIntentLocked` builds `isCallerSystem` from a uid switch that
+   lists `ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`, `SE_UID`,
+   `NETWORK_STACK_UID` — and not `SHELL_UID`. `SHELL_UID` does appear in the same file for other
+   checks, so its absence here is deliberate. `adb shell` presents uid 2000 and is refused with
+   `SecurityException` before any receiver runs. Root does not change this, because root is not
+   Android and `isCallerSystem` is computed from `callingUid`.
+3. `cellbroadcastreceiver.SHOW_NEW_ALERT` is *not* protected, but its consumer
+   `CellBroadcastAlertService` is `android:exported="false"`, so no external process can start it.
+
+A Shizuku binding does not lift gate 2: the caller still presents the shell uid. Only installing a
+privileged APK or replacing the Samsung CellBroadcast component would change the answer, and both
+are excluded by the project's safety constraints. **Status: BLOCKED, mechanism CONFIRMED.**
+
+**Verified working this session** (toolchains installed in-container, results real):
+
+| Gate | Result |
+|---|---|
+| `cargo test --lib --locked` | 90 passed, 0 failed |
+| `gradle :app:testDebugUnitTest :app:assembleDebug` | 13 passed, 0 failed; 2.6 MB APK built |
+| `gradle :app:lintDebug` | clean |
+| `npm run test:ui` | all layout and honesty assertions passed |
+| `python3 tools/check_read_only.py` | OK, no state-changing ADB commands |
+| `python3 tools/check_paste_ps1.py` | OK, no mechanical defects |
+| `tools/make_tone.py` re-run | byte-identical output (SHA-256 `35dd7716…`), so the tone asset is reproducible |
+| CI `Build Emergency Simulator Windows` on `1beacd0` | **all five jobs green**, including the new Android unit-test step |
+
+Two CI failures were investigated rather than waved through, and neither was caused by the Android
+work. The Windows icon step failed on the known npm optional-dependency bug (the Tauri CLI's
+`win32-x64-msvc` binding absent from a restored `node_modules`), now retried from a clean tree. The
+release-honesty gate failed on its own first version, which matched the literal string against a
+README that reads `**not** a Cell Broadcast`; markdown emphasis is now stripped before matching. Both
+were real defects in the new CI code, not flakes to rerun.
+
+A reset destroyed the container mid-session and the toolchains had to be reinstalled; the committed
+work survived because it was pushed. The tone generator being reproducible is what makes it safe to
+commit a binary asset.
+
+**Where the local simulator now stands.** The bundled attention tone is packaged and verified
+inside the APK (`res/raw/emergency_tone.wav`, 4.0 s, 22050 Hz, alternating 853/960 Hz), so the
+stock-device path no longer borrows a Samsung/default notification chime. It is still, honestly, a
+local app notification and **not** a Cell Broadcast — which is the whole point of the boundary the
+project maintains. Requests to make it *become* a Cell Broadcast are refused on the evidence above;
+the correct answer to "can a retail A35 show a genuine test alert" is **no**, and that is a result
+rather than an obstacle.
+
+
+Branch `feat/platform-diagnostics`. This session stopped adding layers around the mechanism and
+instead built the instrument needed to find out what the target device actually does.
+
+### The finding that shapes everything
+
+The AOSP test entry point is now **CONFIRMED against primary AOSP source**, fetched this session
+(`docs/stock-device/aosp-test-entrypoint.md`). In `GsmInboundSmsHandler.java`:
+
+```java
+private static final boolean TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1;
+...
+if (TEST_MODE) {
+    mTestBroadcastReceiver = new GsmCbTestBroadcastReceiver();
+    filter.addAction(TEST_ACTION);              // ...gsm.TEST_TRIGGER_CELL_BROADCAST
+    context.registerReceiver(mTestBroadcastReceiver, filter, Context.RECEIVER_EXPORTED);
+}
+```
+
+Three things follow, and they are the whole capability story:
+
+1. The receiver is **registered at runtime, not in a manifest**, so it has no component name.
+   `am broadcast -n <package>` cannot reach it, on any device. (BUG-021.)
+2. `RECEIVER_EXPORTED` with no permission means **any UID may target it**, including the ADB shell.
+   The path is genuinely root-free *when it exists*.
+3. `TEST_MODE` is a **build property read once at class init**. On `ro.debuggable=0` the receiver
+   object is never constructed: `am` reports `Broadcast completed` and nothing happens. This is the
+   single property that decides whether the platform path is reachable on a given phone.
+
+Verified identical on `android13-release`, `android14-release` and `main`.
+
+### A safety-boundary violation found and fixed
+
+Device discovery called `adb root` on every refresh — restarting the operator's adbd as root, with
+no approval for that specific command, as a side effect of pressing Refresh. It also enabled nothing,
+because the AOSP test receiver is gated on `ro.debuggable` at class initialisation and root cannot
+change that. Recorded as **BUG-024** with the fix; `tools/check_read_only.py` now fails the build if
+any state-changing ADB invoker returns, and it was confirmed to bite.
+
+### A second safety-relevant fix in the same change
+
+The controlled-path gate used `root && cellbroadcast_package` and therefore reported a **rooted
+`user` build** as `READY` — a build on which the receiver does not exist and delivery is impossible.
+
+### A second false success, in the operator paste
+
+Step 5 of the paste — the check that asks the operator to confirm the phone is unchanged — branched on
+`$script:Device`, which was never assigned. On every run with a phone attached it took the `else`
+branch and printed *"No phone attached, so there is nothing phone-side to compare."* The verification
+step always ran and always passed, by testing an empty value. Recorded as **BUG-025**;
+`tools/check_paste_ps1.py` now rejects any `$script:X` read but never assigned, and the check was
+confirmed to bite.
+
+### What this session added
+
+| Deliverable | Where | Status |
+| --- | --- | --- |
+| Structured device diagnostic report (device, packages, permissions, components, carrier config) with every command's exit code/stdout/stderr/interpretation recorded | `src-tauri/src/diagnostics.rs`, `device_diagnostics` command | DONE |
+| Package classification that does not rely on the name containing `cellbroadcast` | `diagnostics::classify_package` | DONE |
+| Permission/component parsing where an unreadable dump is `UNKNOWN`, never `DENIED` | `diagnostics::parse_permission_states`, `parse_receivers` | DONE |
+| Human-readable Markdown report leading with known / unverified / verified | `diagnostics::render_report` | DONE |
+| AOSP test entry point verified from primary source | `docs/stock-device/aosp-test-entrypoint.md` | DONE |
+| Read-only A35 evidence batch widened from 10 to 13 tasks, 76 commands | `bridge-tasks.json` | DONE |
+| `adb root` removed from discovery; read-only uid probe; controlled path gated on the test entry point | `src-tauri/src/lib.rs`, `docs/bugs/BUG-024-*.md` | FIXED |
+| Read-only enforcement guard, wired into CI | `tools/check_read_only.py`, `.github/workflows/build-windows.yml` | DONE |
+| Explicit `AlertMode` separating local UI simulation from Cell Broadcast, and a single stage function | `src-tauri/src/platform.rs`, `src-tauri/src/lib.rs`, `src/index.html` | DONE |
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **82/82 pass** (was 54). The 28 new tests cover package
+  classification, mode selection, the permission parser (including the exact AOSP dump shape that produced the
+  operator's false denial), receiver parsing, UID parsing, report assembly, and report rendering.
+* The AOSP claim above was checked by fetching `GsmInboundSmsHandler.java` from
+  `android.googlesource.com` on three branches and reading the registration code directly. It is not
+  a paraphrase of a prior note.
+* The evidence bridge was verified reachable **from outside this container** with an external
+  fetcher (`r.jina.ai`), not a self-check that can hairpin.
+
+### Phase 2 of the brief: the false notification diagnostic
+
+The brief lists this first because it proves the diagnostic layer can lie. **It is already fixed**,
+as BUG-020 in the previous session; this session confirmed the fix and re-tested it rather than
+re-fixing it. `platform::parse_post_notifications` is line-oriented, returns `Unknown` for a
+permission mentioned only in a section without a grant state, and only an explicit `granted=false`
+produces `Denied`. The regression test uses the same dump shape that caused the false reading.
+
+### What this session deliberately did not claim
+
+* **STOCK DEVICE MODE remains unproven, and this session did not move it.** The A35's
+  `ro.debuggable` value has not been read. Samsung's package names, receiver manifest and permission
+  protection levels have not been read. Nothing here was validated against a phone: this environment
+  has no adb, no USB, no Bluetooth adapter and no route to the operator's laptop.
+* The diagnostic report states this itself, in its "What we could not verify" section, so a reader
+  cannot mistake the report for a delivery test.
+* Shizuku is still **not** a route into this pipeline and was not implemented as one.
+
+### The one thing needed to finish
+
+**The operator's read-only A35 batch.** The bridge is live and externally reachable; the widened
+batch is served at `/task`. Nothing further can be concluded about the A35 without that output. When
+it arrives: read `ro.debuggable` from `a35-01-identity.txt`. If it is `0`, the AOSP test path is
+closed on that firmware by construction and the conclusion is **PATH D** with the local simulator
+kept as a separately-named UI mode. If it is `1`, the path is open and the next step is a controlled
+attempt with downstream logcat as the only proof of delivery.
+
+## Previous status — overnight lead-engineer session (2026-09-21)
+
+Branch `fix/platform-test-path-and-capability-truth`, based on main after PR #4. This session
+continued capability UI/lifecycle hardening and audited the platform test-injection path.
+
+### What this session changed
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-020](docs/bugs/BUG-020-capability-probe-reports-granted-permission-as-denied.md) | A granted `POST_NOTIFICATIONS` was parsed as denied (the name is mentioned on several lines and `find` took the first, state-less one); an unreadable/unmentioned permission was also collapsed into a denial and then blocked the send | `src-tauri/src/lib.rs`, `src-tauri/src/platform.rs` | FIXED |
+| [BUG-021](docs/bugs/BUG-021-platform-test-injection-could-never-reach-the-receiver.md) | The platform test-injection broadcast passed a bare package name to `am broadcast -n`, which takes `package/class`; the AOSP test receiver is dynamically registered and has no component name, so the command could never have reached it on any device | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-022](docs/bugs/BUG-022-ui-harness-measured-a-hidden-panel.md) | The UI harness measured `#deviceDetail` while the app was in `view-overview`, which hides it behind `display:none !important`, so every overflow assertion was vacuous | `tools/check_ui.mjs` | FIXED |
+| [BUG-023](docs/bugs/BUG-023-studio-device-image-clipped.md) | Fixed-width device renders clipped inside shrinking `overflow:hidden` boxes below ~1180px | `src/index.html` | FIXED |
+
+### The platform test entry point
+
+`platform::assess_test_entrypoint` now decides usability from `ro.debuggable`, and the reason is
+carried through to the UI. This is stated plainly in `platform.rs`:
+
+* `ro.debuggable=1` (`userdebug`/`eng`) — the AOSP test receiver
+  `GsmInboundSmsHandler.GsmCbTestBroadcastReceiver` is registered and the broadcast can reach the
+  telephony pipeline.
+* `ro.debuggable=0` (`user`) — the receiver is never registered. `am` accepts the broadcast and the
+  platform discards it. This is a build property, not a permission, so it **cannot be granted on the
+  device**, with or without adb, and it is not a root question.
+
+Verified against AOSP source: `TEST_MODE = SystemProperties.getInt("ro.debuggable", 0) == 1` in
+`frameworks/opt/telephony/.../GsmInboundSmsHandler.java`, whose doc comment gives the exact
+invocation now matched by the controller:
+`am broadcast -a com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST --es pdu_string <hex>
+--ei phone_id 0`.
+
+### What this session deliberately did not claim
+
+The safety boundary in AGENTS.md is unchanged and this session did not move it:
+
+* **CONTROLLED DEVELOPMENT MODE** remains the only demonstrated end-to-end alert path.
+* **STOCK DEVICE MODE** remains unproven. A retail Samsung A35 with `ro.debuggable=0` is reported
+  `BLOCKED` with the reason above — not as a failure of the tool and not as working.
+* BUG-021 is `INFERRED`, not `CONFIRMED`. The argument contract is checked against AOSP and covered
+  by a regression test, but no `userdebug` target was driven from this environment. It has no adb and
+  no radio.
+* Shizuku is **not** a bypass for either limit and was not implemented as one. It elevates to
+  `shell` (`uid=2000`) via a user-granted Binder proxy; it does not change `ro.debuggable`, does not
+  add privileges to a `user` build telephony process, and cannot make a dynamically registered
+  receiver exist. Using it to reach a `user` build's Cell Broadcast pipeline is not possible by this
+  mechanism.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **54/54 pass** (was 53). The new test asserts the whole injection argv
+  and was confirmed to **fail** when `-n <package>` is reintroduced, so it is not an inert check.
+* `node tools/check_ui.mjs`: all assertions pass at 1000/1180/1360/1600px. The harness asserts the
+  measured panel is visible, checks in-box clipping per element, and self-tests its own overflow
+  detector.
+* The corrected harness reproduced the original `.kv span` clipping (`scroll=442 client=282`) before
+  the CSS fix, confirming the check bites.
+* The harness now runs in the `verify` CI job on every pull request. It was previously never run in
+  CI, so the defect class it exists to catch could be reintroduced unchecked.
+
+### Environment note
+
+This session has no adb, no USB, no Bluetooth adapter and no route to the operator's laptop. Nothing
+here was validated against a phone; all device-facing claims are from source, unit tests and captured
+logcat already in `docs/experiments/`.
+
+## Previous status — Mission 2B
+
+**The root-free local simulator path was exercised end to end on a real Android 35 device for the
+first time, and doing so exposed three defects that only appear under real platform latency.**
+
+Previous sessions had built the simulator APK but never driven it. This session installed it on a
+booted emulator, sent real broadcasts through the actual `am broadcast` → `AlertReceiver` →
+`NotificationManager` → `EmergencyActivity` chain, and read the downstream stage lines back out of
+logcat. The chain works: `FULLSCREEN_ACTIVITY_STARTED`, `AUDIO_FOCUS_REQUEST granted=true` and
+`VIBRATION_START` were all observed from a real run. Three defects were found by doing that rather
+than by reading the code.
+
+### What was found and fixed this session
+
+| ID | Defect | File | Status |
+| --- | --- | --- | --- |
+| [BUG-017](docs/bugs/BUG-017-evidence-timeout-false-negative.md) | The evidence collector's 8 s budget was shorter than the platform's own latency (12.7 s measured), so a genuine full-screen alert was reported as an evidence timeout | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-018](docs/bugs/BUG-018-premature-notification-only-verdict.md) | The collector concluded at `NOTIFICATION_POSTED`, but Android posts the notification and launches the full-screen activity up to 8 s apart, so a real full-screen alert was under-reported as notification-only | `src-tauri/src/lib.rs` | FIXED |
+| [BUG-019](docs/bugs/BUG-019-blocking-audio-prepare-anr.md) | `MediaPlayer.prepare()` ran on the main thread; on a device whose alarm URI does not resolve it blocked the alert UI for ~13 s, an ANR risk | `EmergencyActivity.kt` | FIXED |
+
+All three are the same shape as the two bugs already recorded in `docs/bugs/`: a signal that looked
+correct while the thing it claimed to prove was not true. BUG-017 and BUG-018 are both false
+*negatives* — the alert had appeared and the tool said it had not. BUG-017 in particular is the
+mirror image of the recorded false successes, and it was only visible because a slow device was
+tested instead of a fast one.
+
+### Why BUG-017 and BUG-018 could not be caught by a unit test alone
+
+Both are timing defects. The verdict *logic* was correct; the *deadlines* it ran under were wrong.
+The fix therefore separates the two: `local_simulator_verdict()` is now a pure function of the
+stage lines, tested against real captured logcat, and the polling loop that feeds it carries the
+measured timeouts (`LOCAL_EVIDENCE_TIMEOUT = 25 s`, `FULLSCREEN_GRACE = 14 s`) with the measurement
+that produced each number recorded next to it.
+
+### Verification performed this session
+
+* `cargo test --lib --locked`: **15/15 pass** (was 7). The new tests include a pure-function verdict
+  test driven by real logcat captured from the device, and a cross-language contract test that fails
+  if `AlertStages.kt` and the Rust stage names ever drift apart.
+* Real device run, Android 35 emulator, `ro.debuggable=1`:
+  `ANDROID_RECEIVER_ACCEPTED` → `NOTIFICATION_POSTED` → `FULLSCREEN_ACTIVITY_STARTED rendered` →
+  `AUDIO_FOCUS_REQUEST granted=true` → `VIBRATION_START pattern=700,300,700,300,1100`.
+* **BUG-001/BUG-015 quoting re-verified end to end**, not just in unit tests: a body containing
+  spaces, `;`, `$(whoami)`, backticks, `&`, `|`, `>`, `<`, double quotes and embedded single quotes
+  arrived at the receiver **byte-identical at 77/77 characters**.
+* `gradle :app:assembleDebug`: BUILD SUCCESSFUL; APK installs and runs.
+* No ANR recorded after the async-audio change (`grep -ci "ANR in com.tirodz"` → 0).
+* Frontend contract check: consistent (15 commands, 14 invoked, 98 ids). The new `SendResult` fields
+  are additive; the frontend reads only `state`, `message` and `failure`, all of which are preserved.
+* Android 14+ full-screen intent behaviour characterised: with the screen **on**, Android shows a
+  heads-up notification and does *not* launch the activity even though the op is `allow`; with the
+  screen **off or dozing**, it does launch. This is platform policy, and the tool now reports the
+  two outcomes distinctly rather than conflating them.
+
+### What the simulator can and cannot claim
+
+The local simulator path is **CONFIRMED** on a `userdebug` emulator: a root-free app produces a real
+full-screen Android alert UI with sound and vibration. It is still **not** a CellBroadcast path — it
+never touches `SMS_CB_RECEIVED` and no radio is involved. The stock-device claim remains exactly as
+bounded as before.
+
+`README.md` did not mention the simulator at all, which is what let the boundary stay ambiguous to a
+reader. It now documents it plainly: what it is, what it is not, and the two Android 14+ behaviours
+that decide what the operator sees. The stock-device claim itself was not weakened or strengthened.
+
+Two limits found on the emulator image and recorded rather than worked around: it ships **no ringtone
+media at all** (`/system/media/audio/` is absent, `alarm_alert` and `notification_sound` are both
+`null`), so `AUDIO_UNAVAILABLE` there is correct reporting and not a defect; and its SystemUI crashed
+under repeated power-key toggling, which silently disables full-screen intents until the device is
+rebooted. The second is an emulator artefact, not a product bug, and is written down so a future
+session does not misread it as a regression.
+
+---
+
+### Prior session — repository audit (BUG-015, BUG-016)
 
 **The root-free local simulator path was exercised end to end on a real Android 35 device for the
 first time, and doing so exposed three defects that only appear under real platform latency.**
@@ -930,3 +1600,81 @@ The previous v1.1.0 GitHub release is no longer present.
 ## Final v1.0.0 finish
 
 The production desktop path is Tauri 2 + Rust + HTML/CSS/JavaScript. The Devices workspace is a dedicated device screen backed by the Rust/ADB layer and displays live read-only hardware information plus a local Samsung device PNG. Stock Galaxy A35 firmware is treated as diagnostic-only; production user builds are never restarted as root. The release workflow validates JavaScript, builds Windows + NSIS, then deletes the obsolete v2.0.0 release before publishing v1.0.0.
+
+## Mission 5 — final deep Android platform investigation (2026-09-21)
+
+Status: IN PROGRESS on branch `feat/platform-diagnostics`, PR #8. No device evidence yet: the
+Galaxy A35 has not been attached over ADB this session, so every Android claim below is
+primary-source reasoning and is labelled accordingly.
+
+### What changed, and why
+
+**Defect found in our own scanner (fixed).** `scan_platform_logcat` treated the bare tag
+`CellBroadcastReceiver` as proof the Cell Broadcast app processed a message. That tag is also on the
+app's `onReceive() unexpected action` warning, which it logs for any action it does *not* handle, so
+a stray broadcast to that component could be read as a real delivery. Both positive markers are now
+tied to the specific handled actions and alert-path lines. This is the same false-success pattern as
+BUG-001 and BUG-025, found in the tool that exists to detect it.
+
+**Second test path found (documentation).** There are two software routes into the pipeline, not one.
+Path 1 is the telephony test receiver, gated on `ro.debuggable == 1`. Path 2 is the Cell Broadcast
+app's own testing mode, toggled by the dialer secret code `*#*#2627#*#*`, accepted when
+`ro.debuggable == 1` **or** the app resource `allow_testing_mode_on_user_build` is true (AOSP ships
+it true). Path 2 may be reachable on a retail phone; whether Samsung kept it is unknown and has to be
+read off the device. Labelled INFERRED.
+
+**`phone_id` was pinned to 0 (fixed).** `CbTestBroadcastReceiver` returns early when `phone_id` is
+present and does not match its own phone id. A pinned `0` fails silently on any device whose active
+subscription is not phone 0 - indistinguishable from a build with no test receiver. The extra is now
+omitted, so whichever handler is active accepts it.
+
+**A platform-blocked alert is now reported as blocked.** The verdict gained `SUPPRESSED_BY_PLATFORM`,
+naming the gate and the verbatim device line, instead of leaving the operator with an unexplained
+silence. This is a definite negative result, not `UNKNOWN`, and it tells the operator that re-running
+cannot help.
+
+**Why a normal app throws `SecurityException` (answered).** `SMS_CB_RECEIVED` and
+`SMS_EMERGENCY_CB_RECEIVED` are in the platform protected-broadcast list. The `ActivityManagerService`
+check exempts ROOT, SYSTEM, PHONE, BLUETOOTH, NFC, SE and NETWORK_STACK; `SHELL_UID` (2000) is not
+among them and neither is any app. So it is a protected-broadcast refusal, not a missing permission,
+and `pm grant` cannot reach it. What shell *can* send is the test action, which is not protected.
+
+**Shizuku is not a solution here (documentation).** Shizuku hands an app the same uid 2000 that
+`adb shell` already has, and uid 2000 is not exempt from the protected-broadcast check. It would add
+an install step and gain no reach. Recorded so it stops being re-proposed.
+
+**`State::NOT_APPLICABLE` added.** "This question does not apply here" is now distinct from "looked
+for and absent", and `State::is_definite` separates a device fact from a failed probe.
+
+### Evidence batch extended
+
+`bridge-tasks.json` tasks 14-16 added, 92 read-only commands total. They read the three gates that
+decide whether a component that exists is ever allowed to run: `ro.debuggable`, the OEM
+`config_disable_all_cb_messages` resource, testing-mode/secret-code presence, and the carrier channel
+ranges. The testing-mode secret code is detected, not dialled. No command sends or writes.
+
+### Still owed
+
+Device evidence for A35-RO-001, including the new tasks 14-16, once the Galaxy A35 is attached.
+Nothing about stock mode becomes CONFIRMED without it.
+
+### Marker corrections (2026-09-21, follow-up)
+
+Re-reading every log marker against AOSP found two that could not have matched on any capture and one
+overclaim. `MARKER_RECEIVER` expected `onReceive <action>`, but the receiver logs `"onReceive " +
+intent` (an Intent dump), so the CB receiver stage was unreachable; the corrected marker is the intent
+dump carrying a Cell-Broadcast action. The receiver's receive-side log is gated only by a `DBG` that
+is hardcoded `true` and fires for *every* action including its own "unexpected action" fallback, so
+matching the bare tag would have read a rejected broadcast as processing. `MARKER_ALERT_UI` included
+the class name `CellBroadcastAlertDialog`, which also appears in stack traces and `dumpsys package`
+output. The OEM-disabled gate emits three lines; the `CDMA SCP` variant was missing.
+
+One overclaim removed: `receiver_processed` mapped to `SYSTEM UI REACHED`, but the receiver running
+only proves it re-dispatched the intent. There is now a distinct `CB RECEIVER PROCESSED` stage, and
+`SYSTEM UI REACHED` is claimed only from the alert-presentation call.
+
+Verdict ordering fixed: `onStartCommand` is logged before the testing-mode, channel-range and language
+checks, so a gated message produces both a positive line and a drop line. The verdict now consults
+suppression first, and a test pins that both are visible in one capture.
+
+CI run `35737797879` is green on all four jobs, including the Windows app and installer build.

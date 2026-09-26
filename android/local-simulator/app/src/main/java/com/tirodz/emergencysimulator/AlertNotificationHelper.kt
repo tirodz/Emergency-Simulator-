@@ -6,14 +6,18 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.media.AudioAttributes
-import android.media.RingtoneManager
 import android.os.Build
 
 object AlertNotificationHelper {
     const val CHANNEL_ID = "local_emergency_test"
     const val NOTIFICATION_ID = 4355
     const val ACTION = "com.tirodz.emergencysimulator.TRIGGER_ALERT"
+
+    /// The vibration pattern, defined once and shared by the notification channel and the alert
+    /// activity so the two cannot drift into different rhythms.
+    val VIBRATION_PATTERN = longArrayOf(0, 700, 300, 700, 300, 1100)
 
     fun show(
         context: Context,
@@ -98,11 +102,13 @@ object AlertNotificationHelper {
     private fun ensureChannel(context: Context, manager: NotificationManager) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
 
-        // `getDefaultUri` returns null when the device has no alarm sound configured. Passing that
-        // null through to `setSound` throws, and a throwing channel setup would abort the whole
-        // notification. The alert must still appear silently rather than not appear at all.
-        val sound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+        // The channel sound is the bundled attention tone, not the device's default alarm ringtone.
+        // The default is a pleasant chime on most OEM builds, which makes a simulated alert sound
+        // like an incoming message. The resource URI always resolves, so the previous fallback
+        // chain around `RingtoneManager.getDefaultUri` returning null is no longer needed either.
+        val sound = Uri.parse(
+            "android.resource://" + context.packageName + "/" + R.raw.emergency_tone
+        )
 
         val attributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_ALARM)
@@ -115,11 +121,9 @@ object AlertNotificationHelper {
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Local offline Emergency Simulator alerts"
-            if (sound != null) {
-                setSound(sound, attributes)
-            }
+            setSound(sound, attributes)
             enableVibration(true)
-            vibrationPattern = longArrayOf(0, 700, 300, 700, 300, 1100)
+            vibrationPattern = VIBRATION_PATTERN
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             setBypassDnd(true)
         }

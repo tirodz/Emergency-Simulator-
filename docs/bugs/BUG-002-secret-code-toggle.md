@@ -90,3 +90,39 @@ device already reports the required flags, and that it reads state before writin
 Idempotence is not a nicety for a control channel that flips device state. The AOSP secret code is
 designed for a human with a dialer, who can see what happened; a controller must read state, act only
 on a difference, and confirm the result.
+
+## Correction (2026-09-23): the reproduction could not have produced that observation
+
+Re-reading `frameworks/base/core/res/AndroidManifest.xml` on `android14-release` this session shows
+`android.telephony.action.SECRET_CODE` at line 564 in the platform's `<protected-broadcast>` list:
+
+```xml
+<protected-broadcast android:name="android.telephony.action.SECRET_CODE" />
+```
+
+`ActivityManagerService` refuses a protected broadcast from any caller that is not a system UID
+(`ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`, `SE_UID`, `NETWORK_STACK_UID`),
+and `SHELL_UID = 2000` is not among them. So:
+
+```
+adb shell am broadcast -a android.telephony.action.SECRET_CODE -d "android_secret_code://2627"
+```
+
+is refused with a `SecurityException` before any receiver runs. It cannot have toggled testing mode
+in the direction the reproduction describes, and the `Broadcast completed: result=0, delivered=1,
+finished=1` line quoted above cannot come from this command's delivery to `CellBroadcastReceiver`.
+
+What survives from this bug:
+
+* The handler really is a non-idempotent toggle — `setTestingMode(!isTestingMode(mContext))`, read in
+  `CellBroadcastReceiver.java` lines 194–212 — so the wrong thing to do is issue it blindly.
+* Reading state first and acting only on a difference remains the correct fix, and the regression
+  test still stands.
+* The secret code is **not** an injection route at all: it opens a display filter for test-mode
+  channel ranges, consulted downstream in `CellBroadcastAlertService`. See
+  `docs/stock-device/A35-native-test-path.md` §4.
+
+The lesson this adds is the project's own: **an accepted command is not an observed effect, and a
+bug report is not evidence.** This document asserted a reproduction that the platform refuses. It was
+carried for several sessions without anyone re-running it against the source, which is exactly the
+false-success pattern `docs/bugs/` exists to catch — committed here by the bug journal itself.

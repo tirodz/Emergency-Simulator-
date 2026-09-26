@@ -4,6 +4,14 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 
+/**
+ * The local simulator's broadcast entry point.
+ *
+ * This is a **local app alert**, not a Cell Broadcast. It is triggered by the desktop controller
+ * through an explicit component and produces a high-importance notification with a full-screen
+ * intent, the bundled attention tone, and vibration. The genuine Android Cell Broadcast path is a
+ * separate, protected pipeline that the ADB shell user cannot send to; see the project README.
+ */
 class AlertReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != AlertNotificationHelper.ACTION) {
@@ -11,23 +19,35 @@ class AlertReceiver : BroadcastReceiver() {
             return
         }
 
-        val title = intent.getStringExtra("title")?.takeIf { it.isNotBlank() }
-            ?: "EMERGENCY ALERT TEST"
-        val message = intent.getStringExtra("message")?.takeIf { it.isNotBlank() }
-            ?: "TEST ALERT - SIMULATION"
-        val severity = intent.getStringExtra("severity")?.takeIf { it.isNotBlank() }
-            ?: "TEST"
-        val category = intent.getStringExtra("category")?.takeIf { it.isNotBlank() }
-            ?: "ETWS-TEST"
+        val validated = AlertRequest.validate(
+            title = intent.getStringExtra("title"),
+            message = intent.getStringExtra("message"),
+            severity = intent.getStringExtra("severity"),
+            category = intent.getStringExtra("category"),
+        )
+
+        // Reported before the notification attempt so a rejected or normalised field is visible in
+        // the diagnostic log rather than silently changing what the operator sees on the phone.
+        for (problem in validated.problems) {
+            AlertStages.log(AlertStages.RECEIVER_INPUT_REJECTED, problem)
+        }
 
         AlertStages.log(
             AlertStages.RECEIVER_ACCEPTED,
-            "category=$category severity=$severity chars=${message.length}"
+            "category=${validated.category} severity=${validated.severity} " +
+                "chars=${validated.message.length}",
         )
 
         val outcome = runCatching {
-            AlertNotificationHelper.show(context, title, message, severity, category)
+            AlertNotificationHelper.show(
+                context,
+                validated.title,
+                validated.message,
+                validated.severity,
+                validated.category,
+            )
         }
+
 
         if (outcome.isFailure) {
             // A receiver that throws produces no notification and no evidence, which reads

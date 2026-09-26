@@ -2,7 +2,7 @@
 
 A Windows desktop laboratory console for controlled Android CellBroadcast testing.
 
-> This application does not transmit cellular signals, inject RF, impersonate a carrier, or operate a cellular network. The controlled test path uses Android's own protected CellBroadcast machinery on a rooted/userdebug development target.
+> This application does not transmit cellular signals, inject RF, impersonate a carrier, or operate a cellular network. The controlled test path uses Android's own CellBroadcast machinery on a debuggable userdebug/eng development target; the AOSP test receiver itself does not require root.
 
 ## v2.0 desktop rebuild
 
@@ -13,7 +13,7 @@ The Windows application has been rebuilt around:
 - HTML / CSS / JavaScript
 - WebView2
 - bundled adb.exe
-- a bundled development-only Android test injector
+- Android's exported AOSP Cell Broadcast test receiver on debuggable development targets
 
 The previous Tkinter/Python window is retired from the product path.
 
@@ -40,24 +40,47 @@ Windows Tauri console
         |
        ADB
         |
-root/userdebug Android device
+userdebug / eng Android device (ro.debuggable=1)
         |
-AlertInjector
+AOSP TEST_TRIGGER_CELL_BROADCAST
         |
-protected Android CellBroadcast receiver
+GsmInboundSmsHandler -> CellBroadcastServiceManager
         |
-CellBroadcast service
+CellBroadcastService -> CellBroadcastReceiver
         |
-system alert audio + UI
+native alert audio + UI
 ~~~
 
-The only message class exposed by the controller is AOSP ETWS TEST channel 4355 (0x1103), and the controller rejects message bodies that do not begin with TEST.
+The controller now uses the **exported AOSP telephony test receiver directly**. It does not create a
+system-UID process, does not call `adb root`, and does not rewrite Cell Broadcast preferences.
+The default payload uses ETWS primary channel `0x1100`, which AOSP enables by default; the old
+`0x1103` test channel required additional testing-mode state and was a poor default.
+
+The message body is still required to begin with `TEST`, and the backend requires downstream
+Cell Broadcast evidence before reporting delivery.
 
 ## Stock-device boundary
 
 A normal retail, unrooted Android phone is not claimed supported. The Android protected-broadcast boundary prevents an ordinary sender from simply impersonating the system CellBroadcast path.
 
 A home Wi-Fi router can transport controller traffic, but it cannot become a Cell Broadcast Centre or make cellular towers transmit.
+
+### Why ADB cannot trigger the real receiver
+
+`adb shell` runs as the shell user (uid 2000), and that user is deliberately not treated as a system caller. Two verified gates stop the attempt on every Android device, rooted or not:
+
+- `android.provider.Telephony.SMS_CB_RECEIVED` is declared a `<protected-broadcast>` in the platform manifest, so only system callers may send it.
+- `ActivityManagerService` computes `isCallerSystem` from a fixed uid list that contains `ROOT_UID`, `SYSTEM_UID`, `PHONE_UID`, `BLUETOOTH_UID`, `NFC_UID`, `SE_UID` and `NETWORK_STACK_UID` - and not `SHELL_UID`. A non-system sender of a protected broadcast is refused with a `SecurityException` before any receiver is reached.
+
+Commanding `am broadcast` to `com.samsung.android.cellbroadcastreceiver` or
+`com.android.cellbroadcastreceiver` therefore cannot produce an alert on stock firmware, and a
+Shizuku binding does not change it because the caller still presents the shell uid. The source
+quotes and the third gate (`CellBroadcastAlertService` is `exported="false"`) are in
+[`docs/stock-device/why-adb-cannot-send-sms-cb-received.md`](docs/stock-device/why-adb-cannot-send-sms-cb-received.md).
+
+The one path that does reach the genuine alert chain is the **controlled development mode** on a
+rooted or `userdebug` target, where the AOSP test entry point is permitted. That mode is proven end
+to end and is what `android/alertinject/` implements.
 
 ### What the local simulator does, and does not, do
 
@@ -77,14 +100,14 @@ npm install
 npx tauri build --ci
 ~~~
 
-The released desktop bundle is self-contained for ADB and the development injector. Rebuilding the injector source still requires an Android SDK/JDK.
+The released desktop bundle is self-contained for ADB and the local simulator. No Android injector JAR is bundled.
 
 ## Project layout
 
 ~~~text
 src/                       Tauri frontend
 src-tauri/                 Rust/Tauri backend
-android/alertinject/       controlled Android test injector
+android/alertinject/       historical injector research (not bundled or used)
 android/local-simulator/   root-free local alert simulator (Android app)
 packaging/                 Windows packaging notes
 docs/                      research + design notes

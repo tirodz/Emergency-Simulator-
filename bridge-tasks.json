@@ -187,11 +187,100 @@
         "adb version"
       ],
       "note": "The 'su -c id' line is expected to fail on a stock phone. Its failure IS the finding: it confirms no root shell is available. Do not attempt to install or obtain root."
+    },
+    {
+      "id": 11,
+      "evidence_name": "a35-11-component-inventory.txt",
+      "title": "Every receiver across the Cell Broadcast surface",
+      "read_only": true,
+      "reason": "The previous tasks look at two guessed package names. A Samsung build can carry the receiver under a name neither guess covers, and can add OEM components that participate. This enumerates receivers from every package that could plausibly take part, so the report does not depend on guessing the package name correctly.",
+      "commands": [
+        "adb shell dumpsys package com.android.cellbroadcastreceiver | Select-String -Pattern 'Receiver' -Context 0,12",
+        "adb shell dumpsys package com.samsung.android.cellbroadcastreceiver | Select-String -Pattern 'Receiver' -Context 0,12",
+        "adb shell dumpsys package com.google.android.cellbroadcastreceiver | Select-String -Pattern 'Receiver' -Context 0,12",
+        "adb shell dumpsys package com.samsung.android.emergency | Select-String -Pattern 'Receiver' -Context 0,12",
+        "adb shell pm list packages | Select-String -Pattern 'samsung'",
+        "adb shell pm list packages -f | Select-String -Pattern 'cellbroadcast'"
+      ],
+      "note": "If a package in this list does not exist, that absence is a finding, not an error to work around. Send the output as it appears."
+    },
+    {
+      "id": 12,
+      "evidence_name": "a35-12-appops-and-notification.txt",
+      "title": "AppOps, notification state and the local simulator's own permissions",
+      "read_only": true,
+      "reason": "Android 14+ denies USE_FULL_SCREEN_INTENT by default for apps that are not calling or alarm apps, and a denied op silently degrades a full-screen alert into a heads-up notification. Separately, the repository recorded a false 'notification permission is not granted' reading for the local simulator app; this collects the raw evidence needed to tell a real denial from an unreadable probe.",
+      "commands": [
+        "adb shell appops get com.tirodz.emergencysimulator",
+        "adb shell appops get com.tirodz.emergencysimulator USE_FULL_SCREEN_INTENT",
+        "adb shell dumpsys package com.tirodz.emergencysimulator",
+        "adb shell dumpsys notification | Select-String -Pattern 'emergencysimulator' -Context 2,2",
+        "adb shell dumpsys notification --noredact | Select-String -Pattern 'emergencysimulator' -Context 2,2"
+      ],
+      "note": "If the app is not installed, the command will say so; send that. Do not install it for this batch."
+    },
+    {
+      "id": 13,
+      "evidence_name": "a35-13-carrier-config-and-channels.txt",
+      "title": "Carrier configuration and which Cell Broadcast channels are enabled",
+      "read_only": true,
+      "reason": "A correctly formed message on a channel that is disabled, or whose range is not marked displayable, is accepted and then discarded without any alert. This is the difference between 'the pipeline ran and produced no alert' and 'the alert UI was reached'. Without this, a silent result cannot be interpreted.",
+      "commands": [
+        "adb shell dumpsys carrier_config | Select-String -Pattern 'cell_broadcast|cellbroadcast|emergency|alert' -Context 1,4",
+        "adb shell settings list global | Select-String -Pattern 'cell_broadcast|emergency|alert'",
+        "adb shell settings list secure | Select-String -Pattern 'cell_broadcast|emergency|alert'",
+        "adb shell dumpsys activity services | Select-String -Pattern 'cellbroadcast|CellBroadcast' -Context 4,4"
+      ],
+      "note": "This is the task that most often explains a silent result. Send it whole."
+    },
+    {
+      "id": 14,
+      "evidence_name": "a35-14-debug-and-lockdown.txt",
+      "title": "The two gates that decide whether any test path exists",
+      "read_only": true,
+      "reason": "Gate 1 and gate 3 from docs/stock-device/cell-broadcast-gate-model.md. ro.debuggable decides whether the AOSP test receiver is registered at all (Path 1), and the framework resource config_disable_all_cb_messages decides whether the platform drops every Cell Broadcast message before the handler sees it. Both are read-only reads of values the platform derives. ro.debuggable is also read by the paste's own device report, so this task corroborates it.",
+      "commands": [
+        "adb shell getprop ro.debuggable",
+        "adb shell dumpsys activity | Select-String -Pattern 'mBooted|mBooting|mSystemReady' -Context 0,1",
+        "adb shell cmd overlay list --user 0 | Select-String -Pattern 'cellbroadcast|telephony|framework'",
+        "adb shell cmd overlay dump | Select-String -Pattern 'disable_all_cb|cellbroadcast' -Context 2,2",
+        "adb shell dumpsys activity broadcasts | Select-String -Pattern 'protected' -Context 1,2",
+        "adb shell settings get global cell_broadcast_emergency_alerts"
+      ]
+    },
+    {
+      "id": 15,
+      "evidence_name": "a35-15-testing-mode-and-secret-code.txt",
+      "title": "Whether the CellBroadcast app testing mode exists on this firmware",
+      "read_only": true,
+      "reason": "Path 2 from the gate model. AOSP registers a dialer secret-code receiver for *#*#2627#*#* that toggles the app preference 'testing_mode'; the handler accepts it when ro.debuggable==1 OR the app resource allow_testing_mode_on_user_build is true (AOSP ships it true). If Samsung kept this, testing mode is reachable on a retail phone without a debug build. This task only DETECTS the receiver and reads the preference; it does not send the secret code and does not write the preference.",
+      "commands": [
+        "adb shell dumpsys package com.android.cellbroadcastreceiver | Select-String -Pattern 'SECRET_CODE|2627|secret_code' -Context 3,3",
+        "adb shell dumpsys package com.samsung.android.cellbroadcastreceiver | Select-String -Pattern 'SECRET_CODE|2627|secret_code' -Context 3,3",
+        "adb shell pm list packages | Select-String -Pattern 'secret|dialer|phone'",
+        "adb shell dumpsys package com.android.cellbroadcastreceiver | Select-String -Pattern 'CellBroadcastReceiver' -Context 0,10",
+        "adb shell cmd appops get com.android.cellbroadcastreceiver"
+      ]
+    },
+    {
+      "id": 16,
+      "evidence_name": "a35-16-carrier-cb-restriction.txt",
+      "title": "The carrier-side Cell Broadcast restriction and channel ranges",
+      "read_only": true,
+      "reason": "Gate 4 and gate 5 from the gate model. CellBroadcastAlertService filters a message whose carrier channel range is marked test-mode-only unless the device is in testing mode, and drops messages on channels with no enabled range. This is the difference between 'the injection failed' and 'the injection worked and the platform discarded it', and only the carrier configuration can tell them apart.",
+      "commands": [
+        "adb shell dumpsys carrier_config | Select-String -Pattern 'cell_broadcast|cb_|emergency|alert|channel' -Context 1,6",
+        "adb shell dumpsys carrier_config | Select-String -Pattern 'config_disable_all_cb_messages|allow_testing' -Context 2,2",
+        "adb shell settings list global | Select-String -Pattern 'cell_broadcast'",
+        "adb shell settings list secure | Select-String -Pattern 'cell_broadcast'",
+        "adb shell dumpsys telephony.registry | Select-String -Pattern 'CellBroadcast|cb' -Context 1,3"
+      ]
     }
   ],
   "after_this_batch": [
     "Return the raw outputs and stop there.",
     "A follow-up batch will be authored based on what these show. If the receiver package exposes a legitimate, non-privileged test entry point, the next batch will attempt it (with explicit approval, and only if it does not modify the phone).",
     "If no such entry point exists, the conclusion is the legitimate boundary: a stock A35 has no externally reachable test path, and we document that rather than working around it."
-  ]
+  ],
+  "revision_note": "Tasks 11-13 added after the first read-only pass was scoped. Tasks 1-10 establish identity and the two guessed Cell Broadcast package names; tasks 11-13 cover the components of any name, the AppOps/notification state, and the carrier configuration that decides whether a correctly delivered message becomes an alert. Tasks 14-16 were added after a full read of the AOSP sources this session (see docs/stock-device/cell-broadcast-gate-model.md). Tasks 1-13 find the components; 14-16 read the three gates that decide whether a component that exists is ever allowed to run. Every one of the three is invisible from a package list and from an exit code."
 }

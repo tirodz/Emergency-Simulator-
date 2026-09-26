@@ -2,7 +2,7 @@ name: Build Emergency Simulator Windows
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/platform-diagnostics]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -15,61 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-local-simulator:
-    name: Build root-free local Android simulator
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platforms;android-35 build-tools;35.0.0"
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
-      - name: Build Android local simulator
-        working-directory: android/local-simulator
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Emergency-Simulator-local-simulator-apk
-          path: android/local-simulator/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 30
-
-  build-injector:
-    name: Build Android test injector
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "21"
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: "platforms;android-35 build-tools;35.0.0"
-      - name: Build injector from source
-        shell: bash
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_HOME }}
-          JAVA_HOME: ${{ env.JAVA_HOME }}
-        run: bash android/alertinject/build.sh
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Emergency-Simulator-alertinject
-          path: android/alertinject/out/alertinject.jar
-          if-no-files-found: error
-          retention-days: 7
-
   verify:
     name: Verify desktop contract
     runs-on: ubuntu-latest
@@ -94,10 +39,10 @@ jobs:
           grep -q "send_test_alert" src/index.html
           grep -q "NO CELLULAR TRANSMISSION" src/index.html
           grep -q "send_test_alert" src-tauri/src/lib.rs
-          grep -q "injector_command_script" src-tauri/src/lib.rs
+          grep -q "platform_test_alert_args" src-tauri/src/lib.rs
+          grep -q "send_platform_test_alert" src-tauri/src/lib.rs
           grep -q "cellbroadcast_candidates" src-tauri/src/lib.rs
           grep -q "sh_quote" src-tauri/src/lib.rs
-          grep -q "targetPackage" android/alertinject/org/emergencysim/alertinject/AlertInjector.java
       - name: Validate embedded JavaScript syntax
         shell: bash
         run: |
@@ -112,12 +57,47 @@ jobs:
           Path("frontend-check.js").write_text(text[start + 8:end], encoding="utf-8")
           PY
           node --check frontend-check.js
+      - name: Run the desktop UI layout gate
+        shell: bash
+        run: |
+          set -e
+          npm install
+          # The harness prefers a system Chromium and only falls back to Playwright's own browser
+          # when there is none (tools/check_ui.mjs), so install one only if the runner lacks it.
+          # It fails on a hidden measured panel, on document overflow, on text clipped inside its own
+          # box, and on a dead overflow detector (BUG-022). A UI gate that cannot fail is worse than
+          # no gate, so this runs on every PR.
+          CHROMIUM="$(command -v chromium || command -v chromium-browser || command -v google-chrome || true)"
+          if [ -z "$CHROMIUM" ]; then npx playwright install --with-deps chromium; fi
+          CHROMIUM_PATH="$CHROMIUM" npm run test:ui
+      - name: Check the controller stays read-only
+        shell: bash
+        run: |
+          set -e
+          # Fails if a state-changing ADB command reappears in the Rust sources. `adb root` was
+          # being called on every refresh; it restarts adbd on the operator's phone as root and
+          # enables nothing, because the AOSP test receiver is gated on ro.debuggable, not on uid.
+          # See docs/bugs/BUG-024.
+          python3 tools/check_read_only.py
+
+      - name: Check every broadcast action exists in AOSP
+        shell: bash
+        run: |
+          set -e
+          # Fails if the tool emits a broadcast action that Android does not implement, or that is
+          # a protected broadcast, or is a non-exported internal action. `am` accepts all of these
+          # and prints nothing, so a fabricated action is indistinguishable from a real one at a
+          # terminal. Three such commands have been proposed to this project; the third,
+          # `...cellbroadcastreceiver.SHOW_TEST_MESSAGE`, does not exist in any AOSP branch.
+          # See docs/stock-device/proposed-native-actions-tested.md.
+          python3 tools/check_actions.py --self-test
+          python3 tools/check_actions.py
 
   build:
     name: Build Windows app and installer
     runs-on: windows-latest
     timeout-minutes: 20
-    needs: [verify, build-injector, build-local-simulator]
+    needs: [verify]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
@@ -129,7 +109,23 @@ jobs:
           target: x86_64-pc-windows-msvc
       - name: Install frontend dependencies
         shell: pwsh
-        run: npm install
+        run: |
+          # The Tauri CLI ships its Windows binary as an optional dependency, and `npm install` has a
+          # known bug where a cached node_modules tree from a restore step leaves that platform
+          # package missing. The symptom is "Cannot find module '@tauri-apps/cli-win32-x64-msvc'"
+          # from the icon step, which reads as an icon bug and is not one. Retry with a clean tree
+          # before giving up, so the job does not fail on a packaging flake.
+          $ErrorActionPreference = "Continue"
+          npm install
+          $probe = node -e "try { require.resolve('@tauri-apps/cli-win32-x64-msvc'); console.log('ok') } catch (e) { console.log('missing') }"
+          if ($probe -notmatch "ok") {
+            Write-Host "Tauri Windows CLI binding missing; reinstalling from a clean tree."
+            Remove-Item -Recurse -Force node_modules -ErrorAction SilentlyContinue
+            Remove-Item -Force package-lock.json -ErrorAction SilentlyContinue
+            npm install
+            $probe = node -e "try { require.resolve('@tauri-apps/cli-win32-x64-msvc'); console.log('ok') } catch (e) { console.log('missing') }"
+            if ($probe -notmatch "ok") { throw "Tauri Windows CLI binding could not be installed." }
+          }
       - name: Generate Windows icon set
         shell: pwsh
         run: npx tauri icon src-tauri/icons/icon.png
@@ -158,21 +154,6 @@ jobs:
           Copy-Item "$env:TEMP\pt\platform-tools\AdbWinUsbApi.dll" -Destination "$stage\AdbWinUsbApi.dll" -Force
           & "$stage\adb.exe" start-server
           & "$stage\adb.exe" devices -l
-      - name: Download Android injector
-        uses: actions/download-artifact@v8
-        with:
-          name: Emergency-Simulator-alertinject
-          path: android/alertinject/out
-      - name: Download local simulator APK
-        uses: actions/download-artifact@v8
-        with:
-          name: Emergency-Simulator-local-simulator-apk
-          path: android/local-simulator/app/build/outputs/apk/debug
-      - name: Verify packaged Android test components
-        shell: pwsh
-        run: |
-          if (-not (Test-Path "android/alertinject/out/alertinject.jar")) { throw "Missing Android injector JAR." }
-          if (-not (Test-Path "android/local-simulator/app/build/outputs/apk/debug/app-debug.apk")) { throw "Missing root-free local simulator APK." }
       - name: Run desktop controller unit tests
         shell: pwsh
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib --locked
@@ -191,6 +172,43 @@ jobs:
           Copy-Item $setup.FullName "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Force
           Get-FileHash "release-output\Emergency-Simulator-v1.0.0.exe" -Algorithm SHA256 | Format-List
           Get-FileHash "release-output\Emergency-Simulator-Setup-1.0.0.exe" -Algorithm SHA256 | Format-List
+      - name: Write SHA-256 checksums
+        shell: pwsh
+        run: |
+          # A checksum file is shipped next to the binaries so an operator can confirm the installer
+          # they downloaded is the one this build produced. The hashes were previously only printed
+          # into the build log, which nobody downloading a release can read.
+          $lines = foreach ($name in @(
+            "Emergency-Simulator-v1.0.0.exe",
+            "Emergency-Simulator-Setup-1.0.0.exe"
+          )) {
+            $path = "release-output\$name"
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          Set-Content -Path "release-output\SHA256SUMS.txt" -Value $lines -Encoding ascii
+          Get-Content "release-output\SHA256SUMS.txt"
+      - name: Verify the checked-in Android sources still describe themselves honestly
+        shell: pwsh
+        run: |
+          # The stock-device path is a local notification, never a Cell Broadcast. If a future edit
+          # starts claiming otherwise in the Kotlin, this fails rather than letting the overclaim
+          # ship inside a release.
+          $manifest = Get-Content "android/local-simulator/app/src/main/AndroidManifest.xml" -Raw
+          if ($manifest -match "SMS_CB_RECEIVED" -or $manifest -match "SMS_EMERGENCY_CB_RECEIVED") {
+            throw "The local simulator must not claim the protected Cell Broadcast actions."
+          }
+          # Markdown emphasis is stripped first: the README says "**not** a Cell Broadcast", and
+          # matching the raw text would fail on the asterisks rather than on the wording.
+          $readme = (Get-Content "README.md" -Raw) -replace "\*\*", "" -replace "\s+", " "
+          if ($readme -notmatch "not a Cell Broadcast") {
+            throw "README must state that the local simulator output is not a Cell Broadcast."
+          }
+          if ($readme -match "retail phone can receive a genuine cell broadcast" -and
+              $readme -notmatch "does not demonstrate that a retail phone can receive a genuine cell broadcast") {
+            throw "README must not claim a stock device receives a genuine Cell Broadcast."
+          }
+
       - uses: actions/upload-artifact@v7
         with:
           name: Emergency-Simulator-v1-windows
@@ -221,6 +239,49 @@ jobs:
           tag_name: v1.0.0
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          body: |
+            # Emergency Simulator v1.0.0
+
+            A Windows desktop console for **controlled** Android CellBroadcast alert testing.
+
+            > This application does not transmit cellular signals, inject RF, impersonate a carrier,
+            > or operate a cellular network.
+
+            ## What ships
+
+            | File | Purpose |
+            | --- | --- |
+            | `Emergency-Simulator-Setup-1.0.0.exe` | NSIS installer (current-user, no admin needed) |
+            | `Emergency-Simulator-v1.0.0.exe` | Portable application binary |
+            | `SHA256SUMS.txt` | SHA-256 of both binaries above |
+
+            Verify a download with:
+
+            ~~~powershell
+            Get-FileHash .\Emergency-Simulator-Setup-1.0.0.exe -Algorithm SHA256
+            ~~~
+
+            The bundled Platform Tools (adb) are packaged inside the application, so no JDK, Android SDK,
+            or separate adb install is required.
+
+            ## Two modes, deliberately kept apart
+
+            **Native platform mode.** The controller probes the connected phone for a real native
+            Cell Broadcast test entry point and sends only through that path. A retail phone that
+            exposes no usable native test surface is stopped, not simulated.
+
+            ## Delivery is judged from device evidence, never from an exit code
+
+            `adb` exiting 0 does not mean an alert appeared. Every verdict is decided from
+            downstream `logcat` stage lines, and an absence of evidence is reported as `UNCERTAIN`
+            rather than as success.
+
+            ## Requirements
+
+            * Windows 10 or 11
+            * An Android device with USB debugging enabled
           files: |
             release-assets/Emergency-Simulator-v1.0.0.exe
             release-assets/Emergency-Simulator-Setup-1.0.0.exe
+            release-assets/SHA256SUMS.txt
+

@@ -114,6 +114,29 @@ def check(powershell: str, label: str) -> None:
                 "scalar and [0] would index a character"
             )
 
+    # -- Reads of a script-scoped variable that is never written ------------------------
+    # ``$script:X`` is how this block carries state between its steps, so a read of one that is
+    # never assigned is always a defect: the step silently takes its `else` branch. This was a real
+    # one — step 5 tested ``$script:Device`` to decide whether to ask the operator to confirm the
+    # phone was unchanged, the variable was never set, so the check never ran and the operator was
+    # always told "no phone attached". Reading is matched as a bare ``$script:X`` that is not
+    # immediately followed by ``=``.
+    script_writes = set(re.findall(r"\$script:(\w+)\s*=[^=]", powershell))
+    for number, line in enumerate(powershell.splitlines(), start=1):
+        if line.strip().startswith("#"):
+            continue
+        # A plain \w+ with a trailing lookahead backtracks and truncates the name (AdbPath -> AdbPat),
+        # so take the full word first and inspect what follows it.
+        for match in re.finditer(r"\$script:(\w+)", line):
+            name = match.group(1)
+            if re.match(r"\s*=[^=]", line[match.end():]):
+                continue  # this occurrence is the assignment itself
+            if name not in script_writes:
+                FAILURES.append(
+                    f"{label}:{number}: $script:{name} is read but never assigned — the branch that "
+                    "depends on it never runs"
+                )
+
 
 def extract_block(text: str) -> str | None:
     """Return the ```powershell fenced block, or None if the document has no such block."""

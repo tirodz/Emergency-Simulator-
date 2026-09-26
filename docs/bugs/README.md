@@ -56,6 +56,11 @@ So: no silent patches.
 | [BUG-017](BUG-017-evidence-timeout-false-negative.md) | The evidence timeout was shorter than the platform's own alert latency, so a real full-screen alert was reported as a timeout | HIGH | FIXED |
 | [BUG-018](BUG-018-premature-notification-only-verdict.md) | The verdict was fixed at the notification, before the full-screen activity arrived | MEDIUM | FIXED |
 | [BUG-019](BUG-019-blocking-audio-prepare-anr.md) | Blocking audio preparation froze the alert UI for ~13 s, an ANR risk | MEDIUM | FIXED |
+| [BUG-020](BUG-020-capability-probe-reports-granted-permission-as-denied.md) | A granted notification permission was reported as denied; an unreadable one was reported as a denial and blocked the send | HIGH | FIXED |
+| [BUG-021](BUG-021-platform-test-injection-could-never-reach-the-receiver.md) | The platform test-injection command named a bare package with `-n`, so `am` rejected it and no broadcast could ever reach the receiver | HIGH | FIXED |
+| [BUG-022](BUG-022-ui-harness-measured-a-hidden-panel.md) | The UI regression harness measured a hidden panel, so every overflow assertion passed without measuring anything | HIGH | FIXED |
+| [BUG-023](BUG-023-studio-device-image-clipped.md) | Fixed-width device images clipped inside a shrinking container in the devices studio | LOW | FIXED |
+| [BUG-026](BUG-026-fixed-alert-channel-discarded-by-default.md) | Every PDU used the one channel a default phone is configured to discard | HIGH | FIXED |
 
 ## Severity scale
 

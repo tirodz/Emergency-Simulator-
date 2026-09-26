@@ -12,9 +12,14 @@ use std::{
 
 use tauri::{Emitter, Manager, State};
 
+mod diagnostics;
+mod platform;
+
+use platform::{CapabilityStage, ProbeEvidence, State as PlatformState};
+
 const SERVICE_CATEGORY: u32 = 4355;
 const REQUIRED_PREFIX: &str = "TEST";
-const DEFAULT_BODY: &str = "TEST ALERT - SIMULATION";
+const DEFAULT_BODY: &str = "TEST ALERT";
 const INJECTOR_CLASS: &str = "org.emergencysim.alertinject.AlertInjector";
 const INJECTOR_REMOTE: &str = "/data/local/tmp/alertinject.jar";
 const EVIDENCE_TIMEOUT_SECS: u64 = 45;
@@ -73,6 +78,14 @@ pub struct Device {
     pub cellbroadcast_package: Option<String>,
     pub cellbroadcast_candidates: Vec<String>,
     pub local_simulator: bool,
+    /// Whether the AOSP test entry point exists on this build, and why.
+    pub test_entrypoint_available: PlatformState,
+    pub test_entrypoint_reason: String,
+    /// The strongest capability established by evidence rather than by inference.
+    pub capability_stage: CapabilityStage,
+    /// Which alert path this controller will take for this device, and what it may be called.
+    /// The UI must label a `LOCAL UI SIMULATION` as a simulation, never as a Cell Broadcast.
+    pub alert_mode: platform::AlertMode,
     pub state: DeviceState,
     pub support_level: SupportLevel,
     pub specs: DeviceSpecs,
@@ -97,6 +110,9 @@ pub struct SendResult {
     pub evidence: Vec<String>,
     pub injector_exit_code: Option<i32>,
     pub diagnostics: Vec<DiagEvent>,
+    /// Wall-clock duration of the whole send, in milliseconds. `None` for results that never
+    /// reached the transport (validation failures).
+    pub duration_ms: Option<u64>,
     /// The pipeline stage that actually failed, so the UI can name it instead of showing a
     /// generic error. `None` when the run did not fail.
     pub failed_stage: Option<String>,
@@ -116,8 +132,13 @@ pub struct DiagEvent {
     pub detail: Option<String>,
     pub stdout: Option<String>,
     pub stderr: Option<String>,
+    /// How long the underlying command took, when it was timed. This is what separates "the
+    /// command failed" from "the command never came back": without it a hang and an error read the
+    /// same in the log.
+    pub duration_ms: Option<u64>,
     pub timestamp: String,
 }
+
 
 #[derive(Debug, Clone, Serialize)]
 struct ActivityEvent {
@@ -215,6 +236,41 @@ fn diag(
         detail,
         stdout,
         stderr,
+        duration_ms: None,
+        timestamp: now_timestamp(),
+    });
+}
+
+/// Record a diagnostic event for a command whose execution time was measured.
+///
+/// Kept alongside `diag` rather than folded into it so that a duration is only ever reported for
+/// something that was actually timed. Stamping a duration on untimed events would invent data.
+fn diag_timed(
+    app: &tauri::AppHandle,
+    result: &mut SendResult,
+    stage: &str,
+    action: impl Into<String>,
+    detail: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    duration_ms: u64,
+    kind: &str,
+) {
+    let action = action.into();
+    let summary = match &detail {
+        Some(detail) => format!("{stage} · {action} · {detail} · {duration_ms}ms"),
+        None => format!("{stage} · {action} · {duration_ms}ms"),
+    };
+    emit_log(app, summary, kind);
+
+    result.diagnostics.push(DiagEvent {
+        stage: stage.to_string(),
+        serial: result.device_serial.clone(),
+        action,
+        detail,
+        stdout,
+        stderr,
+        duration_ms: Some(duration_ms),
         timestamp: now_timestamp(),
     });
 }
@@ -498,11 +554,181 @@ fn shell(app: &tauri::AppHandle, serial: &str, parts: &[&str]) -> Result<String,
     adb_call(app, &args)
 }
 
+/// Run a command and keep *everything*: exit code, stdout, stderr and the argv that produced it.
+///
+/// The diagnostic panel and the capability probe both need the unedited record. Collapsing stderr
+/// into stdout or dropping a non-zero exit code is what makes a diagnostic tool unable to explain
+/// its own conclusions, so this never discards either.
+fn run_captured(app: &tauri::AppHandle, args: &[&str]) -> (String, ProbeEvidence) {
+    let command = format!("adb {}", args.join(" "));
+    let label = args.last().map(|s| s.to_string()).unwrap_or_default();
+
+    match command_output(app, args) {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let code = output.status.code();
+            (
+                stdout.clone(),
+                ProbeEvidence {
+                    label,
+                    command,
+                    exit_code: code,
+                    stdout,
+                    stderr,
+                    parsed: if output.status.success() {
+                        String::new()
+                    } else {
+                        format!("command failed with exit code {}", code.unwrap_or(-1))
+                    },
+                },
+            )
+        }
+        Err(error) => (
+            String::new(),
+            ProbeEvidence {
+                label,
+                command,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: error.clone(),
+                parsed: error,
+            },
+        ),
+    }
+}
+
+/// Trim long command output for the diagnostic panel without hiding that it was trimmed.
+fn truncate_for_log(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(limit).collect();
+    format!("{kept}\n…[{} more characters omitted]", trimmed.chars().count() - limit)
+}
+
+/// `shell` that also returns the raw evidence for the diagnostic panel.
+fn shell_captured(
+    app: &tauri::AppHandle,
+    serial: &str,
+    parts: &[&str],
+) -> (String, ProbeEvidence) {
+    let mut args = vec!["-s", serial, "shell"];
+    args.extend_from_slice(parts);
+    run_captured(app, &args)
+}
+
 fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
     shell(app, serial, &["getprop", key])
         .unwrap_or_default()
         .trim()
         .to_string()
+}
+
+/// Build the argv for the AOSP platform test-injection broadcast.
+///
+/// Split out from the send so the argument contract can be asserted without a device. Four details
+/// are deliberate and were each wrong before (BUG-021):
+///
+/// * no `-n` — `GsmInboundSmsHandler` registers the test receiver dynamically, so it has no
+///   manifest component name. `-n` also takes `package/class`, and the package names that
+///   `cellbroadcast_candidates()` returns would be rejected as a bad component name.
+/// * `--es pdu_string <hex>` — the key the handler reads.
+/// * `--es format 3gpp` is not sent: `pdu_string` is already the encoded PDU and the handler does
+///   not read a `format` key.
+/// * No `--ei phone_id`. `CbTestBroadcastReceiver.onReceive` in `InboundSmsHandler` returns early
+///   when `phone_id` is present and does not equal the handler's own phone id:
+///
+///   ```java
+///   int phoneId = mPhone.getPhoneId();
+///   if (intent.getIntExtra("phone_id", phoneId) != phoneId) {
+///       return;
+///   }
+///   ```
+///
+///   A pinned `0` therefore fails **silently** on a device whose active subscription is not phone
+///   0 — the receiver returns, `am` still exits 0, and the attempt looks identical to a build that
+///   lacks the receiver. Omitting the extra uses the default `phoneId`, so the handler for whichever
+///   phone is active accepts it. On a dual-SIM device both handlers may run, which is a visible,
+///   diagnosable outcome rather than silence, so it is the safer default.
+fn ui_bounds_for_resource(xml: &str, suffix: &str) -> Option<(i32, i32)> {
+    let needle = format!(r#"resource-id="{}""#, suffix);
+    let start = xml.find(&needle)?;
+    let node_start = xml[..start].rfind("<node")?;
+    let node_end = xml[start..].find('>')? + start;
+    let node = &xml[node_start..=node_end];
+    let key = r#"bounds=""#;
+    let b = node.find(key)? + key.len();
+    let rest = &node[b..];
+    let e = rest.find('"')?;
+    let vals: Vec<i32> = rest[..e]
+        .replace('[', " ").replace(']', " ").replace(',', " ")
+        .split_whitespace().filter_map(|v| v.parse().ok()).collect();
+    if vals.len() != 4 { return None; }
+    Some(((vals[0] + vals[2]) / 2, (vals[1] + vals[3]) / 2))
+}
+
+fn official_cellbroadcast_harness_present(app: &tauri::AppHandle, serial: &str) -> bool {
+    shell_captured(app, serial, &["pm", "path", "com.android.cellbroadcastreceiver.tests"])
+        .0.lines().any(|line| line.trim().starts_with("package:"))
+}
+
+fn send_via_official_test_harness(
+    app: &tauri::AppHandle,
+    serial: &str,
+    diagnostics: &mut Vec<ProbeEvidence>,
+) -> Result<bool, String> {
+    if !official_cellbroadcast_harness_present(app, serial) {
+        return Ok(false);
+    }
+
+    let (_out, rec) = shell_captured(app, serial, &[
+        "am", "start", "-n",
+        "com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity",
+    ]);
+    diagnostics.push(rec);
+    thread::sleep(Duration::from_millis(900));
+
+    let (_out, rec) = shell_captured(app, serial, &[
+        "uiautomator", "dump", "/sdcard/emergency-simulator-window.xml",
+    ]);
+    diagnostics.push(rec);
+
+    let (xml, rec) = shell_captured(app, serial, &["cat", "/sdcard/emergency-simulator-window.xml"]);
+    diagnostics.push(rec);
+
+    let Some((x, y)) = ui_bounds_for_resource(
+        &xml,
+        "com.android.cellbroadcastreceiver.tests:id/button_etws_test_type",
+    ) else {
+        return Err("Official CellBroadcast test harness is installed, but its ETWS TEST button was not found.".to_string());
+    };
+
+    let x_arg = x.to_string();
+    let y_arg = y.to_string();
+    let (_out, rec) = shell_captured(app, serial, &["input", "tap", &x_arg, &y_arg]);
+    diagnostics.push(rec);
+    Ok(true)
+}
+
+fn platform_test_alert_args<'a>(serial: &'a str, action: &'a str, pdu_hex: &'a str) -> Vec<&'a str> {
+    vec![
+        "-s",
+        serial,
+        "shell",
+        "am",
+        "broadcast",
+        "-a",
+        action,
+        "--es",
+        "pdu_string",
+        pdu_hex,
+        // AOSP consumes pdu_string; some OEM test receivers use the shorter pdu key.
+        "--es",
+        "pdu",
+        pdu_hex,
+    ]
 }
 
 /// Every package on the device that looks like a Cell Broadcast receiver, most likely first.
@@ -512,61 +738,82 @@ fn getprop(app: &tauri::AppHandle, serial: &str, key: &str) -> String {
 /// handling alerts is not decidable from the package list, so the controller carries them in
 /// preference order and lets the device decide.
 fn cellbroadcast_candidates(app: &tauri::AppHandle, serial: &str) -> Vec<String> {
-    let text = match shell(app, serial, &["pm", "list", "packages"]) {
-        Ok(text) => text,
-        Err(_) => return Vec::new(),
-    };
+    // Resolve the actual receiver for the Cell Broadcast actions first. The Android module is
+    // shipped inside the com.android.cellbroadcast APEX on modern builds, so package-name
+    // substring matching is not reliable.
+    let actions = [
+        "android.provider.action.SMS_EMERGENCY_CB_RECEIVED",
+        "android.provider.Telephony.SMS_CB_RECEIVED",
+    ];
 
-    let mut packages = text.lines()
-        .map(str::trim)
-        .filter_map(|line| line.strip_prefix("package:"))
-        .filter(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let mut packages = Vec::<String>::new();
+    for action in actions {
+        if let Ok(text) = shell(
+            app,
+            serial,
+            &["cmd", "package", "query-receivers", "--components", "-a", action],
+        ) {
+            for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+                let token = line.split_whitespace().last().unwrap_or(line);
+                if let Some((package, class_name)) = token.split_once('/') {
+                    if !package.is_empty() && !class_name.is_empty()
+                        && package.contains('.')
+                        && !package.starts_with("No ")
+                        && !package.starts_with("Error")
+                    {
+                        if !packages.iter().any(|p| p == package) {
+                            packages.push(package.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    // Rank by how specifically the name identifies a receiver module, then alphabetically so the
-    // order is stable across runs rather than dependent on `pm list` output order.
+    // Fallback for vendor builds that restrict query-receivers.
+    if packages.is_empty() {
+        if let Ok(text) = shell(app, serial, &["pm", "list", "packages"]) {
+            packages.extend(
+                text.lines()
+                    .map(str::trim)
+                    .filter_map(|line| line.strip_prefix("package:"))
+                    .filter(|package| package.to_ascii_lowercase().contains("cellbroadcast"))
+                    .map(str::to_string),
+            );
+        }
+    }
+
     packages.sort_by_key(|package| {
         let lower = package.to_ascii_lowercase();
         let rank = if lower.contains("cellbroadcastreceiver") {
             0
         } else if lower.contains("cellbroadcast") {
             1
-        } else {
+        } else if lower.contains("google") {
             2
+        } else {
+            3
         };
         (rank, lower)
     });
     packages.dedup();
-
     packages
 }
 
-fn is_root(app: &tauri::AppHandle, serial: &str, build_type: &str) -> bool {
-    // Never ask production/user Samsung builds to restart adbd as root.
-    if build_type.eq_ignore_ascii_case("user") {
-        return false;
-    }
-
-    let _ = adb_call(app, &["-s", serial, "root"]);
-    thread::sleep(Duration::from_millis(700));
-
-    if shell(app, serial, &["id", "-u"])
-        .map(|text| text.trim() == "0")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    if build_type.eq_ignore_ascii_case("eng")
-        || build_type.eq_ignore_ascii_case("userdebug")
-    {
-        return shell(app, serial, &["id"])
-            .map(|text| text.contains("uid=0"))
-            .unwrap_or(false);
-    }
-
-    false
+/// Read whether the device is already running adbd as root, without changing anything.
+///
+/// This used to call `adb root` during device discovery. That is not a query: it restarts the adbd
+/// daemon on the device as root, which is a change to the phone's state, and it ran on every
+/// refresh with no approval for the specific command. It also predates `ro.debuggable` being
+/// understood as the actual gate on the AOSP test entry point, and root does not open that gate —
+/// the receiver is registered at class initialisation from a build property.
+///
+/// The probe is now read-only and its answer only describes the device. A non-zero uid is the
+/// normal answer and it is not a failure.
+fn adbd_uid(app: &tauri::AppHandle, serial: &str) -> Option<u32> {
+    shell(app, serial, &["id", "-u"])
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
 }
 
 fn parse_first_u64(text: &str, key: &str) -> Option<u64> {
@@ -686,7 +933,7 @@ fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<Strin
     Ok("Local Android alert simulator installed.".to_string())
 }
 
-/// The capability state that decides what the operator will actually see on the phone.
+/// Local-simulator prerequisites, each an explicit five-state answer.
 ///
 /// Reported separately from installation because they fail independently: a simulator can be
 /// installed and still be unable to post a notification (Android 13+ POST_NOTIFICATIONS denied) or
@@ -696,69 +943,82 @@ fn install_local_simulator(app: &tauri::AppHandle, serial: &str) -> Result<Strin
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct SimulatorCapabilities {
     pub installed: bool,
-    pub post_notifications: Option<bool>,
-    pub full_screen_intent: Option<bool>,
-    pub notifications_enabled: Option<bool>,
+    pub post_notifications: PlatformState,
+    pub full_screen_intent: PlatformState,
+    pub notifications_enabled: PlatformState,
+    pub post_notifications_detail: String,
+    pub full_screen_intent_detail: String,
 }
 
-fn simulator_capabilities(app: &tauri::AppHandle, serial: &str) -> SimulatorCapabilities {
+fn simulator_capabilities(
+    app: &tauri::AppHandle,
+    serial: &str,
+    evidence: &mut Vec<ProbeEvidence>,
+) -> SimulatorCapabilities {
     let mut capabilities = SimulatorCapabilities {
         installed: local_simulator_installed(app, serial),
         ..Default::default()
     };
 
     if !capabilities.installed {
+        capabilities.post_notifications = PlatformState::NotPresent;
+        capabilities.full_screen_intent = PlatformState::NotPresent;
+        capabilities.notifications_enabled = PlatformState::NotPresent;
         return capabilities;
     }
 
-    // POST_NOTIFICATIONS is only runtime-granted from Android 13 (API 33). Below that the
-    // permission does not exist and reporting `false` would be a false alarm.
-    let sdk = getprop(app, serial, "ro.build.version.sdk")
-        .trim()
-        .parse::<u32>()
-        .ok();
+    // POST_NOTIFICATIONS is only a runtime permission from Android 13 (API 33). Below that it does
+    // not exist, and reporting a denial there would be a false alarm.
+    let (sdk_text, sdk_evidence) = shell_captured(app, serial, &["getprop", "ro.build.version.sdk"]);
+    let sdk = sdk_text.trim().parse::<u32>().ok();
+    evidence.push(sdk_evidence);
+
     if sdk.is_some_and(|sdk| sdk >= 33) {
-        capabilities.post_notifications = shell(
-            app,
-            serial,
-            &["dumpsys", "package", LOCAL_SIMULATOR_PACKAGE],
-        )
-        .ok()
-        .and_then(|dump| {
-            dump.lines()
-                .find(|line| line.contains("android.permission.POST_NOTIFICATIONS"))
-                .map(|line| line.contains("granted=true"))
+        let (dump, record) =
+            shell_captured(app, serial, &["dumpsys", "package", LOCAL_SIMULATOR_PACKAGE]);
+        capabilities.post_notifications = platform::parse_post_notifications(&dump);
+        capabilities.post_notifications_detail =
+            capabilities.post_notifications.label().to_string();
+        evidence.push(ProbeEvidence {
+            parsed: capabilities.post_notifications.label().to_string(),
+            ..record
         });
+    } else {
+        capabilities.post_notifications = PlatformState::NotPresent;
+        capabilities.post_notifications_detail = format!(
+            "POST_NOTIFICATIONS does not exist below API 33 (device reports SDK {})",
+            sdk_text.trim()
+        );
     }
 
-    // `appops get` reports the current mode for the op. On Android 14+ this defaults to `deny`
-    // for apps that are not calling/alarm apps, which is exactly the condition that makes a
-    // full-screen alert silently degrade into a heads-up notification.
-    capabilities.full_screen_intent = shell(
+    // Android 14+ defaults USE_FULL_SCREEN_INTENT to denied for apps that are not calling or alarm
+    // apps, which degrades a full-screen alert into a heads-up notification without any error.
+    let (appop, record) = shell_captured(
         app,
         serial,
         &["appops", "get", LOCAL_SIMULATOR_PACKAGE, "USE_FULL_SCREEN_INTENT"],
-    )
-    .ok()
-    .map(|text| {
-        let text = text.to_ascii_lowercase();
-        if text.contains("allow") {
-            true
-        } else if text.contains("deny") || text.contains("ignore") || text.contains("default") {
-            false
-        } else {
-            // Op not present on this API level; treat as unrestricted.
-            true
-        }
+    );
+    capabilities.full_screen_intent = platform::parse_full_screen_intent(&appop);
+    capabilities.full_screen_intent_detail = capabilities.full_screen_intent.label().to_string();
+    evidence.push(ProbeEvidence {
+        parsed: capabilities.full_screen_intent.label().to_string(),
+        ..record
     });
 
-    capabilities.notifications_enabled = shell(
-        app,
-        serial,
-        &["dumpsys", "notification", "--noredact"],
-    )
-    .ok()
-    .map(|dump| !dump.contains(&format!("{LOCAL_SIMULATOR_PACKAGE}: banned")));
+    let (notifications, record) = shell_captured(app, serial, &["dumpsys", "notification"]);
+    capabilities.notifications_enabled = if notifications.trim().is_empty() {
+        PlatformState::Unknown
+    } else if notifications.contains(&format!("{LOCAL_SIMULATOR_PACKAGE}: banned")) {
+        PlatformState::Denied
+    } else {
+        // The package not being mentioned is the normal state for an app that has not posted
+        // anything yet. That is not a ban, so it must not be reported as a denial.
+        PlatformState::Unknown
+    };
+    evidence.push(ProbeEvidence {
+        parsed: capabilities.notifications_enabled.label().to_string(),
+        ..record
+    });
 
     capabilities
 }
@@ -1073,6 +1333,11 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "No probe ran: the device is not yet authorised for debugging."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Unauthorized,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1098,6 +1363,11 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "No probe ran: ADB reports the device as offline."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Offline,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1120,6 +1390,11 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
                 cellbroadcast_package: None,
                 cellbroadcast_candidates: Vec::new(),
                 local_simulator: false,
+                test_entrypoint_available: PlatformState::Unknown,
+                test_entrypoint_reason: "ADB transport is not in the device state; no probe ran."
+                    .to_string(),
+                capability_stage: CapabilityStage::None,
+                alert_mode: platform::AlertMode::Unavailable,
                 state: DeviceState::Unknown,
                 support_level: SupportLevel::Untested,
                 specs: DeviceSpecs { cpu: None, ram_gb: None, storage_gb: None, battery_percent: None, screen_resolution: None, density: None, announced: None, dimensions: None, weight_g: None, memory_options: None, storage_options: None, display_profile: None, battery_capacity_mah: None },
@@ -1136,10 +1411,14 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         let build_type = getprop(app, &serial, "ro.build.type");
         let debuggable = getprop(app, &serial, "ro.debuggable");
 
-        let root = is_root(app, &serial, &build_type);
+        // Read-only identity probe. `Some(0)` means adbd already runs as root; it is never asked
+        // to become root here.
+        let root = adbd_uid(app, &serial) == Some(0);
         let cellbroadcast_candidates = cellbroadcast_candidates(app, &serial);
         let cellbroadcast_package = cellbroadcast_candidates.first().cloned();
-        let local_simulator = local_simulator_installed(app, &serial);
+        // Native-only release path: an old copy of the optional local simulator may still exist on a
+        // phone from an earlier build, but its presence must never affect capability, state, or mode.
+        let local_simulator = false;
 
         let samsung_a35 = model.to_ascii_lowercase().contains("sm-a356")
             || model.to_ascii_lowercase().contains("galaxy a35");
@@ -1154,21 +1433,36 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
         }
 
         let specs = query_device_specs(app, &serial, &model);
-        let (state, support_level) = if local_simulator {
-            notes.push("Root-free local simulator is installed. Send uses our explicit test receiver and notification/full-screen pipeline.".to_string());
-            (DeviceState::SimulatorReady, SupportLevel::LocalSimulator)
-        } else if root && cellbroadcast_package.is_some() {
-            notes.push(
-                "Rooted/userdebug controlled target. The genuine Android CellBroadcast test path is available."
-                    .to_string(),
-            );
+        let cellbroadcast_package_was_found = cellbroadcast_package.is_some();
+
+        // Whether the AOSP test entry point exists is a build property, not a permission. Stating
+        // it here means the operator learns it before selecting an action, rather than from a
+        // broadcast that reported success and produced nothing.
+        let test_entrypoint =
+            platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
+        let (state, support_level) = if test_entrypoint.available == PlatformState::Granted {
+            // The controlled path is gated on the build permitting the AOSP test receiver, which is
+            // the thing that actually decides whether the broadcast can be delivered. Root is not
+            // part of this condition: a rooted `user` build still has no test receiver, and a
+            // `userdebug` build does not need adbd to run as root for an exported receiver.
+            notes.push(format!(
+                "Controlled target. AOSP test entry point: {}.",
+                test_entrypoint.available.label()
+            ));
+            notes.push(test_entrypoint.reason.clone());
             (DeviceState::Ready, SupportLevel::Supported)
         } else if cellbroadcast_package.is_none() {
-            notes.push("No CellBroadcast receiver package was detected. Install the local simulator to test alert UI on a stock device.".to_string());
+            notes.push(
+                "No CellBroadcast receiver package was detected. No native Cell Broadcast test path is \
+                 available on this device."
+                    .to_string(),
+            );
             (DeviceState::Unsupported, SupportLevel::Unsupported)
         } else {
+            notes.push(test_entrypoint.reason.clone());
             notes.push(
-                "Stock/non-root device. Install the bundled local simulator to test alert UI without root."
+                "Stock/non-root device. The AOSP test entry point is unavailable on this production build; \
+                 the release does not substitute a local notification path."
                     .to_string(),
             );
             (DeviceState::NoRoot, SupportLevel::RootRequired)
@@ -1187,6 +1481,20 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             cellbroadcast_package,
             cellbroadcast_candidates,
             local_simulator,
+            test_entrypoint_available: test_entrypoint.available,
+            test_entrypoint_reason: test_entrypoint.reason,
+            capability_stage: platform::capability_stage(
+                cellbroadcast_package_was_found,
+                cellbroadcast_package_was_found,
+                test_entrypoint.available,
+            ),
+            // `verified` is false here by construction: verification is a per-send logcat
+            // observation, and this is a device profile built before any send happened.
+            alert_mode: platform::alert_mode(
+                test_entrypoint.available,
+                false,
+                false,
+            ),
             state,
             support_level,
             specs,
@@ -1555,6 +1863,570 @@ fn collect_evidence(
     Ok(())
 }
 
+/// The alert channels this tool can address, with each channel's receive-side gate.
+///
+/// Exposed so the interface offers exactly the channels the encoding path will accept, rather than
+/// re-implementing the catalogue in JavaScript. A second copy of this table is a second chance for
+/// the two to disagree, and a UI listing a channel the backend then refuses is the same class of
+/// defect as a broadcast action that does not exist.
+#[tauri::command]
+fn list_alert_channels() -> Vec<platform::AlertChannel> {
+    platform::ALERT_CHANNELS.to_vec()
+}
+
+/// The result of a platform test-injection attempt.
+#[derive(Debug, Clone, Serialize)]
+pub struct PlatformSendResult {
+    pub device_serial: String,
+    pub body: String,
+    pub pdu_hex: String,
+    pub message_id: String,
+    /// The 3GPP message identifier this attempt addressed.
+    pub channel_id: u16,
+    /// Its label from the [`platform::ALERT_CHANNELS`] catalogue.
+    pub channel_label: String,
+    /// The AOSP receive-side preference that decides whether the alert is raised.
+    pub channel_gate: String,
+    /// What the operator must change for this channel, if anything.
+    pub channel_requirement: String,
+    /// Whether the channel is on for a device that has never been configured.
+    pub channel_enabled_by_default: bool,
+    pub entrypoint_available: PlatformState,
+    pub stage: CapabilityStage,
+    /// The rung of [`platform::VerificationStage`] this attempt actually reached.
+    ///
+    /// Distinct from `stage`: `stage` describes the strongest general capability observed, and this
+    /// describes how far *this* attempt got down the verification ladder. It is what the UI reports
+    /// as "reached / did not reach", so a send that exited 0 but left no downstream log lands on
+    /// `TRIGGER_SENT` and not on anything that reads as delivery.
+    pub verification_stage: platform::VerificationStage,
+    pub state: String,
+    pub message: String,
+    pub failure: Option<String>,
+    pub evidence: Vec<String>,
+    pub logcat_excerpt: String,
+    /// The platform gate that discarded the message, when the platform said so, with the verbatim
+    /// device line. Present only when the run reached the Cell Broadcast stack and was suppressed.
+    pub suppression: Option<platform::Suppression>,
+    /// Every command that was run, with its raw output. Never collapsed.
+    pub diagnostics: Vec<ProbeEvidence>,
+}
+
+/// Probe a device's Cell Broadcast capability without changing anything.
+///
+/// Read-only, and it returns the raw output of every command behind its conclusions so the
+/// operator can check the parsing rather than trust it.
+#[tauri::command]
+fn platform_diagnostics(app: tauri::AppHandle, serial: String) -> Result<platform::PlatformProbe, String> {
+    let mut evidence = Vec::new();
+
+    let (debuggable, record) = shell_captured(&app, &serial, &["getprop", platform::DEBUGGABLE_PROPERTY]);
+    let debuggable = debuggable.trim().to_string();
+    let mut entrypoint_record = record;
+    entrypoint_record.parsed = format!("ro.debuggable={debuggable:?}");
+    evidence.push(entrypoint_record);
+
+    let (build_type, record) = shell_captured(&app, &serial, &["getprop", "ro.build.type"]);
+    evidence.push(record);
+
+    let (harness_path, mut harness_record) =
+        shell_captured(&app, &serial, &["pm", "path", "com.android.cellbroadcastreceiver.tests"]);
+    harness_record.parsed = if harness_path.trim().is_empty() {
+        "AOSP CellBroadcast test harness package is not installed.".to_string()
+    } else {
+        format!("AOSP CellBroadcast test harness installed: {}", harness_path.trim())
+    };
+    evidence.push(harness_record);
+
+    let candidates = cellbroadcast_candidates(&app, &serial);
+    let cellbroadcast_package = candidates.first().cloned();
+
+    // Package presence must be paired with an actual receiver declaration. A package name is a
+    // string; it is not evidence that the component exists.
+    let receiver_declared = match &cellbroadcast_package {
+        Some(package) => {
+            let (dump, mut record) =
+                shell_captured(&app, &serial, &["dumpsys", "package", package]);
+            let declared = dump.contains("CellBroadcastReceiver")
+                || dump.contains("CellBroadcastAlertService")
+                || dump.contains("cellbroadcastreceiver");
+            record.parsed = if declared {
+                "CellBroadcast receiver/service declared in the package manifest".to_string()
+            } else if dump.trim().is_empty() {
+                "no package dump returned".to_string()
+            } else {
+                "package present but no CellBroadcast component found in its dump".to_string()
+            };
+            evidence.push(record);
+            if declared {
+                PlatformState::Granted
+            } else if dump.trim().is_empty() {
+                PlatformState::Unknown
+            } else {
+                PlatformState::NotPresent
+            }
+        }
+        None => PlatformState::NotPresent,
+    };
+
+    let test_entrypoint =
+        platform::assess_test_entrypoint(&debuggable, cellbroadcast_package.as_deref());
+    // Runtime receiver discovery is important after the operator enables Cell Broadcast test mode.
+    // A vendor build may register a native test receiver even though ro.debuggable remains 0.
+    let runtime_dump = shell_captured(&app, &serial, &["dumpsys", "activity", "broadcasts"]);
+    let runtime_actions = platform::discover_runtime_test_actions(&runtime_dump.0);
+    let mut runtime_record = runtime_dump.1;
+    runtime_record.parsed = if runtime_actions.is_empty() {
+        "No qualifying runtime native test receiver was discovered.".to_string()
+    } else {
+        format!("Runtime native test actions: {}", runtime_actions.join(", "))
+    };
+    evidence.push(runtime_record);
+
+    // Capability is the *lowest* honest stage: what the device is, not what we hope it is.
+    let stage = if receiver_declared == PlatformState::Granted
+        && test_entrypoint.available == PlatformState::Granted
+    {
+        CapabilityStage::TestEntryPointDiscovered
+    } else if receiver_declared == PlatformState::Granted {
+        CapabilityStage::ReceiverDiscovered
+    } else if cellbroadcast_package.is_some() {
+        CapabilityStage::PackagePresent
+    } else {
+        CapabilityStage::None
+    };
+
+    let summary = if !runtime_actions.is_empty() {
+        format!(
+            "Runtime native test action discovered: {}.",
+            runtime_actions.join(", ")
+        )
+    } else if test_entrypoint.available == PlatformState::Granted {
+        format!(
+            "{} The platform Cell Broadcast test path is available on this build.",
+            test_entrypoint.reason
+        )
+    } else if test_entrypoint.available == PlatformState::Denied {
+        format!(
+            "{} No shell-accessible native test receiver is exposed by this production build.",
+            test_entrypoint.reason
+        )
+    } else {
+        test_entrypoint.reason.clone()
+    };
+
+    Ok(platform::PlatformProbe {
+        build_type: (!build_type.trim().is_empty()).then(|| build_type.trim().to_string()),
+        debuggable: (!debuggable.is_empty()).then_some(debuggable),
+        test_entrypoint,
+        cellbroadcast_candidates: candidates,
+        cellbroadcast_package,
+        receiver_declared,
+        // Native-only release: an old companion app on the phone is intentionally ignored.
+        local_simulator_installed: false,
+        post_notifications: PlatformState::Unknown,
+        full_screen_intent: PlatformState::Unknown,
+        notifications_enabled: PlatformState::Unknown,
+        stage,
+        summary,
+        evidence,
+    })
+}
+
+/// The diagnostic report, plus the same report rendered as readable Markdown.
+///
+/// Both forms are returned from one call so the controller never has to re-run the commands to
+/// produce the written form. The Markdown is what the operator attaches to an issue; the structured
+/// form is what the UI renders.
+#[derive(Debug, Clone, Serialize)]
+pub struct DiagnosticBundle {
+    pub report: diagnostics::DiagnosticReport,
+    pub markdown: String,
+}
+
+/// Collect a structured, read-only diagnostic report for one device.
+///
+/// Read-only by construction: every command below inspects state. Nothing here writes a setting,
+/// installs, clears data or touches a user file, so the operator can run it on their own phone
+/// without approval for a specific command.
+///
+/// The report is assembled from raw command output by pure functions in `diagnostics`, so the same
+/// text can be re-parsed in a test. Where a command fails or returns nothing, the corresponding
+/// field stays `Unknown` rather than becoming a negative answer — an unreadable dump is not a
+/// denial, and a package name is not a component declaration.
+#[tauri::command]
+fn device_diagnostics(
+    app: tauri::AppHandle,
+    serial: String,
+) -> Result<DiagnosticBundle, String> {
+    let mut commands: Vec<diagnostics::CommandResult> = Vec::new();
+
+    let capture = |label: &str, args: &[&str]| {
+        let (stdout, record) = shell_captured(&app, &serial, args);
+        (stdout, record, label.to_string())
+    };
+
+    // 1. Every property the report needs, in one `getprop` invocation.
+    let (properties_raw, record, label) = capture("device properties", &["getprop"]);
+    let mut record = record;
+    let properties = diagnostics::parse_getprop_batch(&properties_raw);
+    record.parsed = format!("{} properties parsed", properties.len());
+    commands.push(diagnostics::CommandResult {
+        label,
+        command: record.command,
+        exit_code: record.exit_code,
+        stdout: record.stdout,
+        stderr: record.stderr,
+        parsed: record.parsed,
+    });
+
+    // 2. Package inventory with APK paths, so an APEX-shipped module is visible as such.
+    let (packages_raw, record, label) = capture("package inventory", &["pm", "list", "packages", "-f"]);
+    let listed = diagnostics::parse_pm_list_packages_f(&packages_raw);
+    let mut record = record;
+    record.parsed = format!("{} installed packages listed", listed.len());
+    commands.push(diagnostics::CommandResult {
+        label,
+        command: record.command,
+        exit_code: record.exit_code,
+        stdout: record.stdout,
+        stderr: record.stderr,
+        parsed: record.parsed,
+    });
+
+    // 3. For each package that could plausibly participate, read its dump once.
+    let mut records = Vec::new();
+    for (name, path) in &listed {
+        let Some((relevance, _)) = diagnostics::classify_package(name) else {
+            continue;
+        };
+
+        let (dump, record) = shell_captured(&app, &serial, &["dumpsys", "package", name]);
+        let dump_readable = !dump.trim().is_empty();
+        let receivers = if dump_readable {
+            diagnostics::parse_receivers(&dump)
+                .into_iter()
+                .filter(diagnostics::receiver_is_cellbroadcast)
+                .count()
+        } else {
+            0
+        };
+        let note = if !dump_readable {
+            "dump returned nothing; capabilities from this package are UNKNOWN, not denied"
+        } else if receivers > 0 {
+            "Cell Broadcast receiver declaration found"
+        } else {
+            "no Cell Broadcast receiver declaration in this package"
+        };
+
+        commands.push(diagnostics::CommandResult {
+            label: format!("package dump: {} [{}]", name, relevance.label()),
+            command: record.command,
+            exit_code: record.exit_code,
+            stdout: record.stdout,
+            stderr: record.stderr,
+            parsed: note.to_string(),
+        });
+
+        if let Some(entry) = diagnostics::package_record(name, vec![path.clone()], &dump) {
+            records.push(entry);
+        }
+    }
+
+    // Most relevant first, so a reader sees the component before the carrier configuration.
+    records.sort_by(|a, b| {
+        a.relevance
+            .cmp(&b.relevance)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    let report = diagnostics::build_report(&properties, &records, commands);
+    let markdown = diagnostics::render_report(&report);
+    Ok(DiagnosticBundle { report, markdown })
+}
+
+/// Inject one Cell Broadcast through the AOSP telephony test entry point.
+/// This is the root-free path: `GsmInboundSmsHandler` registers a receiver for
+/// `com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST` on `eng`/`userdebug` builds,
+/// and it decodes a Cell Broadcast PDU placed in the `pdu_string` extra. Running it needs only the
+/// ADB shell identity, not root, because the receiver is not a `<protected-broadcast>`.
+///
+/// Four things this deliberately does not do:
+///
+/// * It does not run on a production build. `ro.debuggable=0` means the receiver was never
+///   registered, so the broadcast would be accepted by `am` and silently discarded. Returning an
+///   honest "not available" is worth more than a command that looks like it worked.
+/// * It does not build a shell string. Arguments go to `Command::new(adb).args(..)` as a vector, so
+///   nothing in the body, the package name or the PDU can be reinterpreted by a shell on either
+///   side of the transport.
+/// * It does not claim delivery from the exit code. The verdict comes from downstream logcat
+///   markers, and an accepted-but-silent broadcast is reported as such.
+/// * It does not silently pick a channel. `channel` selects the message identifier, and the
+///   receive-side gate for the chosen channel is reported alongside the result, because the ETWS
+///   test channel this tool used to hardcode is disabled by default while ETWS primary is not.
+#[tauri::command]
+fn send_platform_test_alert(
+    app: tauri::AppHandle,
+    serial: String,
+    body: String,
+    channel: Option<u16>,
+) -> Result<PlatformSendResult, String> {
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !body.starts_with(REQUIRED_PREFIX) {
+        return Err(format!(
+            "Refusing to send: the body must begin with {REQUIRED_PREFIX} so the alert is \
+             unambiguously identifiable as a test."
+        ));
+    }
+
+    let channel_id = match channel {
+        Some(id) => id,
+        None => platform::default_alert_channel().message_id,
+    };
+    let channel = match platform::alert_channel(channel_id) {
+        Some(c) => c,
+        None => {
+            let known: Vec<String> = platform::ALERT_CHANNELS
+                .iter()
+                .map(|c| format!("0x{:04X} ({})", c.message_id, c.label))
+                .collect();
+            return Err(format!(
+                "Unknown alert channel 0x{channel_id:04X}. Known channels: {}",
+                known.join(", ")
+            ));
+        }
+    };
+
+    let mut diagnostics = Vec::new();
+    let mut harness_triggered = false;
+    let mut accepted = false;
+    let mut result = PlatformSendResult {
+        device_serial: serial.clone(),
+        body: body.clone(),
+        pdu_hex: String::new(),
+        message_id: String::new(),
+        channel_id: channel.message_id,
+        channel_label: channel.label.to_string(),
+        channel_gate: channel.gate.to_string(),
+        channel_requirement: channel.requirement.to_string(),
+        channel_enabled_by_default: channel.enabled_by_default,
+        entrypoint_available: PlatformState::Unknown,
+        stage: CapabilityStage::None,
+        verification_stage: platform::VerificationStage::NativePathSelected,
+        state: "UNKNOWN".to_string(),
+        message: String::new(),
+        failure: None,
+        evidence: Vec::new(),
+        logcat_excerpt: String::new(),
+        suppression: None,
+        diagnostics: Vec::new(),
+    };
+
+    // 1. Is the test entry point present at all?
+    let (debuggable, record) = shell_captured(&app, &serial, &["getprop", platform::DEBUGGABLE_PROPERTY]);
+    diagnostics.push(record);
+    let debuggable = debuggable.trim().to_string();
+
+    let candidates = cellbroadcast_candidates(&app, &serial);
+    let receiver = candidates.first().cloned();
+    let entrypoint = platform::assess_test_entrypoint(&debuggable, receiver.as_deref());
+    result.entrypoint_available = entrypoint.available;
+
+    // Clear evidence once, then choose the strongest native mechanism available.
+    let (_cleared, clear_record) = shell_captured(&app, &serial, &["logcat", "-c"]);
+    diagnostics.push(clear_record);
+
+    if channel.message_id == platform::MESSAGE_ID_ETWS_TEST
+        && official_cellbroadcast_harness_present(&app, &serial)
+    {
+        harness_triggered = send_via_official_test_harness(&app, &serial, &mut diagnostics)?;
+        if harness_triggered {
+            result.entrypoint_available = PlatformState::Granted;
+            result.stage = CapabilityStage::ReceiverDiscovered;
+            result.verification_stage = platform::VerificationStage::TriggerSent;
+            result.evidence.push(
+                "Official AOSP CellBroadcast test harness triggered ETWS TEST (0x1103).".to_string(),
+            );
+        }
+    }
+
+    // AOSP is preferred. If it is unavailable, inspect the live package registry for a
+    // narrowly-qualified exported diagnostic action. The parser only accepts TEST actions
+    // containing a Cell Broadcast/emergency token; arbitrary OEM actions are never guessed.
+    if !harness_triggered {
+    let package_dump = shell_captured(&app, &serial, &["dumpsys", "package"]);
+    diagnostics.push(package_dump.1);
+    let static_actions = platform::discover_test_actions(&package_dump.0);
+
+    // Dynamic receivers are invisible to the package resolver table. Inspect ActivityManager's
+    // live ReceiverList as a second, independent discovery surface before declaring the phone
+    // unsupported. This can catch a Samsung/vendor test receiver registered only at runtime.
+    let runtime_dump = shell_captured(&app, &serial, &["dumpsys", "activity", "broadcasts"]);
+    diagnostics.push(runtime_dump.1);
+    let runtime_actions = platform::discover_runtime_test_actions(&runtime_dump.0);
+
+    let mut discovered_actions = runtime_actions.clone();
+    for action in static_actions {
+        if !discovered_actions.iter().any(|existing| existing == &action) {
+            discovered_actions.push(action);
+        }
+    }
+
+    if !discovered_actions.is_empty() {
+        result.evidence.push(format!(
+            "Discovered native diagnostic test actions: {}",
+            discovered_actions.join(", ")
+        ));
+    }
+
+    // Prefer a runtime-discovered native action over property-only AOSP inference.
+    let native_action = runtime_actions
+        .first()
+        .cloned()
+        .or_else(|| {
+            if entrypoint.available == PlatformState::Granted {
+                Some(platform::TEST_TRIGGER_ACTION.to_string())
+            } else {
+                discovered_actions.first().cloned()
+            }
+        });
+
+    if native_action.is_none() {
+        result.state = "BLOCKED".to_string();
+        result.message = entrypoint.reason.clone();
+        result.failure = Some(entrypoint.available.label().to_string());
+        result.verification_stage = platform::VerificationStage::CapabilitiesDetected;
+        result.diagnostics = diagnostics;
+        return Ok(result);
+    }
+    // 2. Build the PDU here, from validated input, so the device receives a checked message.
+    let serial_number = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u16)
+        .unwrap_or(0))
+        .wrapping_add(1);
+    let pdu = platform::cb_pdu(channel.message_id, &body, serial_number)?;
+    let pdu_hex: String = pdu.iter().map(|byte| format!("{byte:02X}")).collect();
+    if let Some(header) = platform::parse_cb_header(&pdu) {
+        result.message_id = format!("0x{:04X} {}", header.message_id, header.message_id_label());
+    }
+    result.pdu_hex = pdu_hex.clone();
+    result.evidence.push(format!(
+        "PDU {} bytes, {pdu_hex}",
+        pdu.len()
+    ));
+    result.evidence.push(format!(
+        "channel {}: receive-side gate is {}; {}",
+        channel.label,
+        channel.gate,
+        if channel.enabled_by_default {
+            "enabled on a default device".to_string()
+        } else {
+            format!("disabled by default — {}", channel.requirement)
+        }
+    ));
+
+    // 3. Clear logcat so the evidence belongs only to this attempt.
+    let (_cleared, record) = shell_captured(&app, &serial, &["logcat", "-c"]);
+    diagnostics.push(record);
+
+    // 4. Send. Every argument is a separate argv element: no shell string is ever constructed.
+    let args = platform_test_alert_args(&serial, native_action.as_deref().unwrap_or(platform::TEST_TRIGGER_ACTION), &pdu_hex);
+    let (stdout, record) = run_captured(&app, &args);
+    // `am` reports a missing receiver on stdout while still exiting 0 on some builds, so the
+    // wording is checked as well as the exit code.
+    accepted = record.exit_code == Some(0) && !stdout.contains("Broadcast failed");
+    result.evidence.push(format!(
+        "am broadcast exit={:?} accepted_by_am={accepted}",
+        record.exit_code
+    ));
+    diagnostics.push(record);
+
+    }
+
+    // 5. Poll for downstream native evidence. A real phone can take several seconds to traverse
+    // telephony -> CellBroadcastService -> CellBroadcastAlertService -> native presentation.
+    const NATIVE_EVIDENCE_TIMEOUT: Duration = Duration::from_secs(15);
+    const NATIVE_EVIDENCE_POLL: Duration = Duration::from_millis(500);
+    let evidence_started = Instant::now();
+    let mut latest_logcat = String::new();
+    let mut platform_evidence = platform::PlatformEvidence::default();
+
+    loop {
+        thread::sleep(NATIVE_EVIDENCE_POLL);
+        let (logcat, record) = shell_captured(&app, &serial, &["logcat", "-d", "-t", "1200"]);
+        diagnostics.push(record);
+        latest_logcat = logcat;
+        platform_evidence = platform::scan_platform_logcat(&latest_logcat);
+
+        if platform_evidence.was_suppressed() || platform_evidence.alert_ui_requested {
+            break;
+        }
+        if evidence_started.elapsed() >= NATIVE_EVIDENCE_TIMEOUT {
+            break;
+        }
+    }
+
+    result.stage = platform_evidence.stage();
+    result.verification_stage = platform_evidence.verification_stage();
+    result.logcat_excerpt = truncate_for_log(&latest_logcat, 3000);
+
+    // 6. The verdict comes from downstream evidence, never from the exit code.
+    //
+    // Suppression is checked *first*. A gated message can still leave positive traces: the
+    // `CBAlertService: onStartCommand` line fires before the testing-mode and channel-range checks
+    // run, so a capture can contain both "the service started" and "the platform dropped it". The
+    // drop is the more specific and more final fact, and checking `pipeline_ran()` first would have
+    // reported such a run as `ALERT_DISPLAYED`.
+    if platform_evidence.was_suppressed() {
+        // The platform processed the message and then deliberately dropped it, and said why. This
+        // is a definite answer and a different one from "nothing was observed": the injection
+        // reached the Cell Broadcast stack, so re-running it cannot help. Report the gate instead
+        // of leaving the operator with an unexplained silence.
+        let suppression = platform_evidence.suppression.as_ref().expect("was_suppressed()");
+        result.state = "SUPPRESSED_BY_PLATFORM".to_string();
+        result.message = format!(
+            "The message reached the Cell Broadcast stack and the platform then discarded it, \
+             because {}. The injection itself worked; the device's own configuration is what \
+             prevented the alert.",
+            suppression.explain()
+        );
+        result.failure = Some("SUPPRESSED_BY_PLATFORM".to_string());
+        result.suppression = Some(suppression.clone());
+    } else if platform_evidence.alert_ui_requested {
+        result.state = "ALERT_DISPLAYED".to_string();
+        result.message = "Android's native Cell Broadcast alert presentation was requested by the platform.".to_string();
+    } else if harness_triggered {
+        result.state = "TRIGGER_SENT_NO_EVIDENCE".to_string();
+        result.message = "The privileged Cell Broadcast test harness was launched and its ETWS TEST control was tapped, but no native alert-pipeline evidence was observed.".to_string();
+        result.failure = Some("NO_NATIVE_ALERT_EVIDENCE_AFTER_HARNESS_TRIGGER".to_string());
+    } else if platform_evidence.pipeline_ran() {
+        result.state = "ACCEPTED_NO_EVIDENCE".to_string();
+        result.message = format!(
+            "The native Cell Broadcast pipeline produced evidence through {}, but the native alert presentation was not observed.",
+            result.stage.label()
+        );
+        result.failure = Some("NATIVE_ALERT_NOT_OBSERVED".to_string());
+    } else if accepted {
+        result.state = "ACCEPTED_NO_EVIDENCE".to_string();
+        result.message = "`am broadcast` was accepted, but no downstream Cell Broadcast log line \
+                          followed. Per this project's rule, that is not a delivery. The command \
+                          was accepted; Android did not act on it."
+            .to_string();
+        result.failure = Some("NO_DOWNSTREAM_EVIDENCE".to_string());
+    } else {
+        result.state = "REJECTED".to_string();
+        result.message = "The platform test broadcast was not accepted by this device.".to_string();
+        result.failure = Some("BROADCAST_REJECTED".to_string());
+    }
+
+    result.diagnostics = diagnostics;
+    if let Some(first) = result.evidence.first().cloned() {
+        emit_log(&app, format!("Platform test alert: {first}"), "info");
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     let (_, source) = adb_path(&app);
@@ -1562,7 +2434,8 @@ fn app_info(app: tauri::AppHandle) -> Result<AppInfo, String> {
     Ok(AppInfo {
         version: "1.0.0".to_string(),
         adb_source: source,
-        injector: injector_path(&app).is_some(),
+        // The shipped controller no longer bundles or uses the old system-UID injector.
+        injector: false,
     })
 }
 
@@ -1687,6 +2560,44 @@ fn request_cancel(
     Ok(())
 }
 
+
+fn platform_send_to_legacy_result(platform: PlatformSendResult, started: Instant) -> SendResult {
+    let device_serial = platform.device_serial.clone();
+    let success = platform.state == "ALERT_DISPLAYED";
+    let uncertain = platform.state == "ACCEPTED_NO_EVIDENCE";
+    let failure = platform.failure.clone();
+    SendResult {
+        device_serial: device_serial.clone(),
+        category: platform.channel_id as u32,
+        body: platform.body,
+        state: if success { "ALERT_DISPLAYED".to_string() } else if uncertain {
+            "UNCERTAIN".to_string()
+        } else {
+            "FAILED".to_string()
+        },
+        failure,
+        message: platform.message,
+        evidence: platform.evidence,
+        injector_exit_code: platform.diagnostics.iter()
+            .find(|p| p.command.contains("am broadcast"))
+            .and_then(|p| p.exit_code),
+        diagnostics: platform.diagnostics.into_iter().map(|p| DiagEvent {
+            stage: "NATIVE_PLATFORM_PROBE".to_string(),
+            serial: device_serial.clone(),
+            action: p.command,
+            detail: Some(p.parsed),
+            stdout: (!p.stdout.is_empty()).then_some(p.stdout),
+            stderr: (!p.stderr.is_empty()).then_some(p.stderr),
+            duration_ms: None,
+            timestamp: now_timestamp(),
+        }).collect(),
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        failed_stage: if success { None } else {
+            Some(format!("{:?}", platform.verification_stage))
+        },
+    }
+}
+
 #[tauri::command]
 async fn send_test_alert(
     app: tauri::AppHandle,
@@ -1700,6 +2611,7 @@ async fn send_test_alert(
     let cancel_store = cancel.inner().clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let send_started = Instant::now();
         let normalized_body = body.split_whitespace().collect::<Vec<_>>().join(" ");
         let normalized_body = if normalized_body.is_empty() {
             DEFAULT_BODY.to_string()
@@ -1717,6 +2629,7 @@ async fn send_test_alert(
             evidence: Vec::new(),
             injector_exit_code: None,
             diagnostics: Vec::new(),
+            duration_ms: None,
             failed_stage: None,
         };
 
@@ -1787,7 +2700,7 @@ async fn send_test_alert(
             "info",
         );
 
-        let mut device = parse_devices(&app)?
+        let device = parse_devices(&app)?
             .into_iter()
             .find(|device| device.serial == serial)
             .ok_or_else(|| "The selected device is no longer attached.".to_string())?;
@@ -1846,215 +2759,22 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
-            diag(
-                &app,
-                &mut result,
-                stage::LOCAL_SIMULATOR_CHECK,
-                "pm path",
-                Some("not installed; installing the bundled local simulator".to_string()),
-                None,
-                None,
-                "info",
-            );
-            match install_local_simulator(&app, &serial) {
-                Ok(message) => {
-                    device.local_simulator = true;
-                    device.state = DeviceState::SimulatorReady;
-                    device.support_level = SupportLevel::LocalSimulator;
-                    diag(
-                        &app,
-                        &mut result,
-                        stage::LOCAL_SIMULATOR_INSTALL,
-                        "adb install",
-                        Some(message),
-                        None,
-                        None,
-                        "ok",
-                    );
-                }
-                Err(error) => {
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::LOCAL_SIMULATOR_INSTALL,
-                        "LOCAL_SIMULATOR_INSTALL_FAILED",
-                        "adb install",
-                        error,
-                        None,
-                        None,
-                    );
-                    return Ok(result);
-                }
-            }
-        }
-
-        if matches!(device.state, DeviceState::SimulatorReady) {
-            let capabilities = simulator_capabilities(&app, &serial);
-            diag(
-                &app,
-                &mut result,
-                stage::CAPABILITY_CHECK,
-                "simulator capability probe",
-                Some(format!(
-                    "installed={} post_notifications={} full_screen_intent={} notifications_enabled={}",
-                    capabilities.installed,
-                    capabilities
-                        .post_notifications
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "n/a".to_string()),
-                    capabilities
-                        .full_screen_intent
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    capabilities
-                        .notifications_enabled
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                )),
-                None,
-                None,
-                if capabilities.installed { "info" } else { "warn" },
-            );
-
-            // A denied POST_NOTIFICATIONS means the receiver will run and Android will drop the
-            // notification silently. Saying so up front is the difference between an operator
-            // fixing a phone setting and an operator concluding the tool is broken.
-            if capabilities.post_notifications == Some(false) {
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::CAPABILITY_CHECK,
-                    "NOTIFICATION_PERMISSION_DENIED",
-                    "POST_NOTIFICATIONS",
-                    "Notification permission is not granted for Emergency Simulator Local. Grant notifications for that app on the phone, then retry.",
-                    None,
-                    None,
-                );
-                return Ok(result);
-            }
-
-            let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-
-            let script = local_simulator_command_script(
-                "EMERGENCY SIMULATOR TEST",
-                &normalized_body,
-                "TEST",
-                SERVICE_CATEGORY,
-            );
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_DISPATCH,
-                format!("adb -s {serial} shell {script}"),
-                Some("explicit component com.tirodz.emergencysimulator/.AlertReceiver".to_string()),
-                None,
-                None,
-                "info",
-            );
-
-            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
-                Ok(output) => output,
-                Err(error) => {
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::ADB_BROADCAST_RESULT,
-                        "ADB_TRANSPORT",
-                        "adb shell am broadcast",
-                        error,
-                        None,
-                        None,
-                    );
-                    return Ok(result);
-                }
-            };
-
-            result.injector_exit_code = output.status.code();
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let combined = output_text(&output).trim().to_string();
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_RESULT,
-                "adb shell am broadcast",
-                Some(format!("exit={:?}", output.status.code())),
-                Some(stdout.clone()).filter(|s| !s.is_empty()),
-                Some(stderr.clone()).filter(|s| !s.is_empty()),
-                if output.status.success() { "info" } else { "error" },
-            );
-
-            // The exit status of `am broadcast` is deliberately not treated as delivery evidence.
-            // It only means the command was accepted, so a failure here is reported and a success
-            // still has to be proved by the stage lines below.
-            if !output.status.success() {
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::ADB_BROADCAST_RESULT,
-                    "LOCAL_BROADCAST_FAILED",
-                    "adb shell am broadcast",
-                    if combined.is_empty() {
-                        "The broadcast command was rejected and produced no output.".to_string()
-                    } else {
-                        combined
-                    },
-                    Some(stdout).filter(|s| !s.is_empty()),
-                    Some(stderr).filter(|s| !s.is_empty()),
-                );
-                return Ok(result);
-            }
-
-            collect_local_simulator_evidence(
-                &app,
-                &serial,
-                &cancel_store,
-                &mut result,
-                &tx_store,
-            )?;
-            clear_cancel(&cancel_store, &serial);
-            let _ = persist_transactions(&app, &tx_store);
-            return Ok(result);
-        }
-
-        if !matches!(device.state, DeviceState::Ready) {
+        // Production Send Test Alert is native-only. Never install or invoke the local
+        // notification simulator from this action.
+        if matches!(device.state, DeviceState::Unauthorized | DeviceState::Offline | DeviceState::Unknown) {
+            let _ = set_tx(&app, &tx_store, &serial, None);
             let (failure_code, message) = match device.state {
-                DeviceState::Unauthorized => (
-                    "DEVICE_UNAUTHORIZED",
-                    "Accept the USB debugging authorization prompt on the phone first.",
-                ),
+                DeviceState::Unauthorized => ("DEVICE_UNAUTHORIZED", "Accept the USB debugging authorization prompt on the phone first."),
                 DeviceState::Offline => ("DEVICE_OFFLINE", "ADB reports this device as offline."),
-                DeviceState::NoRoot => (
-                    "NO_ROOT",
-                    "This stock/non-root device cannot use the controlled protected test path.",
-                ),
-                DeviceState::Unsupported => (
-                    "CELLBROADCAST_MISSING",
-                    "No CellBroadcast receiver package was detected.",
-                ),
-                DeviceState::Unknown => (
-                    "DEVICE_UNKNOWN",
-                    "The device is not in a known ADB-ready state.",
-                ),
-                DeviceState::Ready => ("UNKNOWN", "Device is ready."),
-                DeviceState::SimulatorReady => {
-                    ("LOCAL_SIMULATOR", "Local Android simulator is ready.")
-                }
+                DeviceState::Unknown => ("DEVICE_UNKNOWN", "The device is not in a known ADB-ready state."),
+                _ => ("DEVICE_NOT_READY", "The selected device is not ready for an ADB operation."),
             };
-
             fail_stage(
                 &app,
                 &mut result,
                 stage::DEVICE_CHECK,
                 failure_code,
-                "device state gate",
+                "adb device state",
                 message,
                 None,
                 None,
@@ -2062,300 +2782,40 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        let candidates = if device.cellbroadcast_candidates.is_empty() {
-            device
-                .cellbroadcast_package
-                .clone()
-                .into_iter()
-                .collect::<Vec<_>>()
-        } else {
-            device.cellbroadcast_candidates.clone()
-        };
-
-        if candidates.is_empty() {
-            fail_stage(
-                &app,
-                &mut result,
-                stage::DEVICE_CHECK,
-                "CELLBROADCAST_MISSING",
-                "cellbroadcast discovery",
-                "No CellBroadcast receiver package was detected.",
-                None,
-                None,
+        if dry_run {
+            let test_entrypoint = platform::assess_test_entrypoint(
+                &device.debuggable.clone().unwrap_or_default(),
+                device.cellbroadcast_package.as_deref(),
+            );
+            result.state = "READY_TO_SEND".to_string();
+            result.message = format!(
+                "Native-only dry run. AOSP test entry point: {}. No simulator will be installed and no device state will be changed.",
+                test_entrypoint.available.label()
             );
             return Ok(result);
         }
 
-        diag(
-            &app,
-            &mut result,
-            stage::DEVICE_CHECK,
-            "cellbroadcast candidates",
-            Some(candidates.join(", ")),
-            None,
-            None,
-            "ok",
-        );
-
-        let test_mode = prepare_test_mode(
-            &app,
-            &serial,
-            &candidates[0],
-            false,
-            &|message| emit_log(&app, message, "info"),
-        )?;
-
-        if !test_mode {
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "TEST_MODE_DISABLED",
-                "prepare_test_mode",
-                "The controlled test-alert preferences could not be established.",
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
-        if cancel_requested(&cancel_store, &serial) {
-            clear_cancel(&cancel_store, &serial);
-            result.state = "CANCELLED".to_string();
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "USER_CANCELLED",
-                "cancel requested",
-                "Operation cancelled before delivery.",
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
+        // The native platform receiver is the only production send path. It may be the standard
+        // AOSP test receiver or a narrowly-qualified exported OEM test action discovered live by
+        // send_platform_test_alert; either way, downstream Cell Broadcast evidence is required.
         set_tx(&app, &tx_store, &serial, Some(TxState::Busy))?;
-
-        let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-
-        if let Err(error) = push_injector(&app, &serial) {
-            let _ = set_tx(&app, &tx_store, &serial, None);
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "INJECTOR_FAILURE",
-                "adb push alertinject.jar",
-                error,
-                None,
-                None,
-            );
-            return Ok(result);
-        }
-
-        emit_log(&app, "Injector pushed to the controlled device", "ok");
-
-        emit_log(
-            &app,
-            format!("Sending ETWS TEST; category {SERVICE_CATEGORY}"),
-            "info",
-        );
-
-        // One pre-quoted string, passed as a single `adb shell` argument. Handing adb separate
-        // argv elements would let it join them unquoted and let the device shell re-split the
-        // body on whitespace and act on metacharacters.
-        //
-        // Each candidate is tried in the same, already-prepared test-mode context. The next
-        // candidate is attempted *only* when the platform explicitly rejected the broadcast for
-        // the one just tried -- never on a timeout or a plain absence of evidence, because that
-        // would risk stacking a second alert on a device that may already be showing the first.
-        let mut last_detail: Option<String> = None;
-
-        for (index, package) in candidates.iter().enumerate() {
-            if cancel_requested(&cancel_store, &serial) {
-                clear_cancel(&cancel_store, &serial);
-                result.state = "CANCELLED".to_string();
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::TEST_FAILED,
-                    "USER_CANCELLED",
-                    "cancel requested",
-                    "Operation cancelled before delivery.",
-                    None,
-                    None,
-                );
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                return Ok(result);
-            }
-
-            if index > 0 {
-                emit_log(
-                    &app,
-                    format!("Retrying with alternate receiver: {package}"),
-                    "warn",
-                );
-                let _ = adb_call(&app, &["-s", &serial, "logcat", "-c"]);
-            }
-
-            let script = injector_command_script(package, &normalized_body);
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_DISPATCH,
-                format!("adb -s {serial} shell {script}"),
-                Some(format!("cellbroadcast receiver {package}")),
-                None,
-                None,
-                "info",
-            );
-
-            let output = match command_output(&app, &["-s", &serial, "shell", &script]) {
-                Ok(output) => output,
-                Err(error) => {
-                    // adb could not be started at all, so no broadcast was sent. Clearing the
-                    // gate lets the operator retry; leaving it Busy would lock the device out
-                    // until the safety state was reset by hand.
-                    let _ = set_tx(&app, &tx_store, &serial, None);
-                    result.state = "FAILED".to_string();
-                    fail_stage(
-                        &app,
-                        &mut result,
-                        stage::ADB_BROADCAST_RESULT,
-                        "ADB_TRANSPORT",
-                        "adb shell app_process",
-                        error,
-                        None,
-                        None,
-                    );
-                    clear_cancel(&cancel_store, &serial);
-                    return Ok(result);
-                }
-            };
-
-            result.injector_exit_code = output.status.code();
-
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            let injector_text = output_text(&output);
-
-            diag(
-                &app,
-                &mut result,
-                stage::ADB_BROADCAST_RESULT,
-                "adb shell app_process",
-                Some(format!("exit={:?}", output.status.code())),
-                Some(stdout).filter(|s| !s.is_empty()),
-                Some(stderr).filter(|s| !s.is_empty()),
-                if output.status.success() { "info" } else { "error" },
-            );
-
-            // An injector that never ran as root cannot have produced an alert, and saying so is
-            // more useful than reporting "no evidence". `app_process` exits 0 either way, so the
-            // exit code alone cannot distinguish this; only the injector's own refusal text can.
-            if !output.status.success() || injector_text.contains("Permission Denial") {
-                let detail = injector_text
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("the injector produced no output")
-                    .trim()
-                    .to_string();
-
-                let _ = set_tx(&app, &tx_store, &serial, None);
-                result.state = "FAILED".to_string();
-                fail_stage(
-                    &app,
-                    &mut result,
-                    stage::ADB_BROADCAST_RESULT,
-                    "INJECTOR_FAILURE",
-                    "on-device injector identity",
-                    format!("The on-device injector did not run as a system identity. {detail}"),
-                    None,
-                    None,
-                );
-                clear_cancel(&cancel_store, &serial);
-                return Ok(result);
-            }
-
-            collect_evidence(
-                &app,
-                &serial,
-                &cancel_store,
-                &mut result,
-                &tx_store,
-            )?;
-
-            if result.state == "CANCELLED" {
-                clear_cancel(&cancel_store, &serial);
-                return Ok(result);
-            }
-
-            let rejected = result.state == "FAILED"
-                && result.failure.as_deref() == Some("BROADCAST_REJECTED");
-
-            if !rejected {
-                break;
-            }
-
-            last_detail = Some(format!(
-                "Android rejected the protected broadcast for {package}."
-            ));
-            let _ = set_tx(&app, &tx_store, &serial, None);
-
-            // A rejection produced no downstream evidence, so nothing is on screen and trying the
-            // next candidate cannot stack an alert.
-            if index + 1 >= candidates.len() {
-                break;
-            }
-
-            result.evidence.clear();
-            result.state = "FAILED".to_string();
-            result.failure = Some("BROADCAST_REJECTED".to_string());
-        }
-
-        if result.state == "FAILED" && result.failure.as_deref() == Some("BROADCAST_REJECTED") {
-            if let Some(detail) = last_detail {
-                result.message = if candidates.len() > 1 {
-                    format!("{detail} No alternate CellBroadcast receiver on this device accepted it.")
-                } else {
-                    detail
-                };
+        let platform_result = send_platform_test_alert(
+            app.clone(),
+            serial.clone(),
+            normalized_body.clone(),
+            Some(platform::default_alert_channel().message_id),
+        )?;
+        let mapped = platform_send_to_legacy_result(platform_result, send_started);
+        match mapped.state.as_str() {
+            "ALERT_DISPLAYED" => set_tx(&app, &tx_store, &serial, Some(TxState::Delivered))?,
+            "UNCERTAIN" => set_tx(&app, &tx_store, &serial, Some(TxState::Uncertain))?,
+            _ => {
+                tx_store.map.lock().unwrap().remove(&serial);
             }
         }
-
         let _ = persist_transactions(&app, &tx_store);
         clear_cancel(&cancel_store, &serial);
-
-        if result.state == "ALERT_DISPLAYED" {
-            diag(
-                &app,
-                &mut result,
-                stage::TEST_COMPLETE,
-                "delivery verdict",
-                Some("ALERT_DISPLAYED".to_string()),
-                None,
-                None,
-                "ok",
-            );
-        } else if result.failure.is_none() {
-            // Reached the end without a verdict and without an explicit failure. Recorded so an
-            // unexplained outcome is never silently reported as a success.
-            let unfinished = result.state.clone();
-            fail_stage(
-                &app,
-                &mut result,
-                stage::TEST_FAILED,
-                "NO_VERDICT",
-                "delivery verdict",
-                format!("The pipeline finished in state {unfinished} without downstream evidence."),
-                None,
-                None,
-            );
-        }
-
-        Ok(result)
+        Ok(mapped)
     })
     .await
     .map_err(|error| format!("Controller worker failed: {error}"))?
@@ -2394,6 +2854,49 @@ fn reset_safety_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG-021: the injection command named a bare package with `-n`, included a `format` extra the
+    /// handler does not read, and omitted the `phone_id` selector. `-n` takes `package/class`, so
+    /// `am` rejected the arguments outright and the attempt could never have reached the receiver on
+    /// any device. Asserted as a whole argv: the point is that a stray `-n` or a wrong extra must
+    /// fail the build rather than be read as a device limitation.
+    ///
+    /// `phone_id` is now deliberately *absent* rather than pinned to `0`. See the note on
+    /// `platform_test_alert_args`: pinning it makes the receiver return silently on a device whose
+    /// active subscription is not phone 0, which is indistinguishable from a missing receiver.
+    #[test]
+    fn platform_test_injection_matches_the_aosp_contract() {
+        let args = platform_test_alert_args("R5CXA1B2C3D", platform::TEST_TRIGGER_ACTION, "00001100");
+        assert_eq!(
+            args,
+            vec![
+                "-s",
+                "R5CXA1B2C3D",
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                "com.android.internal.telephony.gsm.TEST_TRIGGER_CELL_BROADCAST",
+                "--es",
+                "pdu_string",
+                "00001100",
+                "--es",
+                "pdu",
+                "00001100",
+            ]
+        );
+        // The regressions, stated directly so the reason survives a refactor of the vector.
+        assert!(!args.contains(&"-n"), "the test receiver has no manifest component to target");
+        assert!(!args.windows(2).any(|w| w == ["--es", "format"]));
+        assert!(
+            !args.contains(&"phone_id"),
+            "pinning phone_id makes the receiver return silently off phone 0"
+        );
+        assert!(
+            !args.windows(2).any(|w| w == ["--ei", "phone_id"]),
+            "phone_id must not be pinned to a fixed slot"
+        );
+    }
 
     /// The defect this guards is the one BUG-001 recorded in the retired Python controller: a
     /// multi-word body arriving at the injector as several shell words, so only the first was
@@ -2689,6 +3192,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             adb_diagnostics,
+            platform_diagnostics,
+            device_diagnostics,
+            send_platform_test_alert,
+            list_alert_channels,
             adb_pair,
             adb_connect,
             restart_adb_server,

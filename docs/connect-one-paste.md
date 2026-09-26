@@ -127,6 +127,9 @@ $token = "<TOKEN>"
       Warn "  Continuing anyway - tasks that do not use adb still run."
   } else {
       Good "  device: $($devices[0].Split("`t")[0])"
+      # Recorded for step 5. Without this assignment step 5 tested an empty variable and always
+      # reported "no phone attached", so the did-anything-change check never actually ran.
+      $script:Device = $devices[0].Split("`t")[0]
   }
 
   # ---------------------------------------------------------------------------

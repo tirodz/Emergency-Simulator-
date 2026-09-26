@@ -29,4 +29,14 @@ android {
             isMinifyEnabled = false
         }
     }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+}
+
+dependencies {
+    // Plain JVM unit tests. `AlertRequest` is deliberately free of Android framework types so the
+    // validation and the log-injection guard can be tested without an emulator or Robolectric.
+    testImplementation("junit:junit:4.13.2")
 }
