@@ -80,6 +80,38 @@ pub fn discover_runtime_test_actions(dumpsys: &str) -> Vec<String> {
     out
 }
 
+/// Return exported Samsung test activities whose component names explicitly identify an
+/// emergency/CellBroadcast/CMAS/ETWS test surface. This is intentionally narrower than a generic
+/// exported-component sweep so a random Samsung activity can never become an implicit trigger.
+pub fn discover_oem_test_components(dumpsys: &str) -> Vec<String> {
+    let mut package = String::new();
+    let mut exported = false;
+    let mut out = Vec::new();
+    for raw in dumpsys.lines() {
+        let line = raw.trim();
+        if line.starts_with("Package [") {
+            package = line.split_once('[').and_then(|(_, r)| r.split_once(']').map(|(p, _)| p.to_string())).unwrap_or_default();
+            exported = false;
+        } else if line.starts_with("Activity{") || line.contains("ActivityRecord{") {
+            exported = line.contains("exported=true");
+        } else if line.starts_with("android:name=") && exported {
+            let lower = line.to_ascii_lowercase();
+            let relevant = package.to_ascii_lowercase().contains("samsung")
+                && ["test", "cmas", "etws", "cellbroadcast", "emergency"].iter().any(|t| lower.contains(t));
+            if relevant {
+                let name = line
+                    .split_once('"').and_then(|(_, r)| r.split_once('"').map(|(v, _)| v.to_string()))
+                    .unwrap_or_else(|| line.to_string());
+                if !out.iter().any(|v| v == &format!("{}/{}", package, name)) {
+                    out.push(format!("{}/{}", package, name));
+                }
+            }
+        }
+    }
+    out.truncate(20);
+    out
+}
+
 /// Discover exported diagnostic receiver actions from package-manager output.
 /// Only actions explicitly named as TEST plus a broadcast/emergency token are returned.
 pub fn discover_test_actions(dumpsys: &str) -> Vec<String> {
