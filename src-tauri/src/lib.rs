@@ -1168,10 +1168,10 @@ fn parse_devices(app: &tauri::AppHandle) -> Result<Vec<Device>, String> {
             (DeviceState::Unsupported, SupportLevel::Unsupported)
         } else {
             notes.push(
-                "Stock/non-root device. Install the bundled local simulator to test alert UI without root."
+                "Stock/non-root device with native Cell Broadcast stack detected. The sender will use the native CellBroadcastReceiver path; no local simulator is required."
                     .to_string(),
             );
-            (DeviceState::NoRoot, SupportLevel::RootRequired)
+            (DeviceState::Ready, SupportLevel::Supported)
         };
 
         devices.push(Device {
@@ -1846,7 +1846,7 @@ async fn send_test_alert(
             return Ok(result);
         }
 
-        if matches!(device.state, DeviceState::NoRoot | DeviceState::Unsupported) {
+        if matches!(device.state, DeviceState::Unsupported) {
             diag(
                 &app,
                 &mut result,
@@ -2097,26 +2097,39 @@ async fn send_test_alert(
             "ok",
         );
 
-        let test_mode = prepare_test_mode(
-            &app,
-            &serial,
-            &candidates[0],
-            false,
-            &|message| emit_log(&app, message, "info"),
-        )?;
+        if device.root {
+            let test_mode = prepare_test_mode(
+                &app,
+                &serial,
+                &candidates[0],
+                false,
+                &|message| emit_log(&app, message, "info"),
+            )?;
 
-        if !test_mode {
-            fail_stage(
+            if !test_mode {
+                fail_stage(
+                    &app,
+                    &mut result,
+                    stage::TEST_FAILED,
+                    "TEST_MODE_DISABLED",
+                    "prepare_test_mode",
+                    "The controlled test-alert preferences could not be established.",
+                    None,
+                    None,
+                );
+                return Ok(result);
+            }
+        } else {
+            diag(
                 &app,
                 &mut result,
-                stage::TEST_FAILED,
-                "TEST_MODE_DISABLED",
-                "prepare_test_mode",
-                "The controlled test-alert preferences could not be established.",
+                stage::CAPABILITY_CHECK,
+                "native Cell Broadcast receiver",
+                Some("stock production build; skipping root-only preference file modification; using device test-alert configuration".to_string()),
                 None,
                 None,
+                "info",
             );
-            return Ok(result);
         }
 
         if cancel_requested(&cancel_store, &serial) {
@@ -2255,7 +2268,9 @@ async fn send_test_alert(
             // An injector that never ran as root cannot have produced an alert, and saying so is
             // more useful than reporting "no evidence". `app_process` exits 0 either way, so the
             // exit code alone cannot distinguish this; only the injector's own refusal text can.
-            if !output.status.success() || injector_text.contains("Permission Denial") {
+            if !output.status.success()
+                || injector_text.contains("Permission Denial")
+                || injector_text.contains("SecurityException") {
                 let detail = injector_text
                     .lines()
                     .find(|line| !line.trim().is_empty())
