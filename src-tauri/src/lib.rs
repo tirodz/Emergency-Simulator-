@@ -683,9 +683,6 @@ fn send_via_official_test_harness(
         return Ok(false);
     }
 
-    let (_ignored, rec) = shell_captured(app, serial, &["logcat", "-c"]);
-    diagnostics.push(rec);
-
     let (_out, rec) = shell_captured(app, serial, &[
         "am", "start", "-n",
         "com.android.cellbroadcastreceiver.tests/.SendTestBroadcastActivity",
@@ -2198,6 +2195,7 @@ fn send_platform_test_alert(
     };
 
     let mut diagnostics = Vec::new();
+    let mut harness_triggered = false;
     let mut result = PlatformSendResult {
         device_serial: serial.clone(),
         body: body.clone(),
@@ -2230,9 +2228,28 @@ fn send_platform_test_alert(
     let entrypoint = platform::assess_test_entrypoint(&debuggable, receiver.as_deref());
     result.entrypoint_available = entrypoint.available;
 
+    // Clear evidence once, then choose the strongest native mechanism available.
+    let (_cleared, clear_record) = shell_captured(&app, &serial, &["logcat", "-c"]);
+    diagnostics.push(clear_record);
+
+    if channel.message_id == platform::MESSAGE_ID_ETWS_TEST
+        && official_cellbroadcast_harness_present(&app, &serial)
+    {
+        harness_triggered = send_via_official_test_harness(&app, &serial, &mut diagnostics)?;
+        if harness_triggered {
+            result.entrypoint_available = PlatformState::Granted;
+            result.stage = CapabilityStage::ReceiverDiscovered;
+            result.verification_stage = platform::VerificationStage::TriggerSent;
+            result.evidence.push(
+                "Official AOSP CellBroadcast test harness triggered ETWS TEST (0x1103).".to_string(),
+            );
+        }
+    }
+
     // AOSP is preferred. If it is unavailable, inspect the live package registry for a
     // narrowly-qualified exported diagnostic action. The parser only accepts TEST actions
     // containing a Cell Broadcast/emergency token; arbitrary OEM actions are never guessed.
+    if !harness_triggered {
     let package_dump = shell_captured(&app, &serial, &["dumpsys", "package"]);
     diagnostics.push(package_dump.1);
     let static_actions = platform::discover_test_actions(&package_dump.0);
@@ -2320,6 +2337,8 @@ fn send_platform_test_alert(
         record.exit_code
     ));
     diagnostics.push(record);
+
+    }
 
     // 5. Poll for downstream native evidence. A real phone can take several seconds to traverse
     // telephony -> CellBroadcastService -> CellBroadcastAlertService -> native presentation.
